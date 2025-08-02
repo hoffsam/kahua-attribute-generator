@@ -90,12 +90,30 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
 
 
   // Join each category of snippets together so they're grouped in the output.
-  const result = Object.entries(expanded)
+  const generatedXml = Object.entries(expanded)
     .map(([key, lines]: [string, string[]]) =>
       `<!-- ${key} -->\n${lines.join('\n')}`
     ).join('\n\n');
     
-  // Write the result to the clipboard. VS Code automatically handles asynchronous copy.
-  await vscode.env.clipboard.writeText(result);
-  vscode.window.showInformationMessage('Kahua XML generated to clipboard.');
+  // Get the output target setting
+  const outputTarget = vscode.workspace.getConfiguration().get<string>('kahua.outputTarget') || 'clipboard';
+
+  if (outputTarget === 'newEditor') {
+    // Open in new editor window
+    const newDocument = await vscode.workspace.openTextDocument({
+      content: generatedXml,
+      language: 'xml'
+    });
+
+    await vscode.window.showTextDocument(newDocument, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: false
+    });
+
+    vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes in new editor window`);
+  } else {
+    // Copy to clipboard (existing behavior)
+    await vscode.env.clipboard.writeText(generatedXml);
+    vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes copied to clipboard`);
+  }
 }
