@@ -59,80 +59,36 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
   };
 
   // For each line produce a set of XML snippet parts.
-  const snippets = lines.map(rawLine => {
-    // Split the line by commas into up to three parts: AttributeName, Prefix/EntityName, DataType
-    const parts = rawLine.split(',').map(p => p.trim()).filter(Boolean);
-    if (parts.length === 0) {
-      return null;
-    }
+  const fragmentTemplates = vscode.workspace.getConfiguration().get<Record<string, string>>('kahua.fragments') || {};
+
+  const expanded: Record<string, string[]> = {};
+  for (const line of lines) {
+    const parts = line.split(',').map(p => p.trim()).filter(Boolean);
+    if (!parts.length) continue;
+
     const rawName = parts[0];
     const name = rawName.replace(/[^A-Za-z0-9]/g, '');
     const label = rawName;
-    let linePrefix: string;
-    let dataType: string;
-    if (parts.length >= 2) {
-      // If a second part is provided, treat it as the prefix for this line.
-      linePrefix = parts[1];
-      dataType = parts.length >= 3 ? parts[2] : 'Text';
-    } else {
-      // Only attribute provided. Use the first EntityDef name as prefix if present, otherwise fall back to modePrefix.
-      linePrefix = firstEntityName || modePrefix;
-      dataType = 'Text';
-    }
-    // If linePrefix is still empty, fall back to modePrefix.
-    if (!linePrefix) {
-      linePrefix = modePrefix;
-    }
+    const prefix = parts[1] || firstEntityName || modePrefix;
+    const type = parts[2] || 'Text';
 
-    // Build up tokens by replacing placeholders with actual values.
-    const labelToken = format('attributeLabelFormat', '[{prefix}_{name}Label]')
-      .replace('{prefix}', linePrefix)
-      .replace('{name}', name);
-    const descToken = format('attributeDescriptionFormat', '[{prefix}_{name}Description]')
-      .replace('{prefix}', linePrefix)
-      .replace('{name}', name);
-    const dataTagName = format('dataTagNameFormat', '{prefix}_{name}')
-      .replace('{prefix}', linePrefix)
-      .replace('{name}', name);
-    const labelKey = format('labelKeyFormat', '{prefix}_{name}Label')
-      .replace('{prefix}', linePrefix)
-      .replace('{name}', name);
-    const labelDescKey = `${linePrefix}_${name}Description`;
-    const labelVal = format('labelValueFormat', '{label}').replace('{label}', label);
-    // We reuse the same label for the description entry; users can override via settings if needed.
-    const descVal = label;
+    for (const [key, template] of Object.entries(fragmentTemplates)) {
+      const rendered = template
+        .replaceAll('{prefix}', prefix)
+        .replaceAll('{name}', name)
+        .replaceAll('{label}', label)
+        .replaceAll('{type}', type);
+      (expanded[key] ??= []).push(rendered);
+    }
+  }
 
-    return {
-      attribute: `<Attribute Name="${name}" Label="${labelToken}" Description="${descToken}" DataType="${dataType}" IsConfigurable="true" />`,
-      // Two label entries: one for the main label and one for the description
-      labels: [
-        `<Label Key="${labelKey}">${labelVal}</Label>`,
-        `<Label Key="${labelDescKey}">${descVal}</Label>`
-      ],
-      datatag: `<DataTag Name="${dataTagName}" Key="${dataTagName}" Label="${labelToken}" CultureLabelKey="${labelKey}" />`,
-      field: `<Field Attribute="${name}" />`,
-      fieldDef: `<FieldDef Name="${name}" Path="${name}" DataTag="${dataTagName}" Edit.Path="${name}" />`
-    };
-  }).filter(Boolean) as Array<{
-    attribute: string;
-    labels: string[];
-    datatag: string;
-    field: string;
-    fieldDef: string;
-  }>;
 
   // Join each category of snippets together so they're grouped in the output.
-  const joined = {
-    attributes: snippets.map(s => s.attribute).join('\n'),
-    labels: snippets.flatMap(s => s.labels).join('\n'),
-    dataTags: snippets.map(s => s.datatag).join('\n'),
-    fields: snippets.map(s => s.field).join('\n'),
-    fieldDefs: snippets.map(s => s.fieldDef).join('\n')
-  };
-
-  // Compose the final result with descriptive comments for each block.
-  const result = `<!-- Attributes -->\n${joined.attributes}\n\n<!-- Labels -->\n${joined.labels}\n\n<!-- DataTags -->\n${joined.dataTags}\n\n<!-- DataStore Fields -->\n${joined.fields}\n\n<!-- FieldDefs -->\n${joined.fieldDefs}`;
-
+  const result = Object.entries(expanded)
+    .map(([key, lines]: [string, string[]]) =>
+      `<!-- ${key} -->\n${lines.join('\n')}`
+    ).join('\n\n');
+    
   // Write the result to the clipboard. VS Code automatically handles asynchronous copy.
   await vscode.env.clipboard.writeText(result);
   vscode.window.showInformationMessage('Kahua XML generated to clipboard.');

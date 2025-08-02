@@ -18,11 +18,11 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
-    "typescript": "^5.4.0",
-    "vsce": "^2.17.0"
+    "typescript": "^5.4.0"
   },
   "activationEvents": [
-
+    "onCommand:kahua.createExtensionAttributes",
+    "onCommand:kahua.createSupplementAttributes"
   ],
   "contributes": {
     "menus": {
@@ -35,18 +35,28 @@
           "command": "kahua.createSupplementAttributes",
           "when": "editorTextFocus && editorHasSelection"
         }
+      ],
+      "editor/context": [
+        {
+          "command": "kahua.createExtensionAttributes",
+          "when": "kahua.showInContextMenu && editorTextFocus && editorHasSelection",
+          "group": "navigation"
+        },
+        {
+          "command": "kahua.createSupplementAttributes",
+          "when": "kahua.showInContextMenu && editorTextFocus && editorHasSelection",
+          "group": "navigation"
+        }
       ]
     },
     "commands": [
       {
         "command": "kahua.createExtensionAttributes",
-        "title": "Create Attributes From Selection For Extension",
-        "category": "Kahua"
+        "title": "Kahua: Create Attributes From Selection For Extension"
       },
       {
         "command": "kahua.createSupplementAttributes",
-        "title": "Create Attributes From Selection For Supplement",
-        "category": "Kahua"
+        "title": "KAhua: Create Attributes From Selection For Supplement"
       }
     ],
     "keybindings": [
@@ -56,48 +66,32 @@
         "when": "editorTextFocus && editorHasSelection"
       },
       {
-        "command": "kahua.createSupplementAttributes  && editorHasSelection",
+        "command": "kahua.createSupplementAttributes",
         "key": "ctrl+alt+s",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus && editorHasSelection"
       }
     ],
     "configuration": {
       "title": "Kahua Attribute Generator",
       "properties": {
-        "kahua.tokens.attributeLabelFormat": {
-          "type": "string",
-          "default": "[{prefix}_{name}Label]",
-          "description": "Format for attribute label token. {prefix} and {name} will be replaced."
+        "kahua.showInContextMenu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Kahua generator commands in the editor right-click context menu."
         },
-        "kahua.tokens.attributeDescriptionFormat": {
-          "type": "string",
-          "default": "[{prefix}_{name}Description]",
-          "description": "Format for attribute description token. {prefix} and {name} will be replaced."
-        },
-        "kahua.tokens.dataTagNameFormat": {
-          "type": "string",
-          "default": "{prefix}_{name}",
-          "description": "Format for DataTag Name. {prefix} and {name} will be replaced."
-        },
-        "kahua.tokens.labelKeyFormat": {
-          "type": "string",
-          "default": "{prefix}_{name}Label",
-          "description": "Format for label key. {prefix} and {name} will be replaced."
-        },
-        "kahua.tokens.labelValueFormat": {
-          "type": "string",
-          "default": "{label}",
-          "description": "Format for label value. {label} will be replaced with the selected text."
-        },
-        "kahua.defaultPrefix.extension": {
-          "type": "string",
-          "default": "_",
-          "description": "Default prefix for attributes generated in extension mode."
-        },
-        "kahua.defaultPrefix.supplement": {
-          "type": "string",
-          "default": "_",
-          "description": "Default prefix for attributes generated in supplement mode."
+        "kahua.fragments": {
+          "type": "object",
+          "default": {
+            "attribute": "<Attribute Name=\"{name}\" Label=\"[{prefix}_{name}Label]\" Description=\"[{prefix}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
+            "label": "<Label Key=\"{prefix}_{name}Label\">{label}</Label>",
+            "descriptionLabel": "<Label Key=\"{prefix}_{name}Description\">{label}</Label>",
+            "dataTag": "<DataTag Name=\"{prefix}_{name}\" Key=\"{prefix}_{name}\" Label=\"[{prefix}_{name}Label]\" CultureLabelKey=\"{prefix}_{name}Label\" />",
+            "field": "<Field Attribute=\"{name}\" />",
+            "fieldDef": "<FieldDef Name=\"{name}\" Path=\"{name}\" DataTag=\"{prefix}_{name}\" Edit.Path=\"{name}\" />",
+            "dataStoreColumn": "<Column AttributeName=\"{name}\" />",
+            "logField": "<Field FieldDef=\"{name}\" />"
+          },
+          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments."
         }
       }
     }
