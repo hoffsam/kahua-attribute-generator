@@ -1,11 +1,11 @@
 {
   "name": "kahua-attribute-generator",
   "displayName": "Kahua Attribute Generator",
-  "description": "Generate Kahua XML attribute, label, DataTag, Field and FieldDef fragments from selected lines.",
-  "version": "1.1.0",
+  "description": "Generate XML for Kahua App Def attribute, label, DataTag, Data Store Column, FieldDef, etc from selected lines.",
+  "version": "1.3.0",
   "publisher": "Sammy",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Other"
@@ -17,7 +17,7 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.85.0",
     "typescript": "^5.4.0"
   },
   "activationEvents": [
@@ -28,35 +28,42 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "kahua.createExtensionAttributes",
-          "when": "editorTextFocus && editorHasSelection"
+          "command": "kahua.createExtensionAttributes"
         },
         {
-          "command": "kahua.createSupplementAttributes",
-          "when": "editorTextFocus && editorHasSelection"
+          "command": "kahua.createSupplementAttributes"
         }
       ],
       "editor/context": [
         {
-          "command": "kahua.createExtensionAttributes",
-          "when": "kahua.showInContextMenu && editorTextFocus && editorHasSelection",
+          "submenu": "kahua.submenu",
+          "when": "config.kahua.showInContextMenu",
           "group": "navigation"
+        }
+      ],
+      "kahua.submenu": [
+        {
+          "command": "kahua.createExtensionAttributes"
         },
         {
-          "command": "kahua.createSupplementAttributes",
-          "when": "kahua.showInContextMenu && editorTextFocus && editorHasSelection",
-          "group": "navigation"
+          "command": "kahua.createSupplementAttributes"
         }
       ]
     },
+    "submenus": [
+      {
+        "id": "kahua.submenu",
+        "label": "Kahua"
+      }
+    ],
     "commands": [
       {
         "command": "kahua.createExtensionAttributes",
-        "title": "Kahua: Create Attributes From Selection For Extension"
+        "title": "Kahua: Generate Extension Attributes from Selection"
       },
       {
         "command": "kahua.createSupplementAttributes",
-        "title": "KAhua: Create Attributes From Selection For Supplement"
+        "title": "Kahua: Generate Supplement Attributes from Selection"
       }
     ],
     "keybindings": [

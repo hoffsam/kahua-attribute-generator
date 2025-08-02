@@ -7,9 +7,15 @@ import * as vscode from 'vscode';
 export function activate(context: vscode.ExtensionContext) {
   // Register commands for both extension and supplement modes. Each will call
   // the shared handler with the appropriate mode string.
+  // This allows the extension to be used from the command palette or context menu.
+  // The commands are registered with the context so they can be disposed of when the extension is deactivated.
+  // The commands are also added to the context menu for easy access.
+  // The context variable 'kahua.showInContextMenu' is set to true to enable
+  // the context menu items when the editor has focus and a selection is made.
+  vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.createExtensionAttributes', () => handleSelection('extension')),
-    vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement'))
+    vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement')),
   );
 }
 
