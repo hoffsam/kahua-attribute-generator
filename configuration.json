@@ -1,0 +1,7 @@
+{
+  "attributeLabelFormat": "[{prefix}_{name}Label]",
+  "attributeDescriptionFormat": "[{prefix}_{name}Description]",
+  "dataTagNameFormat": "{prefix}_{name}",
+  "labelKeyFormat": "{prefix}_{name}Label",
+  "labelValueFormat": "{label}"
+}

@@ -1,0 +1,110 @@
+{
+  "name": "kahua-attribute-generator",
+  "displayName": "Kahua Attribute Generator",
+  "description": "Generate Kahua XML attribute, label, DataTag, Field and FieldDef fragments from selected lines.",
+  "version": "1.1.0",
+  "publisher": "Sammy",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0",
+    "vsce": "^2.17.0"
+  },
+  "activationEvents": [
+
+  ],
+  "contributes": {
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "kahua.createExtensionAttributes",
+          "when": "editorTextFocus && editorHasSelection"
+        },
+        {
+          "command": "kahua.createSupplementAttributes",
+          "when": "editorTextFocus && editorHasSelection"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kahua.createExtensionAttributes",
+        "title": "Create Attributes From Selection For Extension",
+        "category": "Kahua"
+      },
+      {
+        "command": "kahua.createSupplementAttributes",
+        "title": "Create Attributes From Selection For Supplement",
+        "category": "Kahua"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kahua.createExtensionAttributes",
+        "key": "ctrl+alt+e",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "kahua.createSupplementAttributes  && editorHasSelection",
+        "key": "ctrl+alt+s",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Kahua Attribute Generator",
+      "properties": {
+        "kahua.tokens.attributeLabelFormat": {
+          "type": "string",
+          "default": "[{prefix}_{name}Label]",
+          "description": "Format for attribute label token. {prefix} and {name} will be replaced."
+        },
+        "kahua.tokens.attributeDescriptionFormat": {
+          "type": "string",
+          "default": "[{prefix}_{name}Description]",
+          "description": "Format for attribute description token. {prefix} and {name} will be replaced."
+        },
+        "kahua.tokens.dataTagNameFormat": {
+          "type": "string",
+          "default": "{prefix}_{name}",
+          "description": "Format for DataTag Name. {prefix} and {name} will be replaced."
+        },
+        "kahua.tokens.labelKeyFormat": {
+          "type": "string",
+          "default": "{prefix}_{name}Label",
+          "description": "Format for label key. {prefix} and {name} will be replaced."
+        },
+        "kahua.tokens.labelValueFormat": {
+          "type": "string",
+          "default": "{label}",
+          "description": "Format for label value. {label} will be replaced with the selected text."
+        },
+        "kahua.defaultPrefix.extension": {
+          "type": "string",
+          "default": "_",
+          "description": "Default prefix for attributes generated in extension mode."
+        },
+        "kahua.defaultPrefix.supplement": {
+          "type": "string",
+          "default": "_",
+          "description": "Default prefix for attributes generated in supplement mode."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://example.com/your/kahua-attribute-generator.git"
+  },
+  "license": "MIT"
+}
