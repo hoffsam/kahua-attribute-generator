@@ -101,11 +101,16 @@
           "default": "newEditor",
           "description": "Choose where to output the generated XML."
         },
+        "kahua.tokenNames": {
+          "type": "string",
+          "default": "name,prefix,type,label",
+          "description": "Comma-separated list of token names that can be used in fragments. These correspond to the values parsed from each selected line."
+        },
         "kahua.fragments": {
           "type": "object",
           "default": {
             "attribute": "<Attribute Name=\"{name}\" Label=\"[{prefix}_{name}Label]\" Description=\"[{prefix}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
-            "label": "<Label Key=\"{prefix}_{name}Label\">{label}</Label>",
+            "label": "<Label Key=\"{prefix}_{name}Label\">{label:friendly}</Label>",
             "descriptionLabel": "<Label Key=\"{prefix}_{name}Description\">{label}</Label>",
             "dataTag": "<DataTag Name=\"{prefix}_{name}\" Key=\"{prefix}_{name}\" Label=\"[{prefix}_{name}Label]\" CultureLabelKey=\"{prefix}_{name}Label\" />",
             "field": "<Field Attribute=\"{name}\" />",
@@ -113,7 +118,7 @@
             "dataStoreColumn": "<Column AttributeName=\"{name}\" />",
             "logField": "<Field FieldDef=\"{name}\" />"
           },
-          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments."
+          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments. Tokens support whitespace control: {token} or {token:internal} (default, trimmed) vs {token:friendly} (preserves whitespace)."
         }
       }
     }

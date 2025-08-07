@@ -64,26 +64,81 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
     return vscode.workspace.getConfiguration().get<string>(`kahua.tokens.${key}`) || fallback;
   };
 
+  // Get configurable token names from settings
+  const tokenNamesConfig = vscode.workspace.getConfiguration().get<string>('kahua.tokenNames') || 'name,prefix,type,label';
+  const tokenNames = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
+
   // For each line produce a set of XML snippet parts.
   const fragmentTemplates = vscode.workspace.getConfiguration().get<Record<string, string>>('kahua.fragments') || {};
 
   const expanded: Record<string, string[]> = {};
   for (const line of lines) {
-    const parts = line.split(',').map(p => p.trim()).filter(Boolean);
+    const rawParts = line.split(',').filter(p => p !== ''); // Keep original whitespace
+    const parts = rawParts.map(p => p.trim()).filter(Boolean); // Trimmed for processing
     if (!parts.length) continue;
 
-    const rawName = parts[0];
-    const name = rawName.replace(/[^A-Za-z0-9]/g, '');
-    const label = rawName;
-    const prefix = parts[1] || firstEntityName || modePrefix;
-    const type = parts[2] || 'Text';
+    // Build token values dynamically based on configured token names
+    const tokenValues: Record<string, string> = {};
+    
+    // Handle each configured token
+    for (let i = 0; i < tokenNames.length; i++) {
+      const tokenName = tokenNames[i];
+      let value = '';
+      
+      if (tokenName === 'name') {
+        // For 'name' token, store the sanitized version but we'll handle raw in replacement
+        value = parts[0] ? parts[0].replace(/[^A-Za-z0-9]/g, '') : '';
+      } else if (tokenName === 'label') {
+        // Label uses the original unsanitized first part
+        value = parts[0] || '';
+      } else if (tokenName === 'prefix') {
+        // Prefix logic: use provided value, fall back to document EntityDef, then mode prefix
+        value = parts[i] || firstEntityName || modePrefix;
+      } else if (tokenName === 'type') {
+        // Type defaults to 'Text'
+        value = parts[i] || 'Text';
+      } else {
+        // For any other token, use the corresponding part or empty string
+        value = parts[i] || '';
+      }
+      
+      tokenValues[tokenName] = value;
+    }
+    
+    // Store raw parts for friendly mode access
+    const rawTokenValues: Record<string, string> = {};
+    for (let i = 0; i < tokenNames.length; i++) {
+      const tokenName = tokenNames[i];
+      if (tokenName === 'name' || tokenName === 'label') {
+        // For name and label, preserve the original first part
+        rawTokenValues[tokenName] = rawParts[0] || '';
+      } else if (tokenName === 'prefix') {
+        // For prefix, use raw input or fallbacks
+        rawTokenValues[tokenName] = rawParts[i] || firstEntityName || modePrefix;
+      } else {
+        // For other tokens, use raw input
+        rawTokenValues[tokenName] = rawParts[i] || '';
+      }
+    }
 
+    // Apply token replacement for all configured tokens
     for (const [key, template] of Object.entries(fragmentTemplates)) {
-      const rendered = template
-        .replaceAll('{prefix}', prefix)
-        .replaceAll('{name}', name)
-        .replaceAll('{label}', label)
-        .replaceAll('{type}', type);
+      let rendered = template;
+      
+      // Handle both simple {token} and whitespace-controlled {token:mode} syntax
+      for (const [tokenName, tokenValue] of Object.entries(tokenValues)) {
+        const rawValue = rawTokenValues[tokenName] || '';
+        
+        // Replace {token:friendly} - preserves original whitespace/formatting
+        rendered = rendered.replaceAll(`{${tokenName}:friendly}`, rawValue);
+        
+        // Replace {token:internal} - uses processed/trimmed value (explicit)
+        rendered = rendered.replaceAll(`{${tokenName}:internal}`, tokenValue);
+        
+        // Replace {token} - default behavior (uses processed/trimmed value)
+        rendered = rendered.replaceAll(`{${tokenName}}`, tokenValue);
+      }
+      
       (expanded[key] ??= []).push(rendered);
     }
   }
