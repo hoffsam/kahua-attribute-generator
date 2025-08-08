@@ -103,8 +103,8 @@
         },
         "kahua.tokenNames": {
           "type": "string",
-          "default": "name,entity,type,label,visualtype",
-          "description": "Comma-separated list of token names that can be used in fragments. These correspond to the values parsed from each selected line."
+          "default": "name,entity,type,label,visualtype:TextBox",
+          "description": "Comma-separated list of token names that can be used in fragments. Format: 'name,prefix,type' or 'name,prefix:DefaultValue,type:Text' to specify default values. Defaults are used when input values are not provided."
         },
         "kahua.fragments": {
           "type": "object",

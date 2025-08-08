@@ -35,8 +35,6 @@ export function deactivate() {
  * @param mode Determines which prefix configuration key to use: "extension" or "supplement".
  */
 async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> {
-  vscode.window.showInformationMessage(`Debug: handleSelection called with mode: ${mode}`);
-  
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showErrorMessage('No active editor found');
@@ -53,9 +51,23 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
       throw new Error('kahua.tokenNames is not defined or is empty. Please configure token names in your settings.');
     }
     
-    const tokenNames = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-    if (tokenNames.length === 0) {
+    // Parse token names and their default values
+    const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
+    if (tokenConfigs.length === 0) {
       throw new Error('kahua.tokenNames contains no valid token names. Please provide comma-separated token names.');
+    }
+    
+    // Parse tokens with optional default values (format: "tokenName" or "tokenName:defaultValue")
+    const tokenNames: string[] = [];
+    const tokenDefaults: Record<string, string> = {};
+    
+    for (const tokenConfig of tokenConfigs) {
+      const [tokenName, defaultValue] = tokenConfig.split(':', 2);
+      if (!tokenName) {
+        throw new Error(`Invalid token configuration: "${tokenConfig}". Token names cannot be empty.`);
+      }
+      tokenNames.push(tokenName);
+      tokenDefaults[tokenName] = defaultValue || ''; // Use provided default or empty string
     }
     
     // Get and validate fragments
@@ -96,9 +108,12 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
       
       for (let i = 0; i < tokenNames.length; i++) {
         const tokenName = tokenNames[i];
-        // Default to empty string if token not provided
-        tokenValues[tokenName] = trimmedParts[i] || '';
-        rawTokenValues[tokenName] = rawParts[i] || '';
+        // Use input value, or fall back to configured default, or empty string
+        const inputValue = trimmedParts[i];
+        const rawInputValue = rawParts[i];
+        
+        tokenValues[tokenName] = inputValue || tokenDefaults[tokenName];
+        rawTokenValues[tokenName] = rawInputValue || tokenDefaults[tokenName];
       }
       
       // Store token data for the table
@@ -127,7 +142,7 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
     }
 
     // Create token table
-    const tokenTable = createTokenTable(tokenNames, allTokenData);
+    const tokenTable = createTokenTable(tokenNames, allTokenData, tokenDefaults);
 
     // Join each category of snippets together
     const fragmentsXml = Object.entries(expanded)
@@ -168,18 +183,19 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
 /**
  * Creates a table showing token names and their values from the processed lines
  */
-function createTokenTable(tokenNames: string[], tokenData: Array<Record<string, string>>): string {
+function createTokenTable(tokenNames: string[], tokenData: Array<Record<string, string>>, tokenDefaults: Record<string, string>): string {
   if (tokenData.length === 0) {
     return '<!-- No token data -->';
   }
   
-  const header = `| Token | ${tokenData.map((_, i) => `Line ${i + 1}`).join(' | ')} |`;
-  const separator = `|${'-'.repeat(7)}|${tokenData.map(() => '-'.repeat(8)).join('|')}|`;
+  const header = `| Token | Default | ${tokenData.map((_, i) => `Line ${i + 1}`).join(' | ')} |`;
+  const separator = `|${'-'.repeat(7)}|${'-'.repeat(9)}|${tokenData.map(() => '-'.repeat(8)).join('|')}|`;
   
   const rows = tokenNames.map(tokenName => {
+    const defaultValue = tokenDefaults[tokenName] || '';
     const values = tokenData.map(data => data[tokenName] || '');
-    return `| ${tokenName} | ${values.join(' | ')} |`;
+    return `| ${tokenName} | ${defaultValue} | ${values.join(' | ')} |`;
   });
   
-  return `<!-- Token Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
+  return `<!-- Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
 }

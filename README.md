@@ -8,7 +8,7 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
   * **`Kahua: Generate Extension Attributes from Selection`** – Uses `kahua.defaultPrefix.extension` setting
   * **`Kahua: Generate Supplement Attributes from Selection`** – Uses `kahua.defaultPrefix.supplement` setting
 
-* **Configurable token system** – Define your own token names and input format via `kahua.tokenNames`
+* **Configurable token system** – Define your own token names and default values via `kahua.tokenNames` (e.g., `name,type:Text,visual:TextBox`)
 
 * **Customizable XML fragments** – Modify, add, or remove output fragments via `kahua.fragments` setting
 
@@ -47,7 +47,7 @@ You can override the following settings in your workspace or user `settings.json
 | --- | --- | --- |
 | `kahua.showInContextMenu` | `true` | Show Kahua generator commands in the editor right-click context menu |
 | `kahua.outputTarget` | `"newEditor"` | Choose where to output generated XML: `"clipboard"` or `"newEditor"` |
-| `kahua.tokenNames` | `"name,prefix,type,label"` | Comma-separated list of token names that can be used in fragments |
+| `kahua.tokenNames` | `"name,entity,type,label,visualtype:TextBox"` | Comma-separated list of token names with optional defaults (format: `token:defaultValue`) |
 | `kahua.fragments` | See below | Object containing customizable XML fragment templates |
 | `kahua.defaultPrefix.extension` | `""` | Default prefix when generating app‑style attributes |
 | `kahua.defaultPrefix.supplement` | `"Inspections"` | Default prefix when generating supplement‑style attributes |
@@ -58,13 +58,18 @@ You can override the following settings in your workspace or user `settings.json
 
 The extension uses a configurable token system via the `kahua.tokenNames` setting. This allows you to customize which tokens are parsed from your input and used in fragments.
 
-**Default tokens**: `"name,prefix,type,label"`
+**Default tokens**: `"name,entity,type,label,visualtype:TextBox"`
 
 **Input format**: Each selected line should contain comma-separated values corresponding to your configured tokens:
-- `AttributeName` - Uses defaults for missing tokens
-- `AttributeName,MyPrefix` - Provides name and prefix
-- `AttributeName,MyPrefix,Integer,Friendly Label` - All four default tokens
-- `Name,Prefix,Type,Label,CustomToken` - If you've added custom tokens
+- `FieldName` - Uses defaults for all missing tokens
+- `FieldName,MyEntity` - Provides name and entity, uses defaults for type, label, visualtype
+- `FieldName,MyEntity,Integer` - Provides name, entity, and type
+- `FieldName,MyEntity,Integer,Friendly Name` - Provides all except visualtype (uses TextBox default)
+- `FieldName,MyEntity,Integer,Friendly Name,ComboBox` - Provides all tokens
+
+**Token Defaults**: Configure defaults using colon syntax in `kahua.tokenNames`:
+- `name,entity,type:Text,label,visualtype:TextBox` - Sets default "Text" for type, "TextBox" for visualtype
+- Missing input values automatically use the configured defaults
 
 ### Token Processing
 
@@ -100,16 +105,17 @@ The extension validates configuration and input before generating XML:
 - **Valid content** - selection must contain at least one non-empty line
 
 ### Token Table Output
-Generated output includes a table showing token values for each processed line:
+Generated output includes a table showing token configuration and values for each processed line:
 
 ```
-<!-- Token Values Table -->
-| Token | Line 1 | Line 2 |
-|-------|--------|--------|
-| name  | Field1 | Field2 |
-| prefix| MyApp  | MyApp  |
-| type  | Text   | Integer|
-| label | Field 1| Field 2|
+<!-- Token Configuration and Values Table -->
+| Token     | Default | Line 1 | Line 2  |
+|-----------|---------|--------|---------|
+| name      |         | Field1 | Field2  |
+| entity    |         | MyApp  | MyApp   |
+| type      |         | Text   | Integer |
+| label     |         | Field1 | Field2  |
+| visualtype| TextBox | TextBox| ComboBox|
 ```
 
 ## Fragment System

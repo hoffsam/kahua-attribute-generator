@@ -28,10 +28,11 @@ The extension provides two main commands that process selected text to generate 
 ### Input Processing Pattern
 The extension processes selected lines based on configurable token names defined in `kahua.tokenNames` setting:
 - Token names are fully customizable in settings as a comma-separated list
+- Supports default values using colon syntax: `name,entity,type:Text,visualtype:TextBox`
 - No built-in token logic - all tokens are processed identically
-- Missing token values default to empty string
+- Missing token values use configured defaults or empty string
 - Comprehensive validation of configuration and selection with error notifications
-- Generates token value table in output showing processed values
+- Generates token configuration and value table in output showing defaults and processed values
 
 ### Template System
 XML generation uses configurable fragment templates from `kahua.fragments` configuration:
