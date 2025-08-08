@@ -27,14 +27,11 @@ The extension provides two main commands that process selected text to generate 
 
 ### Input Processing Pattern
 The extension processes selected lines based on configurable token names defined in `kahua.tokenNames` setting:
-- Default format: `AttributeName,Prefix,DataType,Label` (corresponding to tokens: name,prefix,type,label)
-- Token names can be customized in settings as a comma-separated list
-- Built-in token handling:
-  - `name` - Sanitizes input by removing non-alphanumeric characters
-  - `label` - Uses original unsanitized input text
-  - `prefix` - Falls back to document's first `<EntityDef Name="...">` then mode default
-  - `type` - Defaults to "Text" if not specified
-  - Custom tokens use corresponding input parts or empty string
+- Token names are fully customizable in settings as a comma-separated list
+- No built-in token logic - all tokens are processed identically
+- Missing token values default to empty string
+- Comprehensive validation of configuration and selection with error notifications
+- Generates token value table in output showing processed values
 
 ### Template System
 XML generation uses configurable fragment templates from `kahua.fragments` configuration:

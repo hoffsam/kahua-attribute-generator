@@ -29,146 +29,157 @@ export function deactivate() {
 
 /**
  * Handles the logic of reading the current selection and generating XML snippets
- * based on the provided mode. When invoked, it reads each selected line,
- * sanitizes it to form a valid attribute name, and then creates attribute,
- * label, datatag, field and field definition fragments according to user
- * configurable templates. The result is placed on the clipboard and a
- * notification is shown.
+ * based on the provided mode. Validates configuration and selection, then generates
+ * XML using configurable tokens and fragments.
  *
  * @param mode Determines which prefix configuration key to use: "extension" or "supplement".
  */
 async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> {
+  vscode.window.showInformationMessage(`Debug: handleSelection called with mode: ${mode}`);
+  
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
+    vscode.window.showErrorMessage('No active editor found');
     return;
   }
 
-  // Fetch the base prefix for the current mode from configuration. Defaults defined in package.json.
-  const modePrefix: string = vscode.workspace.getConfiguration().get<string>(`kahua.defaultPrefix.${mode}`) || '';
-
-  // Grab the currently selected text and split it into trimmed, nonempty lines.
-  const selection = editor.document.getText(editor.selection);
-  const lines = selection.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-
-  // Read the entire document to allow fallback prefix extraction from the first EntityDef when needed.
-  const documentText = editor.document.getText();
-
-  // Attempt to find the first <EntityDef Name="..."> in the document. Used when only an attribute name is provided.
-  const firstEntityName = (() => {
-    const match = documentText.match(/<\s*EntityDef[^>]*\bName\s*=\s*"([^"<>]+)"/);
-    return match ? match[1] : '';
-  })();
-
-  // Helper to fetch a template from configuration with fallback to a default.
-  const format = (key: string, fallback: string): string => {
-    return vscode.workspace.getConfiguration().get<string>(`kahua.tokens.${key}`) || fallback;
-  };
-
-  // Get configurable token names from settings
-  const tokenNamesConfig = vscode.workspace.getConfiguration().get<string>('kahua.tokenNames') || 'name,prefix,type,label';
-  const tokenNames = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-
-  // For each line produce a set of XML snippet parts.
-  const fragmentTemplates = vscode.workspace.getConfiguration().get<Record<string, string>>('kahua.fragments') || {};
-
-  const expanded: Record<string, string[]> = {};
-  for (const line of lines) {
-    const rawParts = line.split(',').filter(p => p !== ''); // Keep original whitespace
-    const parts = rawParts.map(p => p.trim()).filter(Boolean); // Trimmed for processing
-    if (!parts.length) continue;
-
-    // Build token values dynamically based on configured token names
-    const tokenValues: Record<string, string> = {};
+  try {
+    // Validate configuration
+    const config = vscode.workspace.getConfiguration();
     
-    // Handle each configured token
-    for (let i = 0; i < tokenNames.length; i++) {
-      const tokenName = tokenNames[i];
-      let value = '';
-      
-      if (tokenName === 'name') {
-        // For 'name' token, store the sanitized version but we'll handle raw in replacement
-        value = parts[0] ? parts[0].replace(/[^A-Za-z0-9]/g, '') : '';
-      } else if (tokenName === 'label') {
-        // Label uses the original unsanitized first part
-        value = parts[0] || '';
-      } else if (tokenName === 'prefix') {
-        // Prefix logic: use provided value, fall back to document EntityDef, then mode prefix
-        value = parts[i] || firstEntityName || modePrefix;
-      } else if (tokenName === 'type') {
-        // Type defaults to 'Text'
-        value = parts[i] || 'Text';
-      } else {
-        // For any other token, use the corresponding part or empty string
-        value = parts[i] || '';
-      }
-      
-      tokenValues[tokenName] = value;
+    // Get and validate token names
+    const tokenNamesConfig = config.get<string>('kahua.tokenNames');
+    if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
+      throw new Error('kahua.tokenNames is not defined or is empty. Please configure token names in your settings.');
     }
     
-    // Store raw parts for friendly mode access
-    const rawTokenValues: Record<string, string> = {};
-    for (let i = 0; i < tokenNames.length; i++) {
-      const tokenName = tokenNames[i];
-      if (tokenName === 'name' || tokenName === 'label') {
-        // For name and label, preserve the original first part
-        rawTokenValues[tokenName] = rawParts[0] || '';
-      } else if (tokenName === 'prefix') {
-        // For prefix, use raw input or fallbacks
-        rawTokenValues[tokenName] = rawParts[i] || firstEntityName || modePrefix;
-      } else {
-        // For other tokens, use raw input
+    const tokenNames = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
+    if (tokenNames.length === 0) {
+      throw new Error('kahua.tokenNames contains no valid token names. Please provide comma-separated token names.');
+    }
+    
+    // Get and validate fragments
+    const fragmentTemplates = config.get<Record<string, string>>('kahua.fragments');
+    if (!fragmentTemplates || typeof fragmentTemplates !== 'object' || Object.keys(fragmentTemplates).length === 0) {
+      throw new Error('kahua.fragments is not defined or is empty. Please configure fragment templates in your settings.');
+    }
+    
+    // Validate that fragments contain valid templates
+    for (const [key, template] of Object.entries(fragmentTemplates)) {
+      if (!template || typeof template !== 'string') {
+        throw new Error(`Fragment '${key}' has an invalid template. All fragments must be non-empty strings.`);
+      }
+    }
+
+    // Validate selection
+    const selection = editor.document.getText(editor.selection);
+    if (!selection || selection.trim() === '') {
+      throw new Error('No text selected. Please select one or more lines of text to generate attributes.');
+    }
+    
+    const lines = selection.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) {
+      throw new Error('Selected text contains no valid lines. Please select text with content.');
+    }
+
+    // Process each line
+    const expanded: Record<string, string[]> = {};
+    const allTokenData: Array<Record<string, string>> = [];
+    
+    for (const line of lines) {
+      const rawParts = line.split(','); // Keep original whitespace, allow empty parts
+      const trimmedParts = rawParts.map(p => p.trim()); // Trimmed for processing
+      
+      // Build token values for this line
+      const tokenValues: Record<string, string> = {};
+      const rawTokenValues: Record<string, string> = {};
+      
+      for (let i = 0; i < tokenNames.length; i++) {
+        const tokenName = tokenNames[i];
+        // Default to empty string if token not provided
+        tokenValues[tokenName] = trimmedParts[i] || '';
         rawTokenValues[tokenName] = rawParts[i] || '';
       }
-    }
-
-    // Apply token replacement for all configured tokens
-    for (const [key, template] of Object.entries(fragmentTemplates)) {
-      let rendered = template;
       
-      // Handle both simple {token} and whitespace-controlled {token:mode} syntax
-      for (const [tokenName, tokenValue] of Object.entries(tokenValues)) {
-        const rawValue = rawTokenValues[tokenName] || '';
+      // Store token data for the table
+      allTokenData.push({ ...tokenValues });
+
+      // Apply token replacement for all configured tokens
+      for (const [key, template] of Object.entries(fragmentTemplates)) {
+        let rendered = template;
         
-        // Replace {token:friendly} - preserves original whitespace/formatting
-        rendered = rendered.replaceAll(`{${tokenName}:friendly}`, rawValue);
+        // Handle whitespace-controlled token replacement
+        for (const [tokenName, tokenValue] of Object.entries(tokenValues)) {
+          const rawValue = rawTokenValues[tokenName];
+          
+          // Replace {token:friendly} - preserves original whitespace/formatting
+          rendered = rendered.replaceAll(`{${tokenName}:friendly}`, rawValue);
+          
+          // Replace {token:internal} - uses processed/trimmed value (explicit)
+          rendered = rendered.replaceAll(`{${tokenName}:internal}`, tokenValue);
+          
+          // Replace {token} - default behavior (uses processed/trimmed value)
+          rendered = rendered.replaceAll(`{${tokenName}}`, tokenValue);
+        }
         
-        // Replace {token:internal} - uses processed/trimmed value (explicit)
-        rendered = rendered.replaceAll(`{${tokenName}:internal}`, tokenValue);
-        
-        // Replace {token} - default behavior (uses processed/trimmed value)
-        rendered = rendered.replaceAll(`{${tokenName}}`, tokenValue);
+        (expanded[key] ??= []).push(rendered);
       }
-      
-      (expanded[key] ??= []).push(rendered);
     }
-  }
 
+    // Create token table
+    const tokenTable = createTokenTable(tokenNames, allTokenData);
 
-  // Join each category of snippets together so they're grouped in the output.
-  const generatedXml = Object.entries(expanded)
-    .map(([key, lines]: [string, string[]]) =>
-      `<!-- ${key} -->\n${lines.join('\n')}`
-    ).join('\n\n');
+    // Join each category of snippets together
+    const fragmentsXml = Object.entries(expanded)
+      .map(([key, lines]: [string, string[]]) =>
+        `<!-- ${key} -->\n${lines.join('\n')}`
+      ).join('\n\n');
     
-  // Get the output target setting
-  const outputTarget = vscode.workspace.getConfiguration().get<string>('kahua.outputTarget') || 'clipboard';
+    const generatedXml = `${tokenTable}\n\n${fragmentsXml}`;
+      
+    // Get the output target setting
+    const outputTarget = config.get<string>('kahua.outputTarget') || 'newEditor';
 
-  if (outputTarget === 'newEditor') {
-    // Open in new editor window
-    const newDocument = await vscode.workspace.openTextDocument({
-      content: generatedXml,
-      language: 'xml'
-    });
+    if (outputTarget === 'newEditor') {
+      // Open in new editor window
+      const newDocument = await vscode.workspace.openTextDocument({
+        content: generatedXml,
+        language: 'xml'
+      });
 
-    await vscode.window.showTextDocument(newDocument, {
-      viewColumn: vscode.ViewColumn.Beside,
-      preview: false
-    });
+      await vscode.window.showTextDocument(newDocument, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preview: false
+      });
 
-    vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes in new editor window`);
-  } else {
-    // Copy to clipboard (existing behavior)
-    await vscode.env.clipboard.writeText(generatedXml);
-    vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes copied to clipboard`);
+      vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes in new editor window`);
+    } else {
+      // Copy to clipboard
+      await vscode.env.clipboard.writeText(generatedXml);
+      vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes copied to clipboard`);
+    }
+
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error occurred';
+    vscode.window.showErrorMessage(`Kahua Attribute Generator: ${message}`);
   }
+}
+
+/**
+ * Creates a table showing token names and their values from the processed lines
+ */
+function createTokenTable(tokenNames: string[], tokenData: Array<Record<string, string>>): string {
+  if (tokenData.length === 0) {
+    return '<!-- No token data -->';
+  }
+  
+  const header = `| Token | ${tokenData.map((_, i) => `Line ${i + 1}`).join(' | ')} |`;
+  const separator = `|${'-'.repeat(7)}|${tokenData.map(() => '-'.repeat(8)).join('|')}|`;
+  
+  const rows = tokenNames.map(tokenName => {
+    const values = tokenData.map(data => data[tokenName] || '');
+    return `| ${tokenName} | ${values.join(' | ')} |`;
+  });
+  
+  return `<!-- Token Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
 }

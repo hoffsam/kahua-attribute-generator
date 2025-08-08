@@ -16,7 +16,9 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 * **Multiple output options** – Copy to clipboard or open in new editor window
 
-* **Built-in fallback logic** – Automatically extracts prefixes from document `<EntityDef>` elements when not provided
+* **Comprehensive validation** – Clear error messages for configuration and input issues
+
+* **Token value table** – Shows token assignments for each processed line in output
 
 ## Usage
 
@@ -64,18 +66,17 @@ The extension uses a configurable token system via the `kahua.tokenNames` settin
 - `AttributeName,MyPrefix,Integer,Friendly Label` - All four default tokens
 - `Name,Prefix,Type,Label,CustomToken` - If you've added custom tokens
 
-### Built-in Token Handling
+### Token Processing
 
-Some tokens have special processing logic:
+All tokens are processed identically with no special built-in logic:
 
-- **`name`** - Sanitizes input by removing non-alphanumeric characters
-- **`label`** - Uses the original unsanitized text from the first input value
-- **`prefix`** - Falls back to document's first `<EntityDef Name="...">` then mode-specific default
-- **`type`** - Defaults to "Text" if not provided
+- **Missing tokens** default to empty string if not provided in input
+- **Whitespace handling** depends on fragment template syntax (`{token}`, `{token:internal}`, or `{token:friendly}`)
+- **No fallback logic** - what you input is what gets used (or empty string for missing values)
 
 ### Custom Tokens
 
-You can define additional tokens beyond the built-in ones:
+You can define any token names you need:
 
 ```json
 {
@@ -83,7 +84,33 @@ You can define additional tokens beyond the built-in ones:
 }
 ```
 
-Custom tokens use their corresponding input position or default to empty string if not provided.
+All tokens use their corresponding input position or default to empty string if not provided.
+
+## Error Handling
+
+The extension validates configuration and input before generating XML:
+
+### Configuration Validation
+- **`kahua.tokenNames`** must be defined and contain valid token names
+- **`kahua.fragments`** must be defined with valid fragment templates
+- Invalid configuration shows an error notification with specific details
+
+### Selection Validation  
+- **Text selection** is required - empty selections show an error
+- **Valid content** - selection must contain at least one non-empty line
+
+### Token Table Output
+Generated output includes a table showing token values for each processed line:
+
+```
+<!-- Token Values Table -->
+| Token | Line 1 | Line 2 |
+|-------|--------|--------|
+| name  | Field1 | Field2 |
+| prefix| MyApp  | MyApp  |
+| type  | Text   | Integer|
+| label | Field 1| Field 2|
+```
 
 ## Fragment System
 

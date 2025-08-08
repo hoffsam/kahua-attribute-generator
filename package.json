@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua Attribute Generator",
   "description": "Generate XML for Kahua App Def attribute, label, DataTag, Data Store Column, FieldDef, etc from selected lines.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -103,20 +103,21 @@
         },
         "kahua.tokenNames": {
           "type": "string",
-          "default": "name,prefix,type,label",
+          "default": "name,entity,type,label,visualtype",
           "description": "Comma-separated list of token names that can be used in fragments. These correspond to the values parsed from each selected line."
         },
         "kahua.fragments": {
           "type": "object",
           "default": {
-            "attribute": "<Attribute Name=\"{name}\" Label=\"[{prefix}_{name}Label]\" Description=\"[{prefix}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
-            "label": "<Label Key=\"{prefix}_{name}Label\">{label:friendly}</Label>",
-            "descriptionLabel": "<Label Key=\"{prefix}_{name}Description\">{label}</Label>",
-            "dataTag": "<DataTag Name=\"{prefix}_{name}\" Key=\"{prefix}_{name}\" Label=\"[{prefix}_{name}Label]\" CultureLabelKey=\"{prefix}_{name}Label\" />",
-            "field": "<Field Attribute=\"{name}\" />",
-            "fieldDef": "<FieldDef Name=\"{name}\" Path=\"{name}\" DataTag=\"{prefix}_{name}\" Edit.Path=\"{name}\" />",
-            "dataStoreColumn": "<Column AttributeName=\"{name}\" />",
-            "logField": "<Field FieldDef=\"{name}\" />"
+            "Attributes": "<Attribute Name=\"{name}\" Label=\"[{entity}_{name}Label]\" Description=\"[{entity}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
+            "Labels": "<Label Key=\"{entity}_{name}Label\">{label:friendly}</Label>\n<Label Key=\"{entity}_{name}Description\">{label}</Label>",
+            "DataTags": "<DataTag Name=\"{entity}_{name}\" Key=\"{entity}_{name}\" Label=\"[{entity}_{name}Label]\" CultureLabelKey=\"{entity}_{name}Label\">\n  <Key />\n</DataTag>",
+            "Fields": "<Field Attribute=\"{name}\" />",
+            "FieldDefs": "<FieldDef Name=\"{name}\" Path=\"{name}\" DataTag=\"{entity}_{name}\" Edit.Path=\"{name}\" />",
+            "DataStore": "<Column AttributeName=\"{name}\" />",
+            "LogFields": "<Field FieldDef=\"{name}\" />",
+            "ImportDefs": "<Column AttributeName=\"{name}\" Name=\"{name:friendly}\" />",
+            "Visuals": "<TextBlock Name=\"{name}\" DataTag=\"{entity}_{name}\" Path=\"{name}\" />\n<{visualtype} Name=\"{name}\" DataTag=\"{entity}_{name}\" Path=\"{name}\" />"
           },
           "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments. Tokens support whitespace control: {token} or {token:internal} (default, trimmed) vs {token:friendly} (preserves whitespace)."
         }
