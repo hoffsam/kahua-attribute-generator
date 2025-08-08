@@ -215,7 +215,7 @@ function activate(context) {
     // The context variable 'kahua.showInContextMenu' is set to true to enable
     // the context menu items when the editor has focus and a selection is made.
     vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
-    context.subscriptions.push(vscode.commands.registerCommand('kahua.createExtensionAttributes', () => handleSelection('extension')), vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement')));
+    context.subscriptions.push(vscode.commands.registerCommand('kahua.createExtensionAttributes', () => handleSelection('extension')), vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement')), vscode.commands.registerCommand('kahua.insertTokenTemplate', () => insertTokenTemplate()), vscode.commands.registerCommand('kahua.insertTokenSnippet', () => insertTokenSnippet()));
 }
 /**
  * This function is called when your extension is deactivated. Nothing to clean up
@@ -373,5 +373,74 @@ function createTokenTable(tokenNames, tokenData, tokenDefaults) {
         return `| ${tokenName} | ${defaultValue} | ${values.join(' | ')} |`;
     });
     return `<!-- Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
+}
+/**
+ * Inserts a token template as a comment showing the expected token order
+ */
+async function insertTokenTemplate() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor found');
+        return;
+    }
+    try {
+        // Get current token configuration
+        const config = vscode.workspace.getConfiguration();
+        const tokenNamesConfig = config.get('kahua.tokenNames');
+        if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
+            throw new Error('kahua.tokenNames is not configured. Please configure token names in your settings.');
+        }
+        // Parse token names and show defaults where available
+        const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
+        const tokenDisplays = tokenConfigs.map(tokenConfig => {
+            const [tokenName, defaultValue] = tokenConfig.split(':', 2);
+            return defaultValue ? `${tokenName}:${defaultValue}` : tokenName;
+        });
+        const templateText = `// Template: ${tokenDisplays.join(', ')}\n`;
+        // Insert at cursor position
+        const position = editor.selection.active;
+        await editor.edit(editBuilder => {
+            editBuilder.insert(position, templateText);
+        });
+        vscode.window.showInformationMessage('Kahua: Token template inserted');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error occurred';
+        vscode.window.showErrorMessage(`Kahua Token Template: ${message}`);
+    }
+}
+/**
+ * Inserts a token snippet with tab stops for each token position
+ */
+async function insertTokenSnippet() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor found');
+        return;
+    }
+    try {
+        // Get current token configuration
+        const config = vscode.workspace.getConfiguration();
+        const tokenNamesConfig = config.get('kahua.tokenNames');
+        if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
+            throw new Error('kahua.tokenNames is not configured. Please configure token names in your settings.');
+        }
+        // Parse token names and create snippet with tab stops
+        const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
+        const snippetParts = tokenConfigs.map((tokenConfig, index) => {
+            const [tokenName, defaultValue] = tokenConfig.split(':', 2);
+            const placeholder = defaultValue || tokenName;
+            return `\${${index + 1}:${placeholder}}`;
+        });
+        const snippetText = snippetParts.join(', ');
+        const snippet = new vscode.SnippetString(snippetText);
+        // Insert snippet at cursor position
+        await editor.insertSnippet(snippet);
+        vscode.window.showInformationMessage('Kahua: Token snippet inserted');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error occurred';
+        vscode.window.showErrorMessage(`Kahua Token Snippet: ${message}`);
+    }
 }
 //# sourceMappingURL=extension.js.map

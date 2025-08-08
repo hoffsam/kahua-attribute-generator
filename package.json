@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua Attribute Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -24,7 +24,9 @@
   },
   "activationEvents": [
     "onCommand:kahua.createExtensionAttributes",
-    "onCommand:kahua.createSupplementAttributes"
+    "onCommand:kahua.createSupplementAttributes",
+    "onCommand:kahua.insertTokenTemplate",
+    "onCommand:kahua.insertTokenSnippet"
   ],
   "contributes": {
     "menus": {
@@ -34,6 +36,12 @@
         },
         {
           "command": "kahua.createSupplementAttributes"
+        },
+        {
+          "command": "kahua.insertTokenTemplate"
+        },
+        {
+          "command": "kahua.insertTokenSnippet"
         }
       ],
       "editor/context": [
@@ -49,6 +57,12 @@
         },
         {
           "command": "kahua.createSupplementAttributes"
+        },
+        {
+          "command": "kahua.insertTokenTemplate"
+        },
+        {
+          "command": "kahua.insertTokenSnippet"
         }
       ]
     },
@@ -66,6 +80,14 @@
       {
         "command": "kahua.createSupplementAttributes",
         "title": "Kahua: Generate Supplement Attributes from Selection"
+      },
+      {
+        "command": "kahua.insertTokenTemplate",
+        "title": "Kahua: Insert Token Template"
+      },
+      {
+        "command": "kahua.insertTokenSnippet",
+        "title": "Kahua: Insert Token Snippet"
       }
     ],
     "keybindings": [
