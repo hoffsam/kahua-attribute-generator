@@ -151,13 +151,15 @@ function processConditionalTemplate(template, tokenValues, suppressWarnings) {
             // Extract the true and false values from the ternary
             const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'(.*?)'\s*:\s*'(.*?)'$/);
             if (ternaryMatch) {
-                const [, , trueValue, falseValue] = ternaryMatch;
-                const replacementValue = evalResult.condition ? trueValue : falseValue;
+                const [, conditionPart, trueValue, falseValue] = ternaryMatch;
+                // Evaluate only the condition part, not the entire ternary expression
+                const conditionResult = evaluateConditional(conditionPart, tokenValues);
+                const replacementValue = conditionResult.condition ? trueValue : falseValue;
                 result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
                 pos = startPos + replacementValue.length;
             }
             else {
-                // Fallback: just remove the conditional block if malformed
+                // Fallback: remove the conditional block if malformed
                 result = result.substring(0, startPos) + result.substring(endPos + 1);
                 pos = startPos;
             }
