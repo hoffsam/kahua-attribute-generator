@@ -247,11 +247,12 @@ export function activate(context: vscode.ExtensionContext) {
   // The context variable 'kahua.showInContextMenu' is set to true to enable
   // the context menu items when the editor has focus and a selection is made.
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
+  
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.createExtensionAttributes', () => handleSelection('extension')),
     vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement')),
     vscode.commands.registerCommand('kahua.insertTokenTemplate', () => insertTokenTemplate()),
-    vscode.commands.registerCommand('kahua.insertTokenSnippet', () => insertTokenSnippet()),
+    vscode.commands.registerCommand('kahua.insertTokenSnippet', () => insertTokenSnippet())
   );
 }
 
@@ -512,15 +513,27 @@ async function insertTokenSnippet(): Promise<void> {
       throw new Error('kahua.tokenNames is not configured. Please configure token names in your settings.');
     }
 
-    // Parse token names and create snippet with tab stops
+    // Parse token names and create snippet with tab stops that allow typeover of commas
     const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-    const snippetParts = tokenConfigs.map((tokenConfig, index) => {
-      const [tokenName, defaultValue] = tokenConfig.split(':', 2);
+    const snippetParts: string[] = [];
+    let tabStopIndex = 1;
+    
+    for (let i = 0; i < tokenConfigs.length; i++) {
+      const [tokenName, defaultValue] = tokenConfigs[i].split(':', 2);
       const placeholder = defaultValue || tokenName;
-      return `\${${index + 1}:${placeholder}}`;
-    });
+      
+      // Add the token placeholder
+      snippetParts.push(`\${${tabStopIndex}:${placeholder}}`);
+      tabStopIndex++;
+      
+      // Add comma as a typeover placeholder (except for the last token)
+      if (i < tokenConfigs.length - 1) {
+        snippetParts.push(`\${${tabStopIndex}:, }`);
+        tabStopIndex++;
+      }
+    }
 
-    const snippetText = snippetParts.join(', ');
+    const snippetText = snippetParts.join('');
     const snippet = new vscode.SnippetString(snippetText);
     
     // Insert snippet at cursor position
