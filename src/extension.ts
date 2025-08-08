@@ -1,6 +1,238 @@
 import * as vscode from 'vscode';
 
 /**
+ * Represents a conditional expression result
+ */
+interface ConditionalResult {
+  condition: boolean;
+  hasValidTokens: boolean;
+  invalidTokens: string[];
+}
+
+/**
+ * Cleans a token value by removing internal whitespace and special characters
+ * for use in XML attributes and identifiers
+ */
+function cleanTokenValue(value: string): string {
+  if (!value) return value;
+  
+  // Remove internal whitespace and common special characters
+  // Keep alphanumeric characters, hyphens, and underscores
+  return value.replace(/\s+/g, '').replace(/[^a-zA-Z0-9\-_]/g, '');
+}
+
+/**
+ * Evaluates a conditional expression with token values
+ */
+function evaluateConditional(expression: string, tokenValues: Record<string, string>): ConditionalResult {
+  const invalidTokens: string[] = [];
+  let hasValidTokens = true;
+  
+  // Replace tokens in the expression with their values
+  let processedExpression = expression;
+  
+  // Find all token references in the expression
+  const tokenPattern = /\{\$(\w+)\}/g;
+  let match;
+  while ((match = tokenPattern.exec(expression)) !== null) {
+    const tokenName = match[1];
+    const tokenValue = tokenValues[tokenName];
+    
+    if (tokenValue === undefined || tokenValue === '') {
+      invalidTokens.push(tokenName);
+      hasValidTokens = false;
+      // Replace with empty string for evaluation
+      processedExpression = processedExpression.replace(match[0], '""');
+    } else {
+      // Replace with quoted string value for evaluation
+      processedExpression = processedExpression.replace(match[0], `"${tokenValue.replace(/"/g, '\\"')}"`);
+    }
+  }
+  
+  try {
+    // Parse and evaluate the conditional expression
+    const result = evaluateExpression(processedExpression);
+    return {
+      condition: result,
+      hasValidTokens,
+      invalidTokens
+    };
+  } catch (error) {
+    return {
+      condition: false,
+      hasValidTokens: false,
+      invalidTokens
+    };
+  }
+}
+
+/**
+ * Safely evaluates a conditional expression
+ * Supports: ==, !=, <=, >=, <>, in, not in, ternary operator
+ */
+function evaluateExpression(expression: string): boolean {
+  // Remove extra whitespace
+  expression = expression.trim();
+  
+  // Handle ternary operator (condition ? value : fallback)
+  const ternaryMatch = expression.match(/^(.+?)\s*\?\s*(.+?)\s*:\s*(.+)$/);
+  if (ternaryMatch) {
+    const [, condition, trueValue, falseValue] = ternaryMatch;
+    const conditionResult = evaluateExpression(condition);
+    return conditionResult;
+  }
+  
+  // Handle 'not in' operator
+  const notInMatch = expression.match(/^"([^"]*?)"\s+not\s+in\s+\(([^)]+)\)$/i);
+  if (notInMatch) {
+    const [, value, listStr] = notInMatch;
+    const list = listStr.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, ''));
+    return !list.includes(value);
+  }
+  
+  // Handle 'in' operator
+  const inMatch = expression.match(/^"([^"]*?)"\s+in\s+\(([^)]+)\)$/i);
+  if (inMatch) {
+    const [, value, listStr] = inMatch;
+    const list = listStr.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, ''));
+    return list.includes(value);
+  }
+  
+  // Handle comparison operators
+  const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
+  if (comparisonMatch) {
+    const [, left, operator, right] = comparisonMatch;
+    
+    switch (operator) {
+      case '==':
+        return left === right;
+      case '!=':
+      case '<>':
+        return left !== right;
+      case '<=':
+        return left <= right;
+      case '>=':
+        return left >= right;
+      default:
+        return false;
+    }
+  }
+  
+  // Handle simple boolean expressions (just the token value)
+  if (expression === '""' || expression === 'false' || expression === '0') {
+    return false;
+  }
+  
+  return true; // Default to true for non-empty values
+}
+
+/**
+ * Processes conditional blocks in template strings
+ */
+function processConditionalTemplate(template: string, tokenValues: Record<string, string>, suppressWarnings: boolean): { result: string; warnings: string[] } {
+  const warnings: string[] = [];
+  let result = template;
+  
+  // Process conditional expressions by finding balanced braces
+  let pos = 0;
+  while (pos < result.length) {
+    const startPos = result.indexOf('{$', pos);
+    if (startPos === -1) break;
+    
+    // Check if this looks like a conditional (contains ? and :)
+    let braceCount = 0;
+    let endPos = startPos;
+    let foundQuestion = false;
+    let foundColon = false;
+    
+    for (let i = startPos; i < result.length; i++) {
+      const char = result[i];
+      if (char === '{') braceCount++;
+      else if (char === '}') braceCount--;
+      else if (char === '?' && braceCount === 1) foundQuestion = true;
+      else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
+      
+      if (braceCount === 0) {
+        endPos = i;
+        break;
+      }
+    }
+    
+    if (foundQuestion && foundColon) {
+      // This is a conditional expression
+      const fullMatch = result.substring(startPos, endPos + 1);
+      const expression = fullMatch.slice(2, -1); // Remove {$ and }
+      
+      const evalResult = evaluateConditional(expression, tokenValues);
+      
+      if (!evalResult.hasValidTokens && !suppressWarnings) {
+        warnings.push(`Invalid tokens in conditional expression "${expression}": ${evalResult.invalidTokens.join(', ')}`);
+      }
+      
+      // Extract the true and false values from the ternary
+      const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'(.*?)'\s*:\s*'(.*?)'$/);
+      if (ternaryMatch) {
+        const [, , trueValue, falseValue] = ternaryMatch;
+        const replacementValue = evalResult.condition ? trueValue : falseValue;
+        result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
+        pos = startPos + replacementValue.length;
+      } else {
+        // Fallback: just remove the conditional block if malformed
+        result = result.substring(0, startPos) + result.substring(endPos + 1);
+        pos = startPos;
+      }
+    } else {
+      pos = startPos + 2; // Move past this {$ and continue looking
+    }
+  }
+  
+  return { result, warnings };
+}
+
+/**
+ * Processes template fragments to handle conditional keys
+ */
+function processFragmentTemplates(
+  fragmentTemplates: Record<string, string>, 
+  tokenValues: Record<string, string>, 
+  suppressWarnings: boolean
+): { processedFragments: Record<string, string>; warnings: string[] } {
+  const processedFragments: Record<string, string> = {};
+  const allWarnings: string[] = [];
+  
+  for (const [key, template] of Object.entries(fragmentTemplates)) {
+    // Check if the key itself contains a conditional
+    const keyConditionalMatch = key.match(/^\{\$([^}]+\s*\?\s*[^}]+\s*:\s*[^}]+)\}(.*)$/);
+    
+    if (keyConditionalMatch) {
+      const [, expression, keyRemainder] = keyConditionalMatch;
+      const evalResult = evaluateConditional(expression, tokenValues);
+      
+      if (!evalResult.hasValidTokens && !suppressWarnings) {
+        allWarnings.push(`Invalid tokens in conditional key "${key}": ${evalResult.invalidTokens.join(', ')}`);
+      }
+      
+      // Only include this fragment if the condition is true
+      if (evalResult.condition) {
+        // Extract the actual key name from the ternary expression
+        const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'([^']*?)'\s*:\s*'([^']*?)'$/);
+        if (ternaryMatch) {
+          const [, , trueValue] = ternaryMatch;
+          const actualKey = trueValue + keyRemainder;
+          processedFragments[actualKey] = template;
+        }
+      }
+      // If condition is false, this fragment is omitted entirely
+    } else {
+      // Regular key without conditional
+      processedFragments[key] = template;
+    }
+  }
+  
+  return { processedFragments, warnings: allWarnings };
+}
+
+/**
  * This function is called when your extension is activated. Your extension is activated
  * the very first time the command is executed.
  */
@@ -44,6 +276,9 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
   try {
     // Validate configuration
     const config = vscode.workspace.getConfiguration();
+    
+    // Get warning suppression setting
+    const suppressWarnings = config.get<boolean>('kahua.suppressInvalidConditionWarnings') || false;
     
     // Get and validate token names
     const tokenNamesConfig = config.get<string>('kahua.tokenNames');
@@ -97,48 +332,60 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
     // Process each line
     const expanded: Record<string, string[]> = {};
     const allTokenData: Array<Record<string, string>> = [];
+    const allWarnings: string[] = [];
     
     for (const line of lines) {
       const rawParts = line.split(','); // Keep original whitespace, allow empty parts
-      const trimmedParts = rawParts.map(p => p.trim()); // Trimmed for processing
       
       // Build token values for this line
-      const tokenValues: Record<string, string> = {};
       const rawTokenValues: Record<string, string> = {};
+      const cleanTokenValues: Record<string, string> = {};
       
       for (let i = 0; i < tokenNames.length; i++) {
         const tokenName = tokenNames[i];
-        // Use input value, or fall back to configured default, or empty string
-        const inputValue = trimmedParts[i];
-        const rawInputValue = rawParts[i];
+        const rawPart = rawParts[i] || '';
+        const trimmedPart = rawPart.trim();
         
-        tokenValues[tokenName] = inputValue || tokenDefaults[tokenName];
-        rawTokenValues[tokenName] = rawInputValue || tokenDefaults[tokenName];
+        rawTokenValues[tokenName] = rawPart || tokenDefaults[tokenName];
+        cleanTokenValues[tokenName] = cleanTokenValue(trimmedPart || tokenDefaults[tokenName]);
       }
       
       // Store token data for the table
-      allTokenData.push({ ...tokenValues });
+      allTokenData.push({ ...cleanTokenValues });
 
-      // Apply token replacement for all configured tokens
-      for (const [key, template] of Object.entries(fragmentTemplates)) {
-        let rendered = template;
+      // Process fragment templates with conditional support
+      const { processedFragments, warnings: fragmentWarnings } = processFragmentTemplates(fragmentTemplates, cleanTokenValues, suppressWarnings);
+      allWarnings.push(...fragmentWarnings);
+
+      // Apply token replacement for all processed fragments
+      for (const [key, template] of Object.entries(processedFragments)) {
+        // First process conditional expressions in the template
+        const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(template, cleanTokenValues, suppressWarnings);
+        allWarnings.push(...conditionalWarnings);
         
-        // Handle whitespace-controlled token replacement
-        for (const [tokenName, tokenValue] of Object.entries(tokenValues)) {
+        let rendered = conditionalProcessed;
+        
+        // Handle whitespace-controlled token replacement with $ prefix
+        for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
           const rawValue = rawTokenValues[tokenName];
           
-          // Replace {token:friendly} - preserves original whitespace/formatting
-          rendered = rendered.replaceAll(`{${tokenName}:friendly}`, rawValue);
+          // Replace {$token:friendly} - preserves original whitespace/formatting
+          rendered = rendered.replaceAll(`{$${tokenName}:friendly}`, rawValue);
           
-          // Replace {token:internal} - uses processed/trimmed value (explicit)
-          rendered = rendered.replaceAll(`{${tokenName}:internal}`, tokenValue);
+          // Replace {$token:internal} - uses cleaned value (internal whitespace removed)
+          rendered = rendered.replaceAll(`{$${tokenName}:internal}`, cleanValue);
           
-          // Replace {token} - default behavior (uses processed/trimmed value)
-          rendered = rendered.replaceAll(`{${tokenName}}`, tokenValue);
+          // Replace {$token} - default behavior (uses cleaned value)
+          rendered = rendered.replaceAll(`{$${tokenName}}`, cleanValue);
         }
         
         (expanded[key] ??= []).push(rendered);
       }
+    }
+
+    // Show warnings if any and not suppressed
+    if (allWarnings.length > 0 && !suppressWarnings) {
+      vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
     }
 
     // Create token table

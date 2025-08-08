@@ -12,7 +12,11 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 * **Customizable XML fragments** – Modify, add, or remove output fragments via `kahua.fragments` setting
 
-* **Flexible whitespace control** – Choose whether tokens preserve formatting (`{token:friendly}`) or are trimmed (`{token}`)
+* **Flexible whitespace control** – Choose whether tokens preserve formatting (`{$token:friendly}`) or are trimmed (`{$token}`)
+
+* **Conditional blocks** – Generate dynamic XML with conditional expressions based on token values
+
+* **Advanced token syntax** – Support for `{$token}` prefixing and conditional expressions (`{$condition ? 'value' : 'fallback'}`)
 
 * **Multiple output options** – Copy to clipboard or open in new editor window
 
@@ -48,9 +52,8 @@ You can override the following settings in your workspace or user `settings.json
 | `kahua.showInContextMenu` | `true` | Show Kahua generator commands in the editor right-click context menu |
 | `kahua.outputTarget` | `"newEditor"` | Choose where to output generated XML: `"clipboard"` or `"newEditor"` |
 | `kahua.tokenNames` | `"name,entity,type,label,visualtype:TextBox"` | Comma-separated list of token names with optional defaults (format: `token:defaultValue`) |
-| `kahua.fragments` | See below | Object containing customizable XML fragment templates |
-| `kahua.defaultPrefix.extension` | `""` | Default prefix when generating app‑style attributes |
-| `kahua.defaultPrefix.supplement` | `"Inspections"` | Default prefix when generating supplement‑style attributes |
+| `kahua.suppressInvalidConditionWarnings` | `false` | Suppress error notifications when conditional expressions reference invalid tokens |
+| `kahua.fragments` | See below | Object containing customizable XML fragment templates with conditional support |
 
 ## Token Configuration
 
@@ -67,17 +70,57 @@ The extension uses a configurable token system via the `kahua.tokenNames` settin
 - `FieldName,MyEntity,Integer,Friendly Name` - Provides all except visualtype (uses TextBox default)
 - `FieldName,MyEntity,Integer,Friendly Name,ComboBox` - Provides all tokens
 
-**Token Defaults**: Configure defaults using colon syntax in `kahua.tokenNames`:
-- `name,entity,type:Text,label,visualtype:TextBox` - Sets default "Text" for type, "TextBox" for visualtype
-- Missing input values automatically use the configured defaults
+### Token Defaults
+
+The extension supports configurable default values for tokens using colon syntax in `kahua.tokenNames`. This powerful feature ensures consistent output even when input data is incomplete.
+
+#### Default Configuration Syntax
+
+Use the format `tokenName:defaultValue` in the `kahua.tokenNames` setting:
+
+```json
+{
+  "kahua.tokenNames": "name,entity,type:Text,label,visualtype:TextBox,required:false"
+}
+```
+
+#### How Defaults Work
+
+1. **Input parsing**: Each comma-separated input line is matched to tokens by position
+2. **Missing values**: When input has fewer values than configured tokens, defaults are used
+3. **Empty values**: Blank input values (empty strings) use defaults
+4. **Priority**: Input values always override defaults when provided
+
+#### Default Examples
+
+**Configuration**: `"name,entity,type:Text,label,visualtype:TextBox,category:Standard"`
+
+**Input Scenarios**:
+
+| Input | Result |
+|-------|---------|
+| `FieldA` | `name=FieldA, entity=, type=Text, label=, visualtype=TextBox, category=Standard` |
+| `FieldA,MyEntity` | `name=FieldA, entity=MyEntity, type=Text, label=, visualtype=TextBox, category=Standard` |
+| `FieldA,MyEntity,Integer` | `name=FieldA, entity=MyEntity, type=Integer, label=, visualtype=TextBox, category=Standard` |
+| `FieldA,MyEntity,,Custom Label` | `name=FieldA, entity=MyEntity, type=Text, label=Custom Label, visualtype=TextBox, category=Standard` |
+| `FieldA,MyEntity,Lookup,Field A,ComboBox,Advanced` | `name=FieldA, entity=MyEntity, type=Lookup, label=Field A, visualtype=ComboBox, category=Advanced` |
+
+#### Conditional Interaction
+
+Defaults work seamlessly with conditional expressions:
+
+**Fragment**: `{$type=='Text' ? 'simple' : 'complex'}`
+- **Input**: `FieldName,Entity` (type defaults to "Text")
+- **Result**: "simple" (condition uses default value)
 
 ### Token Processing
 
 All tokens are processed identically with no special built-in logic:
 
-- **Missing tokens** default to empty string if not provided in input
-- **Whitespace handling** depends on fragment template syntax (`{token}`, `{token:internal}`, or `{token:friendly}`)
-- **No fallback logic** - what you input is what gets used (or empty string for missing values)
+- **Default values** - missing or empty input values use configured defaults from `kahua.tokenNames` 
+- **Whitespace handling** - depends on fragment template syntax (`{$token}`, `{$token:internal}`, or `{$token:friendly}`)
+- **Conditional support** - tokens can be used in conditional expressions for dynamic content generation
+- **No fallback logic** - input values and configured defaults are used directly without modification
 
 ### Custom Tokens
 
@@ -127,36 +170,138 @@ The extension generates XML using configurable fragment templates in `kahua.frag
 ```json
 {
   "kahua.fragments": {
-    "attribute": "<Attribute Name=\"{name}\" Label=\"[{prefix}_{name}Label]\" Description=\"[{prefix}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
-    "label": "<Label Key=\"{prefix}_{name}Label\">{label:friendly}</Label>",
-    "descriptionLabel": "<Label Key=\"{prefix}_{name}Description\">{label}</Label>",
-    "dataTag": "<DataTag Name=\"{prefix}_{name}\" Key=\"{prefix}_{name}\" Label=\"[{prefix}_{name}Label]\" CultureLabelKey=\"{prefix}_{name}Label\" />",
-    "field": "<Field Attribute=\"{name}\" />",
-    "fieldDef": "<FieldDef Name=\"{name}\" Path=\"{name}\" DataTag=\"{prefix}_{name}\" Edit.Path=\"{name}\" />",
-    "dataStoreColumn": "<Column AttributeName=\"{name}\" />",
-    "logField": "<Field FieldDef=\"{name}\" />"
+    "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" IsConfigurable=\"true\" />",
+    "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label:friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$label}</Label>",
+    "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+    "Fields": "<Field Attribute=\"{$name}\" />",
+    "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+    "DataStore": "<Column AttributeName=\"{$name}\" />",
+    "LogFields": "<Field FieldDef=\"{$name}\" />",
+    "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name:friendly}\" />",
+    "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} />",
+    "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n<Value />"
   }
 }
 ```
 
-### Token Whitespace Control
+### Token Syntax and Whitespace Control
 
-Fragments support three token formats for controlling whitespace:
+Fragments support the new `{$token}` syntax with three formats for controlling whitespace:
 
-- **`{token}`** - Default behavior, whitespace trimmed (same as `{token:internal}`)
-- **`{token:internal}`** - Explicitly request trimmed whitespace
-- **`{token:friendly}`** - Preserve original whitespace and formatting from input
+- **`{$token}`** - Default behavior, whitespace trimmed (same as `{$token:internal}`)
+- **`{$token:internal}`** - Explicitly request trimmed whitespace  
+- **`{$token:friendly}`** - Preserve original whitespace and formatting from input
 
 **Examples**:
 ```xml
 <!-- Trimmed whitespace (default) -->
-<Label Key="MyPrefix_FieldName">{label}</Label>
+<Label Key="MyEntity_FieldName">{$label}</Label>
 
 <!-- Preserves original whitespace -->
-<Label Key="MyPrefix_FieldName">{label:friendly}</Label>
+<Label Key="MyEntity_FieldName">{$label:friendly}</Label>
 
 <!-- Explicit trimmed (same as default) -->
-<Label Key="MyPrefix_FieldName">{label:internal}</Label>
+<Label Key="MyEntity_FieldName">{$label:internal}</Label>
+```
+
+**Backward Compatibility**: The old `{token}` syntax is still supported for existing configurations.
+
+### Conditional Blocks
+
+The extension supports conditional expressions for dynamic XML generation based on token values.
+
+#### Conditional Expression Syntax
+
+Conditional expressions use the ternary operator format:
+```
+{$condition ? 'trueValue' : 'falseValue'}
+```
+
+#### Supported Operators
+
+- **Equality**: `{$type=='Lookup' ? 'value' : ''}`
+- **Inequality**: `{$type!='Text' ? 'value' : ''}` or `{$type<>'Text' ? 'value' : ''}`
+- **Comparison**: `{$priority>=5 ? 'high' : 'normal'}`, `{$count<=10 ? 'few' : 'many'}`
+- **List membership**: `{$status in ('Active','Pending') ? 'enabled' : 'disabled'}`
+- **List exclusion**: `{$type not in ('Text','Integer') ? 'complex' : 'simple'}`
+
+#### Conditional Fragment Values
+
+Use conditionals within fragment templates to generate dynamic content:
+
+```json
+{
+  "Visuals": "<{$visualtype} Name=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} />"
+}
+```
+
+**Input**: `FieldName,MyEntity,Lookup,Field Label,ComboBox`
+**Output**: `<ComboBox Name="FieldName" LookupListName="FieldName" />`
+
+**Input**: `FieldName,MyEntity,Text,Field Label,TextBox`
+**Output**: `<TextBox Name="FieldName" />`
+
+#### Conditional Fragment Keys
+
+Use conditionals in fragment keys to include/exclude entire fragments based on conditions:
+
+```json
+{
+  "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n<Value />"
+}
+```
+
+- **When `type='Lookup'`**: Generates a `LookupList` fragment with the specified content
+- **When `type='Text'`**: The entire fragment is omitted from output
+
+#### Error Handling
+
+- **Invalid tokens**: When conditions reference tokens that don't exist or are empty, the condition evaluates to `false`
+- **Warning notifications**: By default, invalid token references show error notifications
+- **Suppress warnings**: Set `kahua.suppressInvalidConditionWarnings: true` to disable notifications
+
+#### Complete Conditional Example
+
+**Configuration**:
+```json
+{
+  "kahua.fragments": {
+    "Controls": "<{$visualtype} Name=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} {$required=='true' ? 'Required=\"true\"' : ''} />",
+    "{$type=='Lookup' ? 'LookupDefinition' : ''}": "<LookupList Name=\"{$name}\">\n  <Value />\n</LookupList>",
+    "{$category=='Advanced' ? 'AdvancedSettings' : ''}": "<Setting Name=\"{$name}\" Level=\"Advanced\" />"
+  }
+}
+```
+
+**Input Lines**:
+```
+FieldA,MyEntity,Lookup,Field A,ComboBox,true,Basic
+FieldB,MyEntity,Text,Field B,TextBox,false,Advanced
+FieldC,MyEntity,Lookup,Field C,ListBox,true,Advanced
+```
+
+**Output** (for FieldA - Lookup type):
+```xml
+<!-- Controls -->
+<ComboBox Name="FieldA" LookupListName="FieldA" Required="true" />
+
+<!-- LookupDefinition (included because type=='Lookup') -->
+<LookupList Name="FieldA">
+  <Value />
+</LookupList>
+
+<!-- AdvancedSettings fragment omitted (category=='Basic') -->
+```
+
+**Output** (for FieldB - Text type, Advanced category):
+```xml
+<!-- Controls -->
+<TextBox Name="FieldB" />
+
+<!-- LookupDefinition fragment omitted (type!='Lookup') -->
+
+<!-- AdvancedSettings (included because category=='Advanced') -->
+<Setting Name="FieldB" Level="Advanced" />
 ```
 
 ### Custom Fragments
@@ -166,43 +311,91 @@ You can add, remove, or modify fragments in your settings:
 ```json
 {
   "kahua.fragments": {
-    "attribute": "<Attribute Name=\"{name}\" DataType=\"{type}\" />",
-    "customFragment": "<Custom {name}=\"{prefix}\" Category=\"{category}\" />",
-    "anotherFragment": "<Another>{label:friendly}</Another>"
+    "Attributes": "<Attribute Name=\"{$name}\" DataType=\"{$type}\" />",
+    "CustomFragment": "<Custom Name=\"{$name}\" Entity=\"{$entity}\" Category=\"{$category}\" />",
+    "ConditionalFragment": "<Element {$type=='Special' ? 'SpecialAttr=\"true\"' : ''} >{$label:friendly}</Element>",
+    "{$enabled=='true' ? 'EnabledElements' : ''}": "<Enabled Name=\"{$name}\" />"
   }
 }
 ```
 
 ### Fragment Examples
 
-**Input**: `Field Name, MyApp, Integer, User Friendly Label`
+**Input**: `FieldName,MyEntity,Integer,User Friendly Label,TextBox`
 
-**Generated Output**:
+**Generated Output** (using default fragments):
 ```xml
-<!-- attribute -->
-<Attribute Name="FieldName" Label="[MyApp_FieldNameLabel]" Description="[MyApp_FieldNameDescription]" DataType="Integer" IsConfigurable="true" />
+<!-- Token Configuration and Values Table -->
+| Token      | Default | Line 1              |
+|------------|---------|---------------------|
+| name       |         | FieldName           |
+| entity     |         | MyEntity            |
+| type       |         | Integer             |
+| label      |         | User Friendly Label |
+| visualtype | TextBox | TextBox             |
 
-<!-- label -->
-<Label Key="MyApp_FieldNameLabel">User Friendly Label</Label>
+<!-- Attributes -->
+<Attribute Name="FieldName" Label="[MyEntity_FieldNameLabel]" Description="[MyEntity_FieldNameDescription]" DataType="Integer" IsConfigurable="true" />
 
-<!-- descriptionLabel -->
-<Label Key="MyApp_FieldNameDescription">Field Name</Label>
+<!-- Labels -->
+<Label Key="MyEntity_FieldNameLabel">User Friendly Label</Label>
+<Label Key="MyEntity_FieldNameDescription">User Friendly Label</Label>
 
-<!-- dataTag -->
-<DataTag Name="MyApp_FieldName" Key="MyApp_FieldName" Label="[MyApp_FieldNameLabel]" CultureLabelKey="MyApp_FieldNameLabel" />
+<!-- DataTags -->
+<DataTag Name="MyEntity_FieldName" Key="MyEntity_FieldName" Label="[MyEntity_FieldNameLabel]" CultureLabelKey="MyEntity_FieldNameLabel">
+  <Key />
+</DataTag>
 
-<!-- field -->
+<!-- Fields -->
 <Field Attribute="FieldName" />
 
-<!-- fieldDef -->
-<FieldDef Name="FieldName" Path="FieldName" DataTag="MyApp_FieldName" Edit.Path="FieldName" />
+<!-- FieldDefs -->
+<FieldDef Name="FieldName" Path="FieldName" DataTag="MyEntity_FieldName" Edit.Path="FieldName" />
 
-<!-- dataStoreColumn -->
+<!-- DataStore -->
 <Column AttributeName="FieldName" />
 
-<!-- logField -->
+<!-- LogFields -->
 <Field FieldDef="FieldName" />
+
+<!-- ImportDefs -->
+<Column AttributeName="FieldName" Name="User Friendly Label" />
+
+<!-- Visuals -->
+<TextBlock Name="FieldName" DataTag="MyEntity_FieldName" Path="FieldName" />
+<TextBox Name="FieldName" DataTag="MyEntity_FieldName" Path="FieldName"  />
 ```
+
+## Quick Reference
+
+### Token Syntax
+- **Basic**: `{$tokenName}` - Uses token value with trimmed whitespace
+- **Friendly**: `{$tokenName:friendly}` - Preserves original input whitespace
+- **Internal**: `{$tokenName:internal}` - Explicitly trimmed (same as basic)
+
+### Conditional Expressions
+- **Ternary**: `{$condition ? 'trueValue' : 'falseValue'}`
+- **Equality**: `{$type=='Lookup' ? 'value' : ''}`
+- **Inequality**: `{$type!='Text' ? 'value' : ''}` or `{$type<>'Text' ? 'value' : ''}`
+- **Comparison**: `{$count>=5 ? 'many' : 'few'}`
+- **Lists**: `{$status in ('A','B') ? 'valid' : 'invalid'}`
+- **Exclusion**: `{$type not in ('X','Y') ? 'special' : 'normal'}`
+
+### Default Configuration
+```json
+{
+  "kahua.tokenNames": "name,entity,type:Text,label,visualtype:TextBox",
+  "kahua.suppressInvalidConditionWarnings": false,
+  "kahua.fragments": {
+    "FragmentName": "<Element Name=\"{$name}\" {$type=='Special' ? 'Extra=\"true\"' : ''} />",
+    "{$enabled=='true' ? 'EnabledSection' : ''}": "<Section>{$content}</Section>"
+  }
+}
+```
+
+### Keyboard Shortcuts
+- **Ctrl+Alt+E**: Generate Extension Attributes
+- **Ctrl+Alt+S**: Generate Supplement Attributes
 
 ## Development
 

@@ -1,8 +1,8 @@
 {
   "name": "kahua-attribute-generator",
   "displayName": "Kahua Attribute Generator",
-  "description": "Generate XML for Kahua App Def attribute, label, DataTag, Data Store Column, FieldDef, etc from selected lines.",
-  "version": "1.5.0",
+  "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
+  "version": "1.7.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -106,20 +106,26 @@
           "default": "name,entity,type,label,visualtype:TextBox",
           "description": "Comma-separated list of token names that can be used in fragments. Format: 'name,prefix,type' or 'name,prefix:DefaultValue,type:Text' to specify default values. Defaults are used when input values are not provided."
         },
+        "kahua.suppressInvalidConditionWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Suppress error notifications when conditional expressions reference tokens that don't exist or have no value."
+        },
         "kahua.fragments": {
           "type": "object",
           "default": {
-            "Attributes": "<Attribute Name=\"{name}\" Label=\"[{entity}_{name}Label]\" Description=\"[{entity}_{name}Description]\" DataType=\"{type}\" IsConfigurable=\"true\" />",
-            "Labels": "<Label Key=\"{entity}_{name}Label\">{label:friendly}</Label>\n<Label Key=\"{entity}_{name}Description\">{label}</Label>",
-            "DataTags": "<DataTag Name=\"{entity}_{name}\" Key=\"{entity}_{name}\" Label=\"[{entity}_{name}Label]\" CultureLabelKey=\"{entity}_{name}Label\">\n  <Key />\n</DataTag>",
-            "Fields": "<Field Attribute=\"{name}\" />",
-            "FieldDefs": "<FieldDef Name=\"{name}\" Path=\"{name}\" DataTag=\"{entity}_{name}\" Edit.Path=\"{name}\" />",
-            "DataStore": "<Column AttributeName=\"{name}\" />",
-            "LogFields": "<Field FieldDef=\"{name}\" />",
-            "ImportDefs": "<Column AttributeName=\"{name}\" Name=\"{name:friendly}\" />",
-            "Visuals": "<TextBlock Name=\"{name}\" DataTag=\"{entity}_{name}\" Path=\"{name}\" />\n<{visualtype} Name=\"{name}\" DataTag=\"{entity}_{name}\" Path=\"{name}\" />"
+            "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" IsConfigurable=\"true\" />",
+            "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label:friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$label}</Label>",
+            "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+            "Fields": "<Field Attribute=\"{$name}\" />",
+            "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+            "DataStore": "<Column AttributeName=\"{$name}\" />",
+            "LogFields": "<Field FieldDef=\"{$name}\" />",
+            "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name:friendly}\" />",
+            "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} />",
+            "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n<Value />"
           },
-          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments. Tokens support whitespace control: {token} or {token:internal} (default, trimmed) vs {token:friendly} (preserves whitespace)."
+          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments. Tokens support whitespace control: {$token} or {$token:internal} (default, trimmed) vs {$token:friendly} (preserves whitespace). Supports conditional blocks with syntax: {$condition ? 'value' : 'fallback'}."
         }
       }
     }
