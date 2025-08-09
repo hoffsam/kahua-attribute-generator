@@ -1,0 +1,39 @@
+# Token Transformation Examples
+
+## Test Input Data:
+MyApp
+field & value, entity<tag>, Text, user's field name, TextBox
+
+## Expected Output with Corrected Pipe Transformations:
+
+### Basic token (default) - PascalCase:
+{$name} → FieldValue
+
+### Friendly transformation - TitleCase with XML escaping:
+{$label|friendly} → User's Field Name (becomes: User&#39;s Field Name)
+
+### Internal transformation - PascalCase (same as default):
+{$name|internal} → FieldValue
+
+### Upper transformation - UPPERCASE with XML escaping:
+{$label|upper} → USER'S FIELD NAME (becomes: USER&#39;S FIELD NAME)
+
+### Lower transformation - lowercase with XML escaping:
+{$entity|lower} → entity<tag> (becomes: entity&lt;tag&gt;)
+
+## Corrected Transformation Table:
+
+| Transformation | Syntax | Behavior | Example Input | Example Output |
+|----------------|--------|----------|---------------|----------------|
+| **Default** | `{$token}` | PascalCase (no spaces/special chars) | `field & value` | `FieldValue` |
+| **Friendly** | `{$token|friendly}` | TitleCase with XML escaping | `field of the rings` | `Field of the Rings` |
+| **Internal** | `{$token|internal}` | PascalCase (same as default) | `field & value` | `FieldValue` |
+| **Upper** | `{$token|upper}` | UPPERCASE with XML escaping | `field & value` | `FIELD &amp; VALUE` |
+| **Lower** | `{$token|lower}` | lowercase with XML escaping | `FIELD & VALUE` | `field &amp; value` |
+
+## Fragment Template Examples:
+
+<Attribute Name="{$name}" Label="[{$entity}_{$name}Label]" />
+<Label Key="{$entity}_{$name}Label">{$label|friendly}</Label>
+<Description>{$description|lower}</Description>
+<Comment>{$notes|upper}</Comment>

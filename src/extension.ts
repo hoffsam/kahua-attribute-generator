@@ -10,15 +10,117 @@ interface ConditionalResult {
 }
 
 /**
- * Cleans a token value by removing internal whitespace and special characters
- * for use in XML attributes and identifiers
+ * Configuration interfaces for the new system
  */
-function cleanTokenValue(value: string): string {
+interface TokenNameDefinition {
+  id: string;
+  name: string;
+  type: 'header' | 'table';
+  tokens: string;
+}
+
+interface FragmentDefinition {
+  id: string;
+  name: string;
+  type?: 'grouped' | 'table'; // Default is 'grouped'
+  tokenReferences: string[];
+  fragments: Record<string, string | Record<string, string>>;
+}
+
+interface MenuOption {
+  name: string;
+  fragments: string[];
+}
+
+/**
+ * Parsed token information
+ */
+interface ParsedToken {
+  name: string;
+  defaultValue: string;
+}
+
+
+/**
+ * Converts a token value to PascalCase by removing spaces and special characters
+ * and capitalizing the first letter of each word
+ */
+function toPascalCase(value: string): string {
   if (!value) return value;
   
-  // Remove internal whitespace and common special characters
-  // Keep alphanumeric characters, hyphens, and underscores
-  return value.replace(/\s+/g, '').replace(/[^a-zA-Z0-9\-_]/g, '');
+  // Split on word boundaries (spaces, punctuation, etc.) and filter out empty strings
+  return value
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(word => word.length > 0)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join('');
+}
+
+/**
+ * Converts a token value to TitleCase following standard capitalization rules
+ */
+function toTitleCase(value: string): string {
+  if (!value) return value;
+  
+  // Words that should remain lowercase (articles, short prepositions, conjunctions)
+  const lowercaseWords = new Set([
+    'a', 'an', 'the', 'and', 'or', 'but', 'nor', 'yet', 'so',
+    'in', 'on', 'at', 'by', 'for', 'of', 'to', 'up', 'as'
+  ]);
+  
+  // Split into words while preserving spaces
+  const words = value.toLowerCase().split(/(\s+)/);
+  
+  return words.map((word, index) => {
+    // Preserve whitespace as-is
+    if (/^\s+$/.test(word)) {
+      return word;
+    }
+    
+    // Always capitalize first and last word
+    const isFirstWord = index === 0 || words.slice(0, index).every(w => /^\s+$/.test(w));
+    const isLastWord = index === words.length - 1 || words.slice(index + 1).every(w => /^\s+$/.test(w));
+    
+    if (isFirstWord || isLastWord || !lowercaseWords.has(word.toLowerCase())) {
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    }
+    
+    return word;
+  }).join('');
+}
+
+/**
+ * Escapes XML special characters in a string
+ */
+function escapeXml(value: string): string {
+  if (!value) return value;
+  
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Applies transformation to a token value based on the transformation type
+ */
+function applyTokenTransformation(value: string, transformation: string): string {
+  if (!value) return value;
+  
+  switch (transformation.toLowerCase()) {
+    case 'friendly':
+      return escapeXml(toTitleCase(value)); // Apply TitleCase and XML escape
+    case 'internal':
+      return toPascalCase(value); // Convert to PascalCase (no XML escaping needed for identifiers)
+    case 'upper':
+      return escapeXml(value.toUpperCase()); // Convert to uppercase and XML escape
+    case 'lower':
+      return escapeXml(value.toLowerCase()); // Convert to lowercase and XML escape
+    default:
+      return toPascalCase(value); // Default: PascalCase (no XML escaping for identifiers)
+  }
 }
 
 /**
@@ -68,18 +170,40 @@ function evaluateConditional(expression: string, tokenValues: Record<string, str
 
 /**
  * Safely evaluates a conditional expression
- * Supports: ==, !=, <=, >=, <>, in, not in, ternary operator
+ * Supports: ==, !=, <=, >=, <>, in, not in, ternary operator, &&, ||, parentheses
  */
 function evaluateExpression(expression: string): boolean {
   // Remove extra whitespace
   expression = expression.trim();
   
-  // Handle ternary operator (condition ? value : fallback)
-  const ternaryMatch = expression.match(/^(.+?)\s*\?\s*(.+?)\s*:\s*(.+)$/);
-  if (ternaryMatch) {
-    const [, condition, trueValue, falseValue] = ternaryMatch;
+  // Handle ternary operator (condition ? value : fallback) - need to find the main ? and : carefully
+  const ternaryResult = findTernaryOperator(expression);
+  if (ternaryResult) {
+    const { condition, trueValue, falseValue } = ternaryResult;
     const conditionResult = evaluateExpression(condition);
     return conditionResult;
+  }
+  
+  // Handle logical OR (||) - lowest precedence
+  const orResult = findLogicalOperator(expression, '||');
+  if (orResult) {
+    const { left, right } = orResult;
+    return evaluateExpression(left) || evaluateExpression(right);
+  }
+  
+  // Handle logical AND (&&) - higher precedence than OR
+  const andResult = findLogicalOperator(expression, '&&');
+  if (andResult) {
+    const { left, right } = andResult;
+    return evaluateExpression(left) && evaluateExpression(right);
+  }
+  
+  // Handle parentheses
+  if (expression.startsWith('(') && expression.endsWith(')')) {
+    const inner = expression.slice(1, -1).trim();
+    if (isBalancedParentheses(inner)) {
+      return evaluateExpression(inner);
+    }
   }
   
   // Handle 'not in' operator
@@ -127,7 +251,77 @@ function evaluateExpression(expression: string): boolean {
 }
 
 /**
- * Processes conditional blocks in template strings
+ * Helper function to check if parentheses are balanced in an expression
+ */
+function isBalancedParentheses(expression: string): boolean {
+  let count = 0;
+  for (const char of expression) {
+    if (char === '(') count++;
+    else if (char === ')') count--;
+    if (count < 0) return false;
+  }
+  return count === 0;
+}
+
+/**
+ * Finds the main ternary operator (? :) in an expression, respecting nesting
+ */
+function findTernaryOperator(expression: string): { condition: string; trueValue: string; falseValue: string } | null {
+  let parenCount = 0;
+  let questionPos = -1;
+  let colonPos = -1;
+  
+  // Find the main ? and : operators (not inside parentheses)
+  for (let i = 0; i < expression.length; i++) {
+    const char = expression[i];
+    if (char === '(') parenCount++;
+    else if (char === ')') parenCount--;
+    else if (char === '?' && parenCount === 0 && questionPos === -1) {
+      questionPos = i;
+    } else if (char === ':' && parenCount === 0 && questionPos !== -1 && colonPos === -1) {
+      colonPos = i;
+      break;
+    }
+  }
+  
+  if (questionPos !== -1 && colonPos !== -1) {
+    const condition = expression.substring(0, questionPos).trim();
+    const trueValue = expression.substring(questionPos + 1, colonPos).trim();
+    const falseValue = expression.substring(colonPos + 1).trim();
+    return { condition, trueValue, falseValue };
+  }
+  
+  return null;
+}
+
+/**
+ * Finds logical operators (&&, ||) in an expression, respecting nesting
+ */
+function findLogicalOperator(expression: string, operator: '&&' | '||'): { left: string; right: string } | null {
+  let parenCount = 0;
+  const opLength = operator.length;
+  
+  // Find the rightmost occurrence of the operator (right-to-left for correct precedence)
+  for (let i = expression.length - opLength; i >= 0; i--) {
+    const char = expression[i];
+    const nextChar = expression[i + 1];
+    
+    if (char === ')') parenCount++;
+    else if (char === '(') parenCount--;
+    else if (parenCount === 0 && expression.substr(i, opLength) === operator) {
+      const left = expression.substring(0, i).trim();
+      const right = expression.substring(i + opLength).trim();
+      if (left && right) {
+        return { left, right };
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Processes conditional blocks in template strings with improved parsing
  */
 function processConditionalTemplate(template: string, tokenValues: Record<string, string>, suppressWarnings: boolean): { result: string; warnings: string[] } {
   const warnings: string[] = [];
@@ -139,18 +333,35 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
     const startPos = result.indexOf('{$', pos);
     if (startPos === -1) break;
     
-    // Check if this looks like a conditional (contains ? and :)
+    // Find the matching closing brace, respecting nesting
     let braceCount = 0;
     let endPos = startPos;
     let foundQuestion = false;
     let foundColon = false;
+    let inQuotes = false;
+    let quoteChar = '';
     
     for (let i = startPos; i < result.length; i++) {
       const char = result[i];
-      if (char === '{') braceCount++;
-      else if (char === '}') braceCount--;
-      else if (char === '?' && braceCount === 1) foundQuestion = true;
-      else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
+      const prevChar = i > 0 ? result[i - 1] : '';
+      
+      // Handle quoted strings
+      if ((char === '"' || char === "'") && prevChar !== '\\') {
+        if (!inQuotes) {
+          inQuotes = true;
+          quoteChar = char;
+        } else if (char === quoteChar) {
+          inQuotes = false;
+          quoteChar = '';
+        }
+      }
+      
+      if (!inQuotes) {
+        if (char === '{') braceCount++;
+        else if (char === '}') braceCount--;
+        else if (char === '?' && braceCount === 1) foundQuestion = true;
+        else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
+      }
       
       if (braceCount === 0) {
         endPos = i;
@@ -169,12 +380,25 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
         warnings.push(`Invalid tokens in conditional expression "${expression}": ${evalResult.invalidTokens.join(', ')}`);
       }
       
-      // Extract the true and false values from the ternary
-      const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'(.*?)'\s*:\s*'(.*?)'$/);
-      if (ternaryMatch) {
-        const [, conditionPart, trueValue, falseValue] = ternaryMatch;
-        // Evaluate only the condition part, not the entire ternary expression
-        const conditionResult = evaluateConditional(conditionPart, tokenValues);
+      // Use the improved ternary parsing to extract values
+      const ternaryResult = findTernaryOperator(expression);
+      if (ternaryResult) {
+        const conditionResult = evaluateConditional(ternaryResult.condition, tokenValues);
+        
+        // Remove quotes from true/false values if they exist
+        let trueValue = ternaryResult.trueValue;
+        let falseValue = ternaryResult.falseValue;
+        
+        if ((trueValue.startsWith("'") && trueValue.endsWith("'")) || 
+            (trueValue.startsWith('"') && trueValue.endsWith('"'))) {
+          trueValue = trueValue.slice(1, -1);
+        }
+        
+        if ((falseValue.startsWith("'") && falseValue.endsWith("'")) || 
+            (falseValue.startsWith('"') && falseValue.endsWith('"'))) {
+          falseValue = falseValue.slice(1, -1);
+        }
+        
         const replacementValue = conditionResult.condition ? trueValue : falseValue;
         result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
         pos = startPos + replacementValue.length;
@@ -192,10 +416,10 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
 }
 
 /**
- * Processes template fragments to handle conditional keys
+ * Processes template fragments to handle conditional keys and nested structures
  */
 function processFragmentTemplates(
-  fragmentTemplates: Record<string, string>, 
+  fragmentTemplates: Record<string, string | Record<string, string>>, 
   tokenValues: Record<string, string>, 
   suppressWarnings: boolean
 ): { processedFragments: Record<string, string>; warnings: string[] } {
@@ -203,31 +427,40 @@ function processFragmentTemplates(
   const allWarnings: string[] = [];
   
   for (const [key, template] of Object.entries(fragmentTemplates)) {
-    // Check if the key itself contains a conditional
-    const keyConditionalMatch = key.match(/^\{\$([^}]+\s*\?\s*[^}]+\s*:\s*[^}]+)\}(.*)$/);
-    
-    if (keyConditionalMatch) {
-      const [, expression, keyRemainder] = keyConditionalMatch;
-      const evalResult = evaluateConditional(expression, tokenValues);
-      
-      if (!evalResult.hasValidTokens && !suppressWarnings) {
-        allWarnings.push(`Invalid tokens in conditional key "${key}": ${evalResult.invalidTokens.join(', ')}`);
+    if (typeof template === 'object') {
+      // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
+      for (const [subKey, subTemplate] of Object.entries(template)) {
+        const fullKey = `${key} - ${subKey}`;
+        processedFragments[fullKey] = subTemplate;
       }
-      
-      // Only include this fragment if the condition is true
-      if (evalResult.condition) {
-        // Extract the actual key name from the ternary expression
-        const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'([^']*?)'\s*:\s*'([^']*?)'$/);
-        if (ternaryMatch) {
-          const [, , trueValue] = ternaryMatch;
-          const actualKey = trueValue + keyRemainder;
-          processedFragments[actualKey] = template;
-        }
-      }
-      // If condition is false, this fragment is omitted entirely
     } else {
-      // Regular key without conditional
-      processedFragments[key] = template;
+      // Handle flat structure
+      // Check if the key itself contains a conditional
+      const keyConditionalMatch = key.match(/^\{\$([^}]+\s*\?\s*[^}]+\s*:\s*[^}]+)\}(.*)$/);
+      
+      if (keyConditionalMatch) {
+        const [, expression, keyRemainder] = keyConditionalMatch;
+        const evalResult = evaluateConditional(expression, tokenValues);
+        
+        if (!evalResult.hasValidTokens && !suppressWarnings) {
+          allWarnings.push(`Invalid tokens in conditional key "${key}": ${evalResult.invalidTokens.join(', ')}`);
+        }
+        
+        // Only include this fragment if the condition is true
+        if (evalResult.condition) {
+          // Extract the actual key name from the ternary expression
+          const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'([^']*?)'\s*:\s*'([^']*?)'$/);
+          if (ternaryMatch) {
+            const [, , trueValue] = ternaryMatch;
+            const actualKey = trueValue + keyRemainder;
+            processedFragments[actualKey] = template;
+          }
+        }
+        // If condition is false, this fragment is omitted entirely
+      } else {
+        // Regular key without conditional
+        processedFragments[key] = template;
+      }
     }
   }
   
@@ -235,43 +468,266 @@ function processFragmentTemplates(
 }
 
 /**
- * This function is called when your extension is activated. Your extension is activated
- * the very first time the command is executed.
+ * This function is called when your extension is activated.
  */
 export function activate(context: vscode.ExtensionContext) {
-  // Register commands for both extension and supplement modes. Each will call
-  // the shared handler with the appropriate mode string.
-  // This allows the extension to be used from the command palette or context menu.
-  // The commands are registered with the context so they can be disposed of when the extension is deactivated.
-  // The commands are also added to the context menu for easy access.
-  // The context variable 'kahua.showInContextMenu' is set to true to enable
-  // the context menu items when the editor has focus and a selection is made.
+  // Set up context menu visibility
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
   
+  // Register attribute generation commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('kahua.createExtensionAttributes', () => handleSelection('extension')),
-    vscode.commands.registerCommand('kahua.createSupplementAttributes', () => handleSelection('supplement')),
-    vscode.commands.registerCommand('kahua.insertTokenTemplate', () => insertTokenTemplate()),
-    vscode.commands.registerCommand('kahua.insertTokenSnippet', () => insertTokenSnippet())
+    vscode.commands.registerCommand('kahua.generateAttributesExtension', () => handleSelection(['attributes'])),
+    vscode.commands.registerCommand('kahua.generateAttributesSupplement', () => handleSelection(['supplements'])),
+    vscode.commands.registerCommand('kahua.generateSnippetAttributes', () => generateSnippetForFragments(['attributes'])),
+    vscode.commands.registerCommand('kahua.generateTemplateAttributes', () => generateTemplateForFragments(['attributes']))
+  );
+  
+  // Register lookup generation commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kahua.generateLookups', () => handleSelection(['lookups'])),
+    vscode.commands.registerCommand('kahua.generateSnippetLookups', () => generateSnippetForFragments(['lookups'])),
+    vscode.commands.registerCommand('kahua.generateTemplateLookups', () => generateTemplateForFragments(['lookups']))
+  );
+  
+  // Register custom generation commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kahua.generateCustom', async () => {
+      const config = vscode.workspace.getConfiguration();
+      const menuOptions = config.get<MenuOption[]>('kahua.menuOptions') || [];
+      
+      if (menuOptions.length === 0) {
+        vscode.window.showErrorMessage('No menu options configured. Please configure kahua.menuOptions in your settings.');
+        return;
+      }
+      
+      const pick = await vscode.window.showQuickPick(
+        menuOptions.map(option => ({
+          label: option.name,
+          fragments: option.fragments
+        })),
+        { 
+          placeHolder: 'Select fragment type to generate',
+          title: 'Kahua Custom Fragment Generator'
+        }
+      );
+      
+      if (pick) {
+        await handleSelection(pick.fragments);
+      }
+    }),
+    vscode.commands.registerCommand('kahua.generateSnippetCustom', async () => {
+      const pick = await selectCustomFragments('Select fragments for snippet generation');
+      if (pick) {
+        await generateSnippetForFragments(pick.fragments);
+      }
+    }),
+    vscode.commands.registerCommand('kahua.generateTemplateCustom', async () => {
+      const pick = await selectCustomFragments('Select fragments for template generation');
+      if (pick) {
+        await generateTemplateForFragments(pick.fragments);
+      }
+    })
+  );
+}
+
+
+/**
+ * Parses token definitions from configuration string
+ */
+function parseTokenDefinition(tokens: string): ParsedToken[] {
+  return tokens.split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+    .map(tokenConfig => {
+      const [tokenName, defaultValue] = tokenConfig.split(':', 2);
+      return {
+        name: tokenName.trim(),
+        defaultValue: defaultValue?.trim() || ''
+      };
+    });
+}
+
+/**
+ * Merges token definitions with priority handling
+ */
+function mergeTokenDefinitions(
+  tokenDefs: TokenNameDefinition[], 
+  referencedIds: string[]
+): { headerTokens: ParsedToken[]; tableTokens: ParsedToken[]; tokenDefaults: Record<string, string> } {
+  const headerTokens: ParsedToken[] = [];
+  const tableTokens: ParsedToken[] = [];
+  const tokenDefaults: Record<string, string> = {};
+  const seenTokens = new Set<string>();
+  
+  // Process token definitions in priority order (first referenced has priority)
+  for (const refId of referencedIds) {
+    const tokenDef = tokenDefs.find(def => def.id === refId);
+    if (!tokenDef) continue;
+    
+    const parsedTokens = parseTokenDefinition(tokenDef.tokens);
+    
+    for (const token of parsedTokens) {
+      if (!seenTokens.has(token.name)) {
+        seenTokens.add(token.name);
+        tokenDefaults[token.name] = token.defaultValue;
+        
+        if (tokenDef.type === 'header') {
+          headerTokens.push(token);
+        } else {
+          tableTokens.push(token);
+        }
+      }
+    }
+  }
+  
+  return { headerTokens, tableTokens, tokenDefaults };
+}
+
+/**
+ * Splits input text into groups separated by empty lines
+ */
+function splitIntoGroups(text: string): string[][] {
+  const allLines = text.split(/\r?\n/);
+  const groups: string[][] = [];
+  let currentGroup: string[] = [];
+  
+  for (const line of allLines) {
+    if (line.trim() === '') {
+      // Empty line - end current group if it has content
+      if (currentGroup.length > 0) {
+        groups.push(currentGroup);
+        currentGroup = [];
+      }
+    } else {
+      // Non-empty line - add to current group
+      currentGroup.push(line.trim());
+    }
+  }
+  
+  // Add final group if it has content
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+  
+  return groups;
+}
+
+
+/**
+ * Creates a properly formatted table with aligned columns
+ */
+function createFormattedTokenTable(
+  tokenNames: string[],
+  tokenData: Array<Record<string, string>>,
+  tokenDefaults: Record<string, string>,
+  groupNumber: number
+): string {
+  if (tokenData.length === 0) {
+    return `<!-- Group ${groupNumber} - No token data -->`;
+  }
+  
+  // Calculate column widths
+  const columns = ['Token', 'Default', ...tokenData.map((_, i) => `Line ${i + 1}`)];
+  const columnWidths = columns.map(col => col.length);
+  
+  // Update widths based on token names
+  tokenNames.forEach((tokenName, tokenIndex) => {
+    columnWidths[0] = Math.max(columnWidths[0], tokenName.length);
+    
+    const defaultValue = tokenDefaults[tokenName] || '';
+    columnWidths[1] = Math.max(columnWidths[1], defaultValue.length);
+    
+    tokenData.forEach((data, dataIndex) => {
+      const value = data[tokenName] || '';
+      columnWidths[dataIndex + 2] = Math.max(columnWidths[dataIndex + 2], value.length);
+    });
+  });
+  
+  // Create header
+  const header = '| ' + columns.map((col, i) => col.padEnd(columnWidths[i])).join(' | ') + ' |';
+  const separator = '|' + columnWidths.map(width => '-'.repeat(width + 2)).join('|') + '|';
+  
+  // Create data rows
+  const rows = tokenNames.map(tokenName => {
+    const defaultValue = (tokenDefaults[tokenName] || '').padEnd(columnWidths[1]);
+    const values = tokenData.map((data, i) => (data[tokenName] || '').padEnd(columnWidths[i + 2]));
+    return '| ' + tokenName.padEnd(columnWidths[0]) + ' | ' + defaultValue + ' | ' + values.join(' | ') + ' |';
+  });
+  
+  return `<!-- Group ${groupNumber} Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
+}
+
+/**
+ * Renders a template with token replacement and conditional processing
+ */
+function renderTemplate(
+  template: string, 
+  cleanTokenValues: Record<string, string>,
+  rawTokenValues: Record<string, string>,
+  suppressWarnings: boolean
+): { result: string; warnings: string[] } {
+  const warnings: string[] = [];
+  
+  // First process conditional expressions
+  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
+    template, 
+    cleanTokenValues, 
+    suppressWarnings
+  );
+  warnings.push(...conditionalWarnings);
+  
+  let rendered = conditionalProcessed;
+  
+  // Handle transformation-controlled token replacement
+  for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+    const rawValue = rawTokenValues[tokenName] || '';
+    
+    // Find all token references with transformations in the rendered template
+    const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
+    let match;
+    
+    while ((match = tokenPattern.exec(rendered)) !== null) {
+      const fullMatch = match[0];
+      const transformation = match[1] || 'default'; // Use 'default' if no transformation specified
+      const transformedValue = applyTokenTransformation(rawValue, transformation);
+      
+      rendered = rendered.replace(fullMatch, transformedValue);
+      // Reset the regex to continue searching from the beginning since we modified the string
+      tokenPattern.lastIndex = 0;
+    }
+  }
+  
+  return { result: rendered, warnings };
+}
+
+/**
+ * Shows quickpick for selecting custom fragments
+ */
+async function selectCustomFragments(placeholder: string): Promise<{ label: string; fragments: string[] } | undefined> {
+  const config = vscode.workspace.getConfiguration();
+  const menuOptions = config.get<MenuOption[]>('kahua.menuOptions') || [];
+  
+  if (menuOptions.length === 0) {
+    vscode.window.showErrorMessage('No menu options configured. Please configure kahua.menuOptions in your settings.');
+    return undefined;
+  }
+  
+  return await vscode.window.showQuickPick(
+    menuOptions.map(option => ({
+      label: option.name,
+      fragments: option.fragments
+    })),
+    { 
+      placeHolder: placeholder,
+      title: 'Kahua Custom Fragment Selector'
+    }
   );
 }
 
 /**
- * This function is called when your extension is deactivated. Nothing to clean up
- * at the moment, but the function is required by VS Code's API.
+ * Generates and inserts a snippet for the specified fragment types
  */
-export function deactivate() {
-  /* no‑op */
-}
-
-/**
- * Handles the logic of reading the current selection and generating XML snippets
- * based on the provided mode. Validates configuration and selection, then generates
- * XML using configurable tokens and fragments.
- *
- * @param mode Determines which prefix configuration key to use: "extension" or "supplement".
- */
-async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> {
+async function generateSnippetForFragments(fragmentIds: string[]): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showErrorMessage('No active editor found');
@@ -279,113 +735,391 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
   }
 
   try {
-    // Validate configuration
     const config = vscode.workspace.getConfiguration();
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
     
-    // Get warning suppression setting
-    const suppressWarnings = config.get<boolean>('kahua.suppressInvalidConditionWarnings') || false;
-    
-    // Get and validate token names
-    const tokenNamesConfig = config.get<string>('kahua.tokenNames');
-    if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
-      throw new Error('kahua.tokenNames is not defined or is empty. Please configure token names in your settings.');
+    if (tokenDefinitions.length === 0) {
+      throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
     }
     
-    // Parse token names and their default values
-    const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-    if (tokenConfigs.length === 0) {
-      throw new Error('kahua.tokenNames contains no valid token names. Please provide comma-separated token names.');
+    // Find the fragment definitions we need
+    const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
+    if (selectedFragmentDefs.length === 0) {
+      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
     }
     
-    // Parse tokens with optional default values (format: "tokenName" or "tokenName:defaultValue")
-    const tokenNames: string[] = [];
-    const tokenDefaults: Record<string, string> = {};
+    // Collect all unique token references from selected fragments
+    const allTokenReferences = new Set<string>();
+    selectedFragmentDefs.forEach(def => {
+      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
+    });
     
-    for (const tokenConfig of tokenConfigs) {
-      const [tokenName, defaultValue] = tokenConfig.split(':', 2);
-      if (!tokenName) {
-        throw new Error(`Invalid token configuration: "${tokenConfig}". Token names cannot be empty.`);
+    // Merge token definitions based on references
+    const { headerTokens, tableTokens } = mergeTokenDefinitions(
+      tokenDefinitions, 
+      Array.from(allTokenReferences)
+    );
+
+    // Separate header and table token definitions
+    const snippetLines: string[] = [];
+    let tabStopIndex = 1;
+    
+    // Create header line if there are header tokens
+    if (headerTokens.length > 0) {
+      const headerParts: string[] = [];
+      
+      for (let i = 0; i < headerTokens.length; i++) {
+        const token = headerTokens[i];
+        const placeholder = token.defaultValue || token.name;
+        
+        // Include comma in the tabstop for proper step-over behavior
+        if (i < headerTokens.length - 1) {
+          headerParts.push(`\${${tabStopIndex}:${placeholder}}, `);
+        } else {
+          // Last token doesn't need a comma
+          headerParts.push(`\${${tabStopIndex}:${placeholder}}`);
+        }
+        tabStopIndex++;
       }
-      tokenNames.push(tokenName);
-      tokenDefaults[tokenName] = defaultValue || ''; // Use provided default or empty string
+      
+      snippetLines.push(headerParts.join(''));
     }
     
-    // Get and validate fragments
-    const fragmentTemplates = config.get<Record<string, string>>('kahua.fragments');
-    if (!fragmentTemplates || typeof fragmentTemplates !== 'object' || Object.keys(fragmentTemplates).length === 0) {
-      throw new Error('kahua.fragments is not defined or is empty. Please configure fragment templates in your settings.');
-    }
-    
-    // Validate that fragments contain valid templates
-    for (const [key, template] of Object.entries(fragmentTemplates)) {
-      if (!template || typeof template !== 'string') {
-        throw new Error(`Fragment '${key}' has an invalid template. All fragments must be non-empty strings.`);
+    // Create table data line if there are table tokens  
+    if (tableTokens.length > 0) {
+      const tableParts: string[] = [];
+      
+      for (let i = 0; i < tableTokens.length; i++) {
+        const token = tableTokens[i];
+        const placeholder = token.defaultValue || token.name;
+        
+        // Include comma in the tabstop for proper step-over behavior  
+        if (i < tableTokens.length - 1) {
+          tableParts.push(`\${${tabStopIndex}:${placeholder}}, `);
+        } else {
+          // Last token doesn't need a comma
+          tableParts.push(`\${${tabStopIndex}:${placeholder}}`);
+        }
+        tabStopIndex++;
       }
+      
+      snippetLines.push(tableParts.join(''));
+    }
+    
+    // If no lines were created, show an error
+    if (snippetLines.length === 0) {
+      throw new Error('No header or table token definitions found.');
     }
 
+    const snippetText = snippetLines.join('\n');
+    const snippet = new vscode.SnippetString(snippetText);
+    
+    // Insert snippet at cursor position
+    await editor.insertSnippet(snippet);
+
+    vscode.window.showInformationMessage(`Kahua: Token snippet inserted for ${fragmentIds.join(', ')}`);
+
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error occurred';
+    vscode.window.showErrorMessage(`Kahua Token Snippet: ${message}`);
+  }
+}
+
+/**
+ * Generates and inserts a template for the specified fragment types
+ */
+async function generateTemplateForFragments(fragmentIds: string[]): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage('No active editor found');
+    return;
+  }
+
+  try {
+    const config = vscode.workspace.getConfiguration();
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
+    
+    if (tokenDefinitions.length === 0) {
+      throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
+    }
+    
+    // Find the fragment definitions we need
+    const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
+    if (selectedFragmentDefs.length === 0) {
+      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
+    }
+    
+    // Collect all unique token references from selected fragments
+    const allTokenReferences = new Set<string>();
+    selectedFragmentDefs.forEach(def => {
+      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
+    });
+    
+    // Merge token definitions based on references
+    const { headerTokens, tableTokens } = mergeTokenDefinitions(
+      tokenDefinitions, 
+      Array.from(allTokenReferences)
+    );
+
+    // Build template text showing all token definitions
+    const templateLines: string[] = [];
+    templateLines.push(`// Token Template for ${fragmentIds.join(', ')}:`);
+    
+    if (headerTokens.length > 0) {
+      const headerTokenDisplays = headerTokens.map(token => 
+        token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
+      );
+      templateLines.push(`// Header tokens: ${headerTokenDisplays.join(', ')}`);
+    }
+    
+    if (tableTokens.length > 0) {
+      const tableTokenDisplays = tableTokens.map(token => 
+        token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
+      );
+      templateLines.push(`// Table tokens: ${tableTokenDisplays.join(', ')}`);
+    }
+    
+    templateLines.push('//');
+    templateLines.push('// Usage: First line contains header tokens, subsequent lines contain table tokens');
+    templateLines.push('');
+
+    const templateText = templateLines.join('\n');
+    
+    // Insert at cursor position
+    const position = editor.selection.active;
+    await editor.edit(editBuilder => {
+      editBuilder.insert(position, templateText);
+    });
+
+    vscode.window.showInformationMessage(`Kahua: Token template inserted for ${fragmentIds.join(', ')}`);
+
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error occurred';
+    vscode.window.showErrorMessage(`Kahua Token Template: ${message}`);
+  }
+}
+
+/**
+ * This function is called when your extension is deactivated.
+ */
+export function deactivate() {
+  // Extension cleanup handled by VS Code context subscriptions
+}
+
+/**
+ * Handles the logic of reading the current selection and generating XML snippets
+ * based on the provided fragment IDs. Validates configuration and selection, then generates
+ * XML using configurable tokens and fragments.
+ *
+ * @param fragmentIds Array of fragment definition IDs to process
+ */
+async function handleSelection(fragmentIds: string[]): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage('No active editor found');
+    return;
+  }
+
+  try {
+    const config = vscode.workspace.getConfiguration();
+    const suppressWarnings = config.get<boolean>('kahua.suppressInvalidConditionWarnings') || false;
+    
+    // Get configuration arrays
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
+    
+    if (tokenDefinitions.length === 0) {
+      throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
+    }
+    
+    if (fragmentDefinitions.length === 0) {
+      throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
+    }
+    
+    // Find the fragment definitions we need to process
+    const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
+    if (selectedFragmentDefs.length === 0) {
+      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
+    }
+    
+    // Collect all unique token references from selected fragments
+    const allTokenReferences = new Set<string>();
+    selectedFragmentDefs.forEach(def => {
+      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
+    });
+    
+    // Merge token definitions based on references
+    const { headerTokens, tableTokens, tokenDefaults } = mergeTokenDefinitions(
+      tokenDefinitions, 
+      Array.from(allTokenReferences)
+    );
+    
     // Validate selection
     const selection = editor.document.getText(editor.selection);
     if (!selection || selection.trim() === '') {
       throw new Error('No text selected. Please select one or more lines of text to generate attributes.');
     }
     
-    const lines = selection.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    if (lines.length === 0) {
-      throw new Error('Selected text contains no valid lines. Please select text with content.');
+    // Split into groups by empty lines
+    const groups = splitIntoGroups(selection);
+    if (groups.length === 0) {
+      throw new Error('Selected text contains no valid groups. Please select text with content.');
     }
 
-    // Process each line
-    const expanded: Record<string, string[]> = {};
-    const allTokenData: Array<Record<string, string>> = [];
+    // Process each group
     const allWarnings: string[] = [];
+    const outputSections: string[] = [];
     
-    for (const line of lines) {
-      const rawParts = line.split(','); // Keep original whitespace, allow empty parts
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+      const group = groups[groupIndex];
       
-      // Build token values for this line
-      const rawTokenValues: Record<string, string> = {};
-      const cleanTokenValues: Record<string, string> = {};
+      // Process header tokens (first line if any header tokens exist)
+      const headerTokenValues: Record<string, string> = {};
+      const headerRawValues: Record<string, string> = {};
+      let dataLines = group;
       
-      for (let i = 0; i < tokenNames.length; i++) {
-        const tokenName = tokenNames[i];
-        const rawPart = rawParts[i] || '';
-        const trimmedPart = rawPart.trim();
+      if (headerTokens.length > 0 && group.length > 0) {
+        const headerLine = group[0];
+        const headerParts = headerLine.split(',');
         
-        rawTokenValues[tokenName] = rawPart || tokenDefaults[tokenName];
-        cleanTokenValues[tokenName] = cleanTokenValue(trimmedPart || tokenDefaults[tokenName]);
-      }
-      
-      // Store token data for the table
-      allTokenData.push({ ...cleanTokenValues });
-
-      // Process fragment templates with conditional support
-      const { processedFragments, warnings: fragmentWarnings } = processFragmentTemplates(fragmentTemplates, cleanTokenValues, suppressWarnings);
-      allWarnings.push(...fragmentWarnings);
-
-      // Apply token replacement for all processed fragments
-      for (const [key, template] of Object.entries(processedFragments)) {
-        // First process conditional expressions in the template
-        const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(template, cleanTokenValues, suppressWarnings);
-        allWarnings.push(...conditionalWarnings);
-        
-        let rendered = conditionalProcessed;
-        
-        // Handle whitespace-controlled token replacement with $ prefix
-        for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
-          const rawValue = rawTokenValues[tokenName];
+        for (let i = 0; i < headerTokens.length; i++) {
+          const token = headerTokens[i];
+          const rawPart = headerParts[i] || '';
+          const trimmedPart = rawPart.trim();
           
-          // Replace {$token:friendly} - preserves original whitespace/formatting
-          rendered = rendered.replaceAll(`{$${tokenName}:friendly}`, rawValue);
-          
-          // Replace {$token:internal} - uses cleaned value (internal whitespace removed)
-          rendered = rendered.replaceAll(`{$${tokenName}:internal}`, cleanValue);
-          
-          // Replace {$token} - default behavior (uses cleaned value)
-          rendered = rendered.replaceAll(`{$${tokenName}}`, cleanValue);
+          headerRawValues[token.name] = rawPart || token.defaultValue;
+          headerTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
         }
         
-        (expanded[key] ??= []).push(rendered);
+        // Skip the header line for table processing
+        dataLines = group.slice(1);
       }
+
+      // Process table data for this group
+      const groupTokenData: Array<Record<string, string>> = [];
+      const structuredFragments: { [fragmentName: string]: { header?: string; body: string[]; footer?: string } } = {};
+      const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
+      
+      // If we have no data lines but have table tokens, that's an error
+      if (tableTokens.length > 0 && dataLines.length === 0) {
+        throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
+      }
+      
+      for (const line of dataLines) {
+        const rawParts = line.split(',');
+        
+        // Build token values for this line (combine header and table tokens)
+        const rawTokenValues: Record<string, string> = { ...headerRawValues };
+        const cleanTokenValues: Record<string, string> = { ...headerTokenValues };
+        
+        // Add table tokens
+        for (let i = 0; i < tableTokens.length; i++) {
+          const token = tableTokens[i];
+          const rawPart = rawParts[i] || '';
+          const trimmedPart = rawPart.trim();
+          
+          rawTokenValues[token.name] = rawPart || token.defaultValue;
+          cleanTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
+        }
+        
+        // Store token data for the table
+        groupTokenData.push({ ...cleanTokenValues });
+
+        // Process each selected fragment definition
+        for (const fragmentDef of selectedFragmentDefs) {
+          const { processedFragments, warnings: fragmentWarnings } = processFragmentTemplates(
+            fragmentDef.fragments, 
+            cleanTokenValues, 
+            suppressWarnings
+          );
+          allWarnings.push(...fragmentWarnings);
+
+          const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
+          
+          if (fragmentType === 'table') {
+            // Table type uses header/body/footer structure
+            if (!(fragmentDef.name in structuredFragments)) {
+              structuredFragments[fragmentDef.name] = { body: [] };
+            }
+            
+            // Process header (only once per group)
+            if (!structuredFragments[fragmentDef.name].header && processedFragments.header) {
+              const rendered = renderTemplate(processedFragments.header, cleanTokenValues, rawTokenValues, suppressWarnings);
+              structuredFragments[fragmentDef.name].header = rendered.result;
+              allWarnings.push(...rendered.warnings);
+            }
+            
+            // Process body (for each row) - handle both single body and nested fragments
+            if (processedFragments.body) {
+              const rendered = renderTemplate(processedFragments.body, cleanTokenValues, rawTokenValues, suppressWarnings);
+              structuredFragments[fragmentDef.name].body.push(rendered.result);
+              allWarnings.push(...rendered.warnings);
+            }
+            
+            // Process nested body fragments (like "body - Attributes", "body - Labels")
+            for (const [key, template] of Object.entries(processedFragments)) {
+              if (key.startsWith('body - ')) {
+                const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+                structuredFragments[fragmentDef.name].body.push(rendered.result);
+                allWarnings.push(...rendered.warnings);
+              }
+            }
+            
+            // Process footer (only once per group, but we'll set it each time - last one wins)
+            if (processedFragments.footer) {
+              const rendered = renderTemplate(processedFragments.footer, cleanTokenValues, rawTokenValues, suppressWarnings);
+              structuredFragments[fragmentDef.name].footer = rendered.result;
+              allWarnings.push(...rendered.warnings);
+            }
+          } else {
+            // Grouped type uses original fragment grouping behavior
+            if (!(fragmentDef.name in groupedFragments)) {
+              groupedFragments[fragmentDef.name] = {};
+            }
+            
+            // Process each fragment template and group by fragment key
+            for (const [key, template] of Object.entries(processedFragments)) {
+              const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+              allWarnings.push(...rendered.warnings);
+              
+              // Group fragments by key (e.g., "attribute", "label", etc.)
+              if (!groupedFragments[fragmentDef.name][key]) {
+                groupedFragments[fragmentDef.name][key] = [];
+              }
+              groupedFragments[fragmentDef.name][key].push(rendered.result);
+            }
+          }
+        }
+      }
+
+      // Create token table for this group
+      const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
+      const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
+      
+      // Build output for this group
+      const groupOutputSections: string[] = [tokenTable];
+      
+      // Add structured fragments (table type)
+      for (const [fragmentName, fragments] of Object.entries(structuredFragments)) {
+        const parts: string[] = [];
+        if (fragments.header) parts.push(fragments.header);
+        parts.push(...fragments.body);
+        if (fragments.footer) parts.push(fragments.footer);
+        
+        groupOutputSections.push(`<!-- ${fragmentName} -->\n${parts.join('\n')}`);
+      }
+      
+      // Add grouped fragments (grouped type)
+      for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
+        for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
+          groupOutputSections.push(`<!-- ${fragmentName} - ${fragmentKey} -->\n${fragments.join('\n')}`);
+        }
+      }
+      
+      
+      outputSections.push(groupOutputSections.join('\n\n'));
     }
 
     // Show warnings if any and not suppressed
@@ -393,22 +1127,12 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
       vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
     }
 
-    // Create token table
-    const tokenTable = createTokenTable(tokenNames, allTokenData, tokenDefaults);
-
-    // Join each category of snippets together
-    const fragmentsXml = Object.entries(expanded)
-      .map(([key, lines]: [string, string[]]) =>
-        `<!-- ${key} -->\n${lines.join('\n')}`
-      ).join('\n\n');
-    
-    const generatedXml = `${tokenTable}\n\n${fragmentsXml}`;
+    const generatedXml = outputSections.join('\n\n');
       
     // Get the output target setting
     const outputTarget = config.get<string>('kahua.outputTarget') || 'newEditor';
 
     if (outputTarget === 'newEditor') {
-      // Open in new editor window
       const newDocument = await vscode.workspace.openTextDocument({
         content: generatedXml,
         language: 'xml'
@@ -419,11 +1143,10 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
         preview: false
       });
 
-      vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes in new editor window`);
+      vscode.window.showInformationMessage(`Kahua: Generated fragments for ${fragmentIds.join(', ')} in new editor window`);
     } else {
-      // Copy to clipboard
       await vscode.env.clipboard.writeText(generatedXml);
-      vscode.window.showInformationMessage(`Kahua: Generated ${mode} attributes copied to clipboard`);
+      vscode.window.showInformationMessage(`Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`);
     }
 
   } catch (error) {
@@ -432,117 +1155,4 @@ async function handleSelection(mode: 'extension' | 'supplement'): Promise<void> 
   }
 }
 
-/**
- * Creates a table showing token names and their values from the processed lines
- */
-function createTokenTable(tokenNames: string[], tokenData: Array<Record<string, string>>, tokenDefaults: Record<string, string>): string {
-  if (tokenData.length === 0) {
-    return '<!-- No token data -->';
-  }
-  
-  const header = `| Token | Default | ${tokenData.map((_, i) => `Line ${i + 1}`).join(' | ')} |`;
-  const separator = `|${'-'.repeat(7)}|${'-'.repeat(9)}|${tokenData.map(() => '-'.repeat(8)).join('|')}|`;
-  
-  const rows = tokenNames.map(tokenName => {
-    const defaultValue = tokenDefaults[tokenName] || '';
-    const values = tokenData.map(data => data[tokenName] || '');
-    return `| ${tokenName} | ${defaultValue} | ${values.join(' | ')} |`;
-  });
-  
-  return `<!-- Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
-}
 
-/**
- * Inserts a token template as a comment showing the expected token order
- */
-async function insertTokenTemplate(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found');
-    return;
-  }
-
-  try {
-    // Get current token configuration
-    const config = vscode.workspace.getConfiguration();
-    const tokenNamesConfig = config.get<string>('kahua.tokenNames');
-    
-    if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
-      throw new Error('kahua.tokenNames is not configured. Please configure token names in your settings.');
-    }
-
-    // Parse token names and show defaults where available
-    const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-    const tokenDisplays = tokenConfigs.map(tokenConfig => {
-      const [tokenName, defaultValue] = tokenConfig.split(':', 2);
-      return defaultValue ? `${tokenName}:${defaultValue}` : tokenName;
-    });
-
-    const templateText = `// Template: ${tokenDisplays.join(', ')}\n`;
-    
-    // Insert at cursor position
-    const position = editor.selection.active;
-    await editor.edit(editBuilder => {
-      editBuilder.insert(position, templateText);
-    });
-
-    vscode.window.showInformationMessage('Kahua: Token template inserted');
-
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error occurred';
-    vscode.window.showErrorMessage(`Kahua Token Template: ${message}`);
-  }
-}
-
-/**
- * Inserts a token snippet with tab stops for each token position
- */
-async function insertTokenSnippet(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found');
-    return;
-  }
-
-  try {
-    // Get current token configuration
-    const config = vscode.workspace.getConfiguration();
-    const tokenNamesConfig = config.get<string>('kahua.tokenNames');
-    
-    if (!tokenNamesConfig || typeof tokenNamesConfig !== 'string' || tokenNamesConfig.trim() === '') {
-      throw new Error('kahua.tokenNames is not configured. Please configure token names in your settings.');
-    }
-
-    // Parse token names and create snippet with tab stops that allow typeover of commas
-    const tokenConfigs = tokenNamesConfig.split(',').map(t => t.trim()).filter(Boolean);
-    const snippetParts: string[] = [];
-    let tabStopIndex = 1;
-    
-    for (let i = 0; i < tokenConfigs.length; i++) {
-      const [tokenName, defaultValue] = tokenConfigs[i].split(':', 2);
-      const placeholder = defaultValue || tokenName;
-      
-      // Add the token placeholder
-      snippetParts.push(`\${${tabStopIndex}:${placeholder}}`);
-      tabStopIndex++;
-      
-      // Add comma as a typeover placeholder (except for the last token)
-      if (i < tokenConfigs.length - 1) {
-        snippetParts.push(`\${${tabStopIndex}:, }`);
-        tabStopIndex++;
-      }
-    }
-
-    const snippetText = snippetParts.join('');
-    const snippet = new vscode.SnippetString(snippetText);
-    
-    // Insert snippet at cursor position
-    await editor.insertSnippet(snippet);
-
-    vscode.window.showInformationMessage('Kahua: Token snippet inserted');
-
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error occurred';
-    vscode.window.showErrorMessage(`Kahua Token Snippet: ${message}`);
-  }
-}

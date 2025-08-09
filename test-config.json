@@ -1,0 +1,33 @@
+{
+  "kahua.tokenNameDefinitions": [
+    {
+      "id": "entity",
+      "name": "Entity Headers",
+      "type": "header",
+      "tokens": "entity:Field,module:Core"
+    },
+    {
+      "id": "basic",
+      "name": "Basic Attributes",
+      "type": "table", 
+      "tokens": "name,type:Text,label,description"
+    }
+  ],
+  "kahua.fragmentDefinitions": [
+    {
+      "id": "attributes",
+      "name": "Attribute Fragments",
+      "tokenReferences": ["entity", "basic"],
+      "fragments": {
+        "Attributes": "<Attribute Name=\"{$name}\" Entity=\"{$entity}\" DataType=\"{$type}\" Label=\"[{$entity}_{$name}Label]\" />",
+        "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label}</Label>"
+      }
+    }
+  ],
+  "kahua.menuOptions": [
+    {
+      "name": "Generate Entity Attributes",
+      "fragments": ["attributes"]
+    }
+  ]
+}

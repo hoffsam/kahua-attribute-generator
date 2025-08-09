@@ -1,0 +1,14 @@
+Status,StatusList
+Active,Active Status
+Inactive,Inactive Status
+Pending,Pending Review
+
+Priority,PriorityList
+High,High Priority
+Medium,Medium Priority
+Low,Low Priority
+
+Category,CategoryList
+Bug,Bug Report
+Feature,Feature Request
+Task,Task Item

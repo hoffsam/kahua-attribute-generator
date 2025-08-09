@@ -16,32 +16,55 @@
     "watch": "tsc -watch -p .",
     "package": "vsce package",
     "build": "npm run compile && vsce package",
-    "build-clean": "rimraf out && npm run compile && vsce package"
+    "build-clean": "rimraf out && npm run compile && vsce package",
+    "compile-tests": "tsc -p . --outDir out --module commonjs",
+    "test": "npm run compile-tests && node ./out/test/runTest.js",
+    "pretest": "npm run compile-tests"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^18.19.122",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.5.2",
+    "glob": "^11.0.3",
+    "mocha": "^10.8.2",
     "typescript": "^5.4.0"
   },
   "activationEvents": [
-    "onCommand:kahua.createExtensionAttributes",
-    "onCommand:kahua.createSupplementAttributes",
-    "onCommand:kahua.insertTokenTemplate",
-    "onCommand:kahua.insertTokenSnippet"
+    "*"
   ],
   "contributes": {
     "menus": {
       "commandPalette": [
         {
-          "command": "kahua.createExtensionAttributes"
+          "command": "kahua.generateAttributesExtension"
         },
         {
-          "command": "kahua.createSupplementAttributes"
+          "command": "kahua.generateAttributesSupplement"
         },
         {
-          "command": "kahua.insertTokenTemplate"
+          "command": "kahua.generateSnippetAttributes"
         },
         {
-          "command": "kahua.insertTokenSnippet"
+          "command": "kahua.generateTemplateAttributes"
+        },
+        {
+          "command": "kahua.generateLookups"
+        },
+        {
+          "command": "kahua.generateSnippetLookups"
+        },
+        {
+          "command": "kahua.generateTemplateLookups"
+        },
+        {
+          "command": "kahua.generateCustom"
+        },
+        {
+          "command": "kahua.generateSnippetCustom"
+        },
+        {
+          "command": "kahua.generateTemplateCustom"
         }
       ],
       "editor/context": [
@@ -53,16 +76,50 @@
       ],
       "kahua.submenu": [
         {
-          "command": "kahua.createExtensionAttributes"
+          "command": "kahua.generateAttributesExtension",
+          "group": "attributes@1"
         },
         {
-          "command": "kahua.createSupplementAttributes"
+          "command": "kahua.generateAttributesSupplement",
+          "group": "attributes@2"
         },
         {
-          "command": "kahua.insertTokenTemplate"
+          "command": "kahua.generateSnippetAttributes",
+          "when": "config.kahua.showSnippetsInMenu",
+          "group": "attributes@3"
         },
         {
-          "command": "kahua.insertTokenSnippet"
+          "command": "kahua.generateTemplateAttributes",
+          "when": "config.kahua.showTemplatesInMenu",
+          "group": "attributes@4"
+        },
+        {
+          "command": "kahua.generateLookups",
+          "group": "lookups@1"
+        },
+        {
+          "command": "kahua.generateSnippetLookups",
+          "when": "config.kahua.showSnippetsInMenu",
+          "group": "lookups@2"
+        },
+        {
+          "command": "kahua.generateTemplateLookups",
+          "when": "config.kahua.showTemplatesInMenu",
+          "group": "lookups@3"
+        },
+        {
+          "command": "kahua.generateCustom",
+          "group": "custom@1"
+        },
+        {
+          "command": "kahua.generateSnippetCustom",
+          "when": "config.kahua.showSnippetsInMenu",
+          "group": "custom@2"
+        },
+        {
+          "command": "kahua.generateTemplateCustom",
+          "when": "config.kahua.showTemplatesInMenu",
+          "group": "custom@3"
         }
       ]
     },
@@ -74,34 +131,47 @@
     ],
     "commands": [
       {
-        "command": "kahua.createExtensionAttributes",
-        "title": "Kahua: Generate Extension Attributes from Selection"
+        "command": "kahua.generateAttributesExtension",
+        "title": "Kahua: Generate Attributes for Extension"
       },
       {
-        "command": "kahua.createSupplementAttributes",
-        "title": "Kahua: Generate Supplement Attributes from Selection"
+        "command": "kahua.generateAttributesSupplement",
+        "title": "Kahua: Generate Attributes for Supplement"
       },
       {
-        "command": "kahua.insertTokenTemplate",
-        "title": "Kahua: Insert Token Template"
+        "command": "kahua.generateSnippetAttributes",
+        "title": "Kahua: Generate Snippet for Attributes"
       },
       {
-        "command": "kahua.insertTokenSnippet",
-        "title": "Kahua: Insert Token Snippet"
+        "command": "kahua.generateTemplateAttributes",
+        "title": "Kahua: Generate Template for Attributes"
+      },
+      {
+        "command": "kahua.generateLookups",
+        "title": "Kahua: Generate Lookup Lists"
+      },
+      {
+        "command": "kahua.generateSnippetLookups",
+        "title": "Kahua: Generate Snippet for Lookup Lists"
+      },
+      {
+        "command": "kahua.generateTemplateLookups",
+        "title": "Kahua: Generate Template for Lookup Lists"
+      },
+      {
+        "command": "kahua.generateCustom",
+        "title": "Kahua: Generate from Custom"
+      },
+      {
+        "command": "kahua.generateSnippetCustom",
+        "title": "Kahua: Generate Snippet for Custom"
+      },
+      {
+        "command": "kahua.generateTemplateCustom",
+        "title": "Kahua: Generate Template for Custom"
       }
     ],
-    "keybindings": [
-      {
-        "command": "kahua.createExtensionAttributes",
-        "key": "ctrl+alt+e",
-        "when": "editorTextFocus && editorHasSelection"
-      },
-      {
-        "command": "kahua.createSupplementAttributes",
-        "key": "ctrl+alt+s",
-        "when": "editorTextFocus && editorHasSelection"
-      }
-    ],
+    "keybindings": [],
     "configuration": {
       "title": "Kahua Attribute Generator",
       "properties": {
@@ -128,34 +198,218 @@
           "default": false,
           "description": "Suppress error notifications when conditional expressions reference tokens that don't exist or have no value."
         },
-        
-        "kahua.tokenNames": {
-          "type": "string",
-          "default": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef",
-          "description": "Comma-separated list of token names that can be used in fragments. Format: 'name,prefix,type' or 'name,prefix:DefaultValue,type:Text' to specify default values. Defaults are used when input values are not provided."
+        "kahua.showSnippetsInMenu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show snippet generation commands in the editor right-click context menu. Only applies when kahua.showInContextMenu is enabled."
         },
-        "kahua.fragments": {
-          "type": "object",
-          "default": {
-            "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"{$entity}_{$name}LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"{$linkedEntityDef}\"' : ''}IsConfigurable=\"true\" />",
-            "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label:fiendly : $name:friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name:friendly}</Label>",
-            "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
-            "Fields": "<Field Attribute=\"{$name}\" />",
-            "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
-            "DataStore": "<Column AttributeName=\"{$name}\" />",
-            "LogFields": "<Field FieldDef=\"{$name}\" />",
-            "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name:friendly}\" />",
-            "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
-            "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n<Value />"
+        "kahua.showTemplatesInMenu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show template generation commands in the editor right-click context menu. Only applies when kahua.showInContextMenu is enabled."
+        },
+        "kahua.tokenNameDefinitions": {
+          "type": "array",
+          "default": [
+            {
+              "id": "appname",
+              "name": "App Name Header",
+              "type": "header",
+              "tokens": "appname"
+            },
+            {
+              "id": "attributes",
+              "name": "Attribute Tokens",
+              "type": "table",
+              "tokens": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+            },
+            {
+              "id": "lookupheader",
+              "name": "Lookup Header Tokens",
+              "type": "header",
+              "tokens": "entity,listname"
+            },
+            {
+              "id": "lookups",
+              "name": "Lookup Tokens",
+              "type": "table",
+              "tokens": "value,label"
+            }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this token name definition"
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name for this token name definition"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "header",
+                  "table"
+                ],
+                "description": "Type of token processing: 'header' for single-line parsing, 'table' for row-by-row parsing"
+              },
+              "tokens": {
+                "type": "string",
+                "description": "Comma-separated list of token names. Format: 'name,type' or 'name:DefaultValue,type:DefaultValue'"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "type",
+              "tokens"
+            ]
           },
-          "description": "Fragment templates for generating Kahua XML. Add, remove, or customize output fragments. Tokens support whitespace control: {$token} or {$token:internal} (default, trimmed) vs {$token:friendly} (preserves whitespace). Supports conditional blocks with syntax: {$condition ? 'value' : 'fallback'}."
+          "description": "Definitions of token name sets that can be referenced by fragments"
+        },
+        "kahua.fragmentDefinitions": {
+          "type": "array",
+          "default": [
+            {
+              "id": "attributes",
+              "name": "Extension Attributes",
+              "tokenReferences": [
+                "appname",
+                "attributes"
+              ],
+              "fragments": {
+                "body": {
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"{$appname != '' ? $appname : ''}.{$entity}_{$name}LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" />",
+                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
+                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+                  "Fields": "<Field Attribute=\"{$name}\" />",
+                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "DataStore": "<Column AttributeName=\"{$name}\" />",
+                  "LogFields": "<Field FieldDef=\"{$name}\" />",
+                  "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
+                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />"
+                }
+              }
+            },
+            {
+              "id": "lookups",
+              "name": "Lookup Lists",
+              "tokenReferences": [
+                "lookupheader",
+                "lookups"
+              ],
+              "fragments": {
+                "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">",
+                "body": "<Value Label=\"[{$label != '' ? '{$label}' : '{$entity}_{$listname}{$value}Label'}]\">{$value|friendly}</Value>",
+                "footer": "</LookupList>"
+              }
+            },
+            {
+              "id": "supplements",
+              "name": "Supplement Attributes",
+              "tokenReferences": [
+                "appname",
+                "attributes"
+              ],
+              "fragments": {
+                "body": {
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"{$appname != '' ? $appname : ''}.{$entity}_{$name}LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"{$linkedEntityDef}\"' : ''}IsConfigurable=\"true\" />",
+                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
+                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+                  "Fields": "<Field Attribute=\"{$name}\" />",
+                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "DataStore": "<Column AttributeName=\"{$name}\" />",
+                  "LogFields": "<Field FieldDef=\"{$name}\" />",
+                  "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
+                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />"
+                }
+              }
+            }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this fragment definition"
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name for this fragment definition"
+              },
+              "tokenReferences": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Array of token name definition IDs to use for this fragment set"
+              },
+              "fragments": {
+                "type": "object",
+                "description": "Fragment templates with token replacement"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "tokenReferences",
+              "fragments"
+            ]
+          },
+          "description": "Fragment template definitions that reference token name definitions"
+        },
+        "kahua.menuOptions": {
+          "type": "array",
+          "default": [
+            {
+              "name": "Generate Extension Attributes",
+              "fragments": [
+                "attributes"
+              ]
+            },
+            {
+              "name": "Generate Supplement Attributes",
+              "fragments": [
+                "supplements"
+              ]
+            },
+            {
+              "name": "Generate Lookup Lists",
+              "fragments": [
+                "lookups"
+              ]
+            }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name for the menu option"
+              },
+              "fragments": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Array of fragment definition IDs to use for this menu option"
+              }
+            },
+            "required": [
+              "name",
+              "fragments"
+            ]
+          },
+          "description": "Context menu options that combine multiple fragment definitions"
         }
       }
     }
   },
   "repository": {
     "type": "git",
-    "url": "https://example.com/your/kahua-attribute-generator.git"
+    "url": "https://github.com/hoffsam/kahua-attribute-generator.git"
   },
   "license": "MIT"
 }

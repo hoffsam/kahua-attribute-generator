@@ -8,11 +8,11 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
   * **`Kahua: Generate Extension Attributes from Selection`** – Uses `kahua.defaultPrefix.extension` setting
   * **`Kahua: Generate Supplement Attributes from Selection`** – Uses `kahua.defaultPrefix.supplement` setting
 
-* **Configurable token system** – Define your own token names and default values via `kahua.tokenNames` (e.g., `name,type:Text,visual:TextBox`)
+* **Configurable token system** – Define your own token names and default values via `kahua.tokenNameDefinitions`
 
-* **Customizable XML fragments** – Modify, add, or remove output fragments via `kahua.fragments` setting
+* **Customizable XML fragments** – Modify, add, or remove output fragments via `kahua.fragmentDefinitions` setting
 
-* **Flexible whitespace control** – Choose whether tokens preserve formatting (`{$token:friendly}`) or are trimmed (`{$token}`)
+* **Flexible transformations** – PascalCase for identifiers, TitleCase for display text, plus uppercase/lowercase options
 
 * **Conditional blocks** – Generate dynamic XML with conditional expressions based on token values
 
@@ -35,7 +35,7 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
    * **`AttributeName,MyPrefix,Integer`** – Adds explicit data type
    * **`AttributeName,MyPrefix,Integer,Friendly Display Name`** – All four tokens
 
-   **Custom token example** (if `kahua.tokenNames` = `"name,prefix,category,status"`):
+   **Custom token example** with configured token definitions:
    * **`FieldName,MyApp,Important,Active`** – All custom tokens provided
 
    Whitespace handling depends on fragment configuration (see Token Whitespace Control below).
@@ -51,17 +51,21 @@ You can override the following settings in your workspace or user `settings.json
 | --- | --- | --- |
 | `kahua.showInContextMenu` | `true` | Show Kahua generator commands in the editor right-click context menu |
 | `kahua.outputTarget` | `"newEditor"` | Choose where to output generated XML: `"clipboard"` or `"newEditor"` |
-| `kahua.tokenNames` | `"name,entity,type,label,visualtype:TextBox"` | Comma-separated list of token names with optional defaults (format: `token:defaultValue`) |
+| `kahua.tokenNameDefinitions` | Array of token definitions | Define token sets with ID, name, type, and token list |
 | `kahua.suppressInvalidConditionWarnings` | `false` | Suppress error notifications when conditional expressions reference invalid tokens |
-| `kahua.fragments` | See below | Object containing customizable XML fragment templates with conditional support |
+| `kahua.fragmentDefinitions` | Array of fragment definitions | Define reusable fragment templates with conditional support |
 
 ## Token Configuration
 
-### Configurable Token Names
+### Token Name Definitions
 
-The extension uses a configurable token system via the `kahua.tokenNames` setting. This allows you to customize which tokens are parsed from your input and used in fragments.
+The extension uses a flexible token definition system via `kahua.tokenNameDefinitions`. Each definition specifies:
+- **id**: Unique identifier
+- **name**: Display name
+- **type**: Either "header" (single line) or "table" (row-by-row)
+- **tokens**: Comma-separated token names with optional defaults
 
-**Default tokens**: `"name,entity,type,label,visualtype:TextBox"`
+The extension uses configurable token definitions rather than a single `tokenNames` setting. See the **New Configuration System** section above for details.
 
 **Input format**: Each selected line should contain comma-separated values corresponding to your configured tokens:
 - `FieldName` - Uses defaults for all missing tokens
@@ -72,15 +76,22 @@ The extension uses a configurable token system via the `kahua.tokenNames` settin
 
 ### Token Defaults
 
-The extension supports configurable default values for tokens using colon syntax in `kahua.tokenNames`. This powerful feature ensures consistent output even when input data is incomplete.
+The extension supports configurable default values for tokens using colon syntax in token definitions. This powerful feature ensures consistent output even when input data is incomplete.
 
 #### Default Configuration Syntax
 
-Use the format `tokenName:defaultValue` in the `kahua.tokenNames` setting:
+Use the format `tokenName:defaultValue` in token definition strings:
 
 ```json
 {
-  "kahua.tokenNames": "name,entity,type:Text,label,visualtype:TextBox,required:false"
+  "kahua.tokenNameDefinitions": [
+    {
+      "id": "attributes",
+      "name": "Attribute Tokens",
+      "type": "table",
+      "tokens": "name,entity,type:Text,label,visualtype:TextBox,required:false"
+    }
+  ]
 }
 ```
 
@@ -117,8 +128,8 @@ Defaults work seamlessly with conditional expressions:
 
 All tokens are processed identically with no special built-in logic:
 
-- **Default values** - missing or empty input values use configured defaults from `kahua.tokenNames` 
-- **Whitespace handling** - depends on fragment template syntax (`{$token}`, `{$token:internal}`, or `{$token:friendly}`)
+- **Default values** - missing or empty input values use configured defaults from token definitions 
+- **Transformation handling** - depends on fragment template syntax (`{$token}`, `{$token|internal}`, `{$token|friendly}`, `{$token|upper}`, `{$token|lower}`)
 - **Conditional support** - tokens can be used in conditional expressions for dynamic content generation
 - **No fallback logic** - input values and configured defaults are used directly without modification
 
@@ -128,7 +139,14 @@ You can define any token names you need:
 
 ```json
 {
-  "kahua.tokenNames": "name,prefix,type,label,category,owner,status"
+  "kahua.tokenNameDefinitions": [
+    {
+      "id": "custom",
+      "name": "Custom Tokens",
+      "type": "table",
+      "tokens": "name,prefix,type,label,category,owner,status"
+    }
+  ]
 }
 ```
 
@@ -139,8 +157,8 @@ All tokens use their corresponding input position or default to empty string if 
 The extension validates configuration and input before generating XML:
 
 ### Configuration Validation
-- **`kahua.tokenNames`** must be defined and contain valid token names
-- **`kahua.fragments`** must be defined with valid fragment templates
+- **`kahua.tokenNameDefinitions`** must be defined and contain valid token definitions
+- **`kahua.fragmentDefinitions`** must be defined with valid fragment templates
 - Invalid configuration shows an error notification with specific details
 
 ### Selection Validation  
@@ -165,46 +183,64 @@ Generated output includes a table showing token configuration and values for eac
 
 ### Default Fragments
 
-The extension generates XML using configurable fragment templates in `kahua.fragments`:
+The extension generates XML using configurable fragment templates in `kahua.fragmentDefinitions`. Here's an example of the structure:
 
 ```json
 {
-  "kahua.fragments": {
+  "kahua.fragmentDefinitions": [{
+    "id": "sample",
+    "name": "Sample Fragment", 
+    "tokenReferences": ["attributes"],
+    "fragments": {
     "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" IsConfigurable=\"true\" />",
-    "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label:friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$label}</Label>",
+    "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$label}</Label>",
     "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
     "Fields": "<Field Attribute=\"{$name}\" />",
     "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
     "DataStore": "<Column AttributeName=\"{$name}\" />",
     "LogFields": "<Field FieldDef=\"{$name}\" />",
-    "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name:friendly}\" />",
+    "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
     "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} />",
     "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n<Value />"
-  }
+    }
+  }]
 }
 ```
 
-### Token Syntax and Whitespace Control
+### Token Syntax and Transformations
 
-Fragments support the new `{$token}` syntax with three formats for controlling whitespace:
+Fragments support the `{$token}` syntax with transformation options using the pipe (`|`) delimiter:
 
-- **`{$token}`** - Default behavior, whitespace trimmed (same as `{$token:internal}`)
-- **`{$token:internal}`** - Explicitly request trimmed whitespace  
-- **`{$token:friendly}`** - Preserve original whitespace and formatting from input
+- **`{$token}`** - Default: PascalCase (strips spaces/special chars, capitalizes words)
+- **`{$token|internal}`** - Explicitly creates PascalCase (same as default)
+- **`{$token|friendly}`** - TitleCase with proper capitalization rules and XML escaping
+- **`{$token|upper}`** - Convert to uppercase and XML-escape
+- **`{$token|lower}`** - Convert to lowercase and XML-escape
+
+**PascalCase**: Removes spaces and special characters, capitalizes first letter of each word. Perfect for XML identifiers and attribute names.
+
+**TitleCase**: Applies proper title capitalization rules - capitalizes major words but keeps articles, prepositions, and conjunctions lowercase (except when first or last word). Preserves spaces and XML-escapes output.
+
+**XML Escaping**: Applied to `friendly`, `upper`, and `lower` transformations. Special characters like `<`, `>`, `&`, `"`, and `'` are converted to their XML entity equivalents.
 
 **Examples**:
 ```xml
-<!-- Trimmed whitespace (default) -->
-<Label Key="MyEntity_FieldName">{$label}</Label>
+<!-- Default: PascalCase for identifiers -->
+<Attribute Name="{$name}" Label="[{$entity}_{$name}Label]" />
+<!-- Input: "user field name" → Output: Name="UserFieldName" -->
 
-<!-- Preserves original whitespace -->
-<Label Key="MyEntity_FieldName">{$label:friendly}</Label>
+<!-- Friendly: TitleCase for display text -->
+<Label Key="MyEntity_FieldName">{$label|friendly}</Label>
+<!-- Input: "field of the rings" → Output: "Field of the Rings" -->
 
-<!-- Explicit trimmed (same as default) -->
-<Label Key="MyEntity_FieldName">{$label:internal}</Label>
+<!-- Uppercase transformation -->
+<Comment>{$description|upper}</Comment>
+<!-- Input: "field & value" → Output: "FIELD &amp; VALUE" -->
+
+<!-- Lowercase transformation -->
+<Note>{$comment|lower}</Note>
+<!-- Input: "FIELD & VALUE" → Output: "field &amp; value" -->
 ```
-
-**Backward Compatibility**: The old `{token}` syntax is still supported for existing configurations.
 
 ### Conditional Blocks
 
@@ -224,6 +260,10 @@ Conditional expressions use the ternary operator format:
 - **Comparison**: `{$priority>=5 ? 'high' : 'normal'}`, `{$count<=10 ? 'few' : 'many'}`
 - **List membership**: `{$status in ('Active','Pending') ? 'enabled' : 'disabled'}`
 - **List exclusion**: `{$type not in ('Text','Integer') ? 'complex' : 'simple'}`
+- **Logical AND**: `{$type=='Text' && $required=='true' ? 'required' : 'optional'}`
+- **Logical OR**: `{$type=='Lookup' || $type=='Entity' ? 'complex' : 'simple'}`
+- **Parentheses**: `{($type=='Text' || $type=='Integer') && $required=='true' ? 'basic' : 'other'}`
+- **Nested ternary**: `{$type=='Lookup' ? ($required=='true' ? 'req' : 'opt') : 'text'}`
 
 #### Conditional Fragment Values
 
@@ -260,12 +300,64 @@ Use conditionals in fragment keys to include/exclude entire fragments based on c
 - **Warning notifications**: By default, invalid token references show error notifications
 - **Suppress warnings**: Set `kahua.suppressInvalidConditionWarnings: true` to disable notifications
 
+#### Enhanced Conditional Examples
+
+**Logical Operators**:
+```json
+{
+  "kahua.fragmentDefinitions": [{
+    "id": "example",
+    "name": "Example Fragment",
+    "tokenReferences": ["attributes"],
+    "fragments": {
+    "Validation": "{$type=='Text' && $required=='true' ? 'Required=\"true\" MaxLength=\"255\"' : ''} {$type=='Integer' && $min!='' ? 'Min=\"{$min}\"' : ''}",
+    "Controls": "<{$visualtype} Name=\"{$name}\" {$type=='Lookup' || $type=='Entity' ? 'Complex=\"true\"' : ''} />",
+    "{($type=='Lookup' || $type=='Entity') && $category=='Advanced' ? 'ComplexControls' : ''}": "<AdvancedControl Type=\"{$type}\" />"
+    }
+  }]
+}
+```
+
+**Nested Ternary and Parentheses**:
+```json
+{
+  "kahua.fragmentDefinitions": [{
+    "id": "example",
+    "name": "Example Fragment",
+    "tokenReferences": ["attributes"],
+    "fragments": {
+    "DisplayType": "{$type=='Lookup' ? ($visualtype=='ComboBox' ? 'dropdown' : ($visualtype=='ListBox' ? 'list' : 'other')) : 'simple'}",
+    "Access": "{$category=='Public' ? 'read-write' : ($category=='Protected' ? ($required=='true' ? 'required' : 'optional') : 'admin-only')}"
+    }
+  }]
+}
+```
+
+**Curly Braces in Literals**:
+```json
+{
+  "kahua.fragmentDefinitions": [{
+    "id": "example",
+    "name": "Example Fragment",
+    "tokenReferences": ["attributes"],
+    "fragments": {
+    "JsonConfig": "{$type=='Config' ? '{\"name\": \"{$name}\", \"type\": \"{$type}\", \"settings\": {}}' : 'null'}",
+    "CssClass": "{$visualtype=='Custom' ? '.{$name}-control { display: {$display}; width: {$width}px; }' : 'default'}"
+    }
+  }]
+}
+```
+
 #### Complete Conditional Example
 
 **Configuration**:
 ```json
 {
-  "kahua.fragments": {
+  "kahua.fragmentDefinitions": [{
+    "id": "example",
+    "name": "Example Fragment",
+    "tokenReferences": ["attributes"],
+    "fragments": {
     "Controls": "<{$visualtype} Name=\"{$name}\" {$type=='Lookup' ? 'LookupListName=\"{$name}\"' : ''} {$required=='true' ? 'Required=\"true\"' : ''} />",
     "{$type=='Lookup' ? 'LookupDefinition' : ''}": "<LookupList Name=\"{$name}\">\n  <Value />\n</LookupList>",
     "{$category=='Advanced' ? 'AdvancedSettings' : ''}": "<Setting Name=\"{$name}\" Level=\"Advanced\" />"
@@ -310,12 +402,17 @@ You can add, remove, or modify fragments in your settings:
 
 ```json
 {
-  "kahua.fragments": {
+  "kahua.fragmentDefinitions": [{
+    "id": "example",
+    "name": "Example Fragment",
+    "tokenReferences": ["attributes"],
+    "fragments": {
     "Attributes": "<Attribute Name=\"{$name}\" DataType=\"{$type}\" />",
     "CustomFragment": "<Custom Name=\"{$name}\" Entity=\"{$entity}\" Category=\"{$category}\" />",
-    "ConditionalFragment": "<Element {$type=='Special' ? 'SpecialAttr=\"true\"' : ''} >{$label:friendly}</Element>",
+    "ConditionalFragment": "<Element {$type=='Special' ? 'SpecialAttr=\"true\"' : ''} >{$label|friendly}</Element>",
     "{$enabled=='true' ? 'EnabledElements' : ''}": "<Enabled Name=\"{$name}\" />"
-  }
+    }
+  }]
 }
 ```
 
@@ -369,9 +466,11 @@ You can add, remove, or modify fragments in your settings:
 ## Quick Reference
 
 ### Token Syntax
-- **Basic**: `{$tokenName}` - Uses token value with trimmed whitespace
-- **Friendly**: `{$tokenName:friendly}` - Preserves original input whitespace
-- **Internal**: `{$tokenName:internal}` - Explicitly trimmed (same as basic)
+- **Basic**: `{$tokenName}` - PascalCase (no spaces/special chars)
+- **Friendly**: `{$tokenName|friendly}` - TitleCase with XML escaping
+- **Internal**: `{$tokenName|internal}` - PascalCase (same as basic)
+- **Uppercase**: `{$tokenName|upper}` - UPPERCASE with XML escaping
+- **Lowercase**: `{$tokenName|lower}` - lowercase with XML escaping
 
 ### Conditional Expressions
 - **Ternary**: `{$condition ? 'trueValue' : 'falseValue'}`
@@ -380,16 +479,37 @@ You can add, remove, or modify fragments in your settings:
 - **Comparison**: `{$count>=5 ? 'many' : 'few'}`
 - **Lists**: `{$status in ('A','B') ? 'valid' : 'invalid'}`
 - **Exclusion**: `{$type not in ('X','Y') ? 'special' : 'normal'}`
+- **Logical AND**: `{$type=='Text' && $required=='true' ? 'req' : 'opt'}`
+- **Logical OR**: `{$type=='Lookup' || $type=='Entity' ? 'complex' : 'simple'}`
+- **Parentheses**: `{($a=='X' || $b=='Y') && $c=='Z' ? 'match' : 'no'}`
+- **Nested**: `{$type=='A' ? ($sub=='B' ? 'AB' : 'A') : 'other'}`
 
 ### Default Configuration
 ```json
 {
-  "kahua.tokenNames": "name,entity,type:Text,label,visualtype:TextBox",
   "kahua.suppressInvalidConditionWarnings": false,
-  "kahua.fragments": {
-    "FragmentName": "<Element Name=\"{$name}\" {$type=='Special' ? 'Extra=\"true\"' : ''} />",
-    "{$enabled=='true' ? 'EnabledSection' : ''}": "<Section>{$content}</Section>"
-  }
+  "kahua.showInContextMenu": true,
+  "kahua.outputTarget": "newEditor",
+  "kahua.showSnippetsInMenu": true,
+  "kahua.showTemplatesInMenu": true,
+  "kahua.tokenNameDefinitions": [
+    {
+      "id": "attributes",
+      "name": "Attribute Tokens", 
+      "type": "table",
+      "tokens": "name,type,entity:Field,visualtype:TextBox,label"
+    }
+  ],
+  "kahua.fragmentDefinitions": [
+    {
+      "id": "sample",
+      "name": "Sample Fragment",
+      "tokenReferences": ["attributes"],
+      "fragments": {
+        "body": "<Element Name=\"{$name}\" Type=\"{$type}\" Label=\"{$label|friendly}\" />"
+      }
+    }
+  ]
 }
 ```
 
@@ -405,6 +525,17 @@ This repository contains TypeScript sources. To build:
 npm install
 npm run compile
 ```
+
+To run tests:
+
+```bash
+npm test
+```
+
+The test suite includes:
+- **Extension activation tests** - Verify commands are registered and configuration is valid
+- **Enhanced conditional expression tests** - Test logical operators (&&, ||), parentheses, nested ternary, and curly braces in literals
+- **Integration tests** - End-to-end template processing validation
 
 To package as a VSIX (requires [`vsce`](https://github.com/microsoft/vscode-vsce)):
 
