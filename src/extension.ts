@@ -104,6 +104,77 @@ function escapeXml(value: string): string {
 }
 
 /**
+ * Formats XML content with proper indentation
+ * Note: This is a simple formatter designed for the extension's typical output structure
+ */
+function formatXml(xml: string, indentSize: number = 2): string {
+  if (!xml || xml.trim() === '') return xml;
+  
+  const lines = xml.split(/\r?\n/);
+  const formatted: string[] = [];
+  const indent = ' '.repeat(indentSize);
+  
+  // For the extension's output, we mainly want to:
+  // 1. Preserve comments and table data as-is
+  // 2. Indent nested XML elements
+  // 3. Keep self-closing tags at the base level
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue; // Skip empty lines
+    
+    // Handle comments and non-XML content - no indentation changes
+    if (trimmed.startsWith('<!--') || !trimmed.startsWith('<')) {
+      formatted.push(trimmed);
+      continue;
+    }
+    
+    // For XML tags, determine indentation based on content
+    if (trimmed.startsWith('<DataTag') && !trimmed.endsWith('/>')) {
+      // DataTag opening - no indent for the tag itself
+      formatted.push(trimmed);
+    } else if (trimmed.startsWith('</DataTag>')) {
+      // DataTag closing - no indent
+      formatted.push(trimmed);
+    } else if (trimmed.startsWith('<Key />') || trimmed.startsWith('<Value ')) {
+      // Nested elements within DataTag or LookupList - indent
+      formatted.push(indent + trimmed);
+    } else if (trimmed.startsWith('<LookupList') && !trimmed.endsWith('/>')) {
+      // LookupList opening - no indent
+      formatted.push(trimmed);
+    } else if (trimmed.startsWith('</LookupList>')) {
+      // LookupList closing - no indent  
+      formatted.push(trimmed);
+    } else {
+      // All other XML elements (Attribute, Label, Field, etc.) - no indent
+      formatted.push(trimmed);
+    }
+  }
+  
+  return formatted.join('\n');
+}
+
+/**
+ * Formats a collection of XML fragments with section headers and proper indentation
+ */
+function formatFragmentCollection(fragments: { [key: string]: string[] }, indentSize: number = 2): string {
+  const sections: string[] = [];
+  
+  for (const [sectionName, fragmentList] of Object.entries(fragments)) {
+    if (fragmentList.length === 0) continue;
+    
+    // Add section header comment
+    sections.push(`<!-- ${sectionName} -->`);
+    
+    // Format each fragment in the section
+    const formattedFragments = fragmentList.map(fragment => formatXml(fragment, indentSize));
+    sections.push(formattedFragments.join('\n'));
+  }
+  
+  return sections.join('\n\n');
+}
+
+/**
  * Applies transformation to a token value based on the transformation type
  */
 function applyTokenTransformation(value: string, transformation: string): string {
@@ -118,6 +189,10 @@ function applyTokenTransformation(value: string, transformation: string): string
       return escapeXml(value.toUpperCase()); // Convert to uppercase and XML escape
     case 'lower':
       return escapeXml(value.toLowerCase()); // Convert to lowercase and XML escape
+    case 'slug':
+      return toPascalCase(value) + '_'; // Convert to PascalCase and append underscore
+    case 'raw':
+      return value; // Leave exactly as user typed it (no processing)
     default:
       return toPascalCase(value); // Default: PascalCase (no XML escaping for identifiers)
   }
@@ -264,23 +339,41 @@ function isBalancedParentheses(expression: string): boolean {
 }
 
 /**
- * Finds the main ternary operator (? :) in an expression, respecting nesting
+ * Finds the main ternary operator (? :) in an expression, respecting nesting and quotes
  */
 function findTernaryOperator(expression: string): { condition: string; trueValue: string; falseValue: string } | null {
   let parenCount = 0;
   let questionPos = -1;
   let colonPos = -1;
+  let inQuotes = false;
+  let quoteChar = '';
   
-  // Find the main ? and : operators (not inside parentheses)
+  // Find the main ? and : operators (not inside parentheses or quotes)
   for (let i = 0; i < expression.length; i++) {
     const char = expression[i];
-    if (char === '(') parenCount++;
-    else if (char === ')') parenCount--;
-    else if (char === '?' && parenCount === 0 && questionPos === -1) {
-      questionPos = i;
-    } else if (char === ':' && parenCount === 0 && questionPos !== -1 && colonPos === -1) {
-      colonPos = i;
-      break;
+    const prevChar = i > 0 ? expression[i - 1] : '';
+    
+    // Handle quoted strings
+    if ((char === '"' || char === "'") && prevChar !== '\\') {
+      if (!inQuotes) {
+        inQuotes = true;
+        quoteChar = char;
+      } else if (char === quoteChar) {
+        inQuotes = false;
+        quoteChar = '';
+      }
+    }
+    
+    // Only process operators when not inside quotes
+    if (!inQuotes) {
+      if (char === '(') parenCount++;
+      else if (char === ')') parenCount--;
+      else if (char === '?' && parenCount === 0 && questionPos === -1) {
+        questionPos = i;
+      } else if (char === ':' && parenCount === 0 && questionPos !== -1 && colonPos === -1) {
+        colonPos = i;
+        break;
+      }
     }
   }
   
@@ -318,6 +411,36 @@ function findLogicalOperator(expression: string, operator: '&&' | '||'): { left:
   }
   
   return null;
+}
+
+/**
+ * Processes PowerShell-style string interpolation tokens $(token) and $(token|transformation)
+ */
+function processStringInterpolation(
+  template: string, 
+  cleanTokenValues: Record<string, string>,
+  rawTokenValues: Record<string, string>
+): string {
+  let result = template;
+  
+  // Process $(token) and $(token|transformation) patterns
+  const interpolationPattern = /\$\((\w+)(?:\|([^)]+))?\)/g;
+  let match;
+  
+  while ((match = interpolationPattern.exec(result)) !== null) {
+    const fullMatch = match[0];
+    const tokenName = match[1];
+    const transformation = match[2] || 'default';
+    
+    const rawValue = rawTokenValues[tokenName] || '';
+    const transformedValue = applyTokenTransformation(rawValue, transformation);
+    
+    result = result.replace(fullMatch, transformedValue);
+    // Reset regex to continue searching from beginning since we modified the string
+    interpolationPattern.lastIndex = 0;
+  }
+  
+  return result;
 }
 
 /**
@@ -362,6 +485,8 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
         else if (char === '?' && braceCount === 1) foundQuestion = true;
         else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
       }
+      // Note: We intentionally ignore $() tokens within strings during conditional parsing
+      // These will be processed later by processStringInterpolation()
       
       if (braceCount === 0) {
         endPos = i;
@@ -668,7 +793,7 @@ function renderTemplate(
 ): { result: string; warnings: string[] } {
   const warnings: string[] = [];
   
-  // First process conditional expressions
+  // Phase 1: Process conditional expressions
   const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
     template, 
     cleanTokenValues, 
@@ -676,9 +801,10 @@ function renderTemplate(
   );
   warnings.push(...conditionalWarnings);
   
-  let rendered = conditionalProcessed;
+  // Phase 2: Process PowerShell-style string interpolations $(token)
+  let rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
   
-  // Handle transformation-controlled token replacement
+  // Phase 3: Handle remaining {$token} transformation-controlled token replacement
   for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
     const rawValue = rawTokenValues[tokenName] || '';
     
@@ -764,6 +890,7 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     // Separate header and table token definitions
     const snippetLines: string[] = [];
     let tabStopIndex = 1;
+    let numberOfRows = 0; // Track total rows for message
     
     // Create header line if there are header tokens
     if (headerTokens.length > 0) {
@@ -786,25 +913,63 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
       snippetLines.push(headerParts.join(''));
     }
     
-    // Create table data line if there are table tokens  
+    // Create table data lines if there are table tokens
     if (tableTokens.length > 0) {
-      const tableParts: string[] = [];
+      const config = vscode.workspace.getConfiguration();
+      const defaultTableRows = config.get<number>('kahua.defaultSnippetTableRows') || 0;
       
-      for (let i = 0; i < tableTokens.length; i++) {
-        const token = tableTokens[i];
-        const placeholder = token.defaultValue || token.name;
+      numberOfRows = defaultTableRows;
+      
+      // If default is 0, use current behavior (single row)
+      // If default > 0, prompt user for row count with default value
+      if (defaultTableRows > 0) {
+        // Get the maximum value from configuration schema (fallback to 100 if not found)
+        const maxRows = 100;
         
-        // Include comma in the tabstop for proper step-over behavior  
-        if (i < tableTokens.length - 1) {
-          tableParts.push(`\${${tabStopIndex}:${placeholder}}, `);
-        } else {
-          // Last token doesn't need a comma
-          tableParts.push(`\${${tabStopIndex}:${placeholder}}`);
+        const userInput = await vscode.window.showInputBox({
+          prompt: `How many table data rows to generate? (1-${maxRows})`,
+          value: defaultTableRows.toString(),
+          validateInput: (value: string) => {
+            const num = parseInt(value);
+            if (isNaN(num) || num < 1 || num > maxRows) {
+              return `Please enter a number between 1 and ${maxRows}`;
+            }
+            return undefined;
+          }
+        });
+        
+        if (userInput === undefined) {
+          // User cancelled the prompt
+          vscode.window.showInformationMessage('Snippet generation cancelled');
+          return;
         }
-        tabStopIndex++;
+        
+        numberOfRows = parseInt(userInput);
+      } else {
+        // Default behavior: single row
+        numberOfRows = 1;
       }
       
-      snippetLines.push(tableParts.join(''));
+      // Generate the specified number of table rows
+      for (let rowIndex = 0; rowIndex < numberOfRows; rowIndex++) {
+        const tableParts: string[] = [];
+        
+        for (let i = 0; i < tableTokens.length; i++) {
+          const token = tableTokens[i];
+          const placeholder = token.defaultValue || token.name;
+          
+          // Include comma in the tabstop for proper step-over behavior  
+          if (i < tableTokens.length - 1) {
+            tableParts.push(`\${${tabStopIndex}:${placeholder}}, `);
+          } else {
+            // Last token doesn't need a comma
+            tableParts.push(`\${${tabStopIndex}:${placeholder}}`);
+          }
+          tabStopIndex++;
+        }
+        
+        snippetLines.push(tableParts.join(''));
+      }
     }
     
     // If no lines were created, show an error
@@ -818,7 +983,12 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     // Insert snippet at cursor position
     await editor.insertSnippet(snippet);
 
-    vscode.window.showInformationMessage(`Kahua: Token snippet inserted for ${fragmentIds.join(', ')}`);
+    const rowText = numberOfRows === 0 
+      ? 'header only' 
+      : numberOfRows === 1 
+        ? '1 table row' 
+        : `${numberOfRows} table rows`;
+    vscode.window.showInformationMessage(`Kahua: Token snippet inserted for ${fragmentIds.join(', ')} with ${rowText}`);
 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -1108,13 +1278,14 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         parts.push(...fragments.body);
         if (fragments.footer) parts.push(fragments.footer);
         
-        groupOutputSections.push(`<!-- ${fragmentName} -->\n${parts.join('\n')}`);
+        groupOutputSections.push(`\n<!-- ${fragmentName} -->\n\n${parts.join('\n')}`);
       }
       
       // Add grouped fragments (grouped type)
       for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
         for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-          groupOutputSections.push(`<!-- ${fragmentName} - ${fragmentKey} -->\n${fragments.join('\n')}`);
+          //groupOutputSections.push(`\n<!-- ${fragmentName} - ${fragmentKey} -->\n\n${fragments.join('\n')}`);
+          groupOutputSections.push(`\n<!-- ${fragmentKey} -->\n\n${fragments.join('\n')}`);
         }
       }
       
@@ -1127,7 +1298,15 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
     }
 
-    const generatedXml = outputSections.join('\n\n');
+    let generatedXml = outputSections.join('\n\n');
+    
+    // Apply XML formatting if enabled
+    const formatXmlOutput = config.get<boolean>('kahua.formatXmlOutput');
+    const xmlIndentSize = config.get<number>('kahua.xmlIndentSize') || 2;
+    
+    if (formatXmlOutput !== false) { // Default to true if not configured
+      generatedXml = formatXml(generatedXml, xmlIndentSize);
+    }
       
     // Get the output target setting
     const outputTarget = config.get<string>('kahua.outputTarget') || 'newEditor';

@@ -1,8 +1,8 @@
 {
   "name": "kahua-attribute-generator",
-  "displayName": "Kahua Attribute Generator",
+  "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -208,6 +208,13 @@
           "default": true,
           "description": "Show template generation commands in the editor right-click context menu. Only applies when kahua.showInContextMenu is enabled."
         },
+        "kahua.defaultSnippetTableRows": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Default number of table rows to generate in snippets. Set to 0 to disable and use current behavior (single row). When enabled, will prompt for row count if not specified."
+        },
         "kahua.tokenNameDefinitions": {
           "type": "array",
           "default": [
@@ -281,7 +288,7 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"{$appname != '' ? $appname : ''}.{$entity}_{$name}LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" />",
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
                   "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
                   "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
                   "Fields": "<Field Attribute=\"{$name}\" />",
@@ -315,7 +322,7 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"{$appname != '' ? $appname : ''}.{$entity}_{$name}LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"{$linkedEntityDef}\"' : ''}IsConfigurable=\"true\" />",
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
                   "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
                   "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
                   "Fields": "<Field Attribute=\"{$name}\" />",
@@ -323,7 +330,8 @@
                   "DataStore": "<Column AttributeName=\"{$name}\" />",
                   "LogFields": "<Field FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
-                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />"
+                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                  "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
                 }
               }
             }

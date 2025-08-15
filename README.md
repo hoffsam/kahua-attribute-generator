@@ -232,6 +232,7 @@ Fragments support the `{$token}` syntax with transformation options using the pi
 <!-- Friendly: TitleCase for display text -->
 <Label Key="MyEntity_FieldName">{$label|friendly}</Label>
 <!-- Input: "field of the rings" → Output: "Field of the Rings" -->
+<!-- Input: "fieldOfTheRings" → Output: "Field of the Rings" -->
 
 <!-- Uppercase transformation -->
 <Comment>{$description|upper}</Comment>

@@ -64,3 +64,4 @@ Templates support configurable tokens defined in `kahua.tokenNames`:
 - `{token:internal}` - Explicitly request trimmed whitespace 
 - `{token:friendly}` - Preserve original whitespace and formatting from input
 - All tokens can be used with any whitespace mode in fragment templates
+- When you run tests, incorporate them into the test suite when appropriate
