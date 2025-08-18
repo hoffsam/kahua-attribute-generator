@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "1.9.0",
+  "version": "2.0.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -31,7 +31,16 @@
     "typescript": "^5.4.0"
   },
   "activationEvents": [
-    "*"
+    "onCommand:kahua.generateAttributesExtension",
+    "onCommand:kahua.generateAttributesSupplement",
+    "onCommand:kahua.generateSnippetAttributes",
+    "onCommand:kahua.generateTemplateAttributes",
+    "onCommand:kahua.generateLookups",
+    "onCommand:kahua.generateSnippetLookups",
+    "onCommand:kahua.generateTemplateLookups",
+    "onCommand:kahua.generateCustom",
+    "onCommand:kahua.generateSnippetCustom",
+    "onCommand:kahua.generateTemplateCustom"
   ],
   "contributes": {
     "menus": {
@@ -228,7 +237,7 @@
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+              "tokens": "name,type:Text,label,descriptionlabel,visualtype:TextBox,linkedEntityDef"
             },
             {
               "id": "lookupheader",
@@ -288,8 +297,8 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" />",
+                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
                   "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
                   "Fields": "<Field Attribute=\"{$name}\" />",
                   "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
@@ -322,13 +331,13 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
-                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
-                  "Fields": "<Field Attribute=\"{$name}\" />",
-                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
-                  "DataStore": "<Column AttributeName=\"{$name}\" />",
-                  "LogFields": "<Field FieldDef=\"{$name}\" />",
+                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
+                  "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{$label!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{$descriptionlabel!='' ? '{$descriptionlabel|friendly}' : {$label!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />'",
+                  "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
+                  "Fields": "<Add Attribute=\"{$name}\" />",
+                  "FieldDefs": "<Add Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "DataStore": "<Add AttributeName=\"{$name}\" />",
+                  "LogFields": "<Add FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
                   "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
                   "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
@@ -419,5 +428,15 @@
     "type": "git",
     "url": "https://github.com/hoffsam/kahua-attribute-generator.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@vscode/vsce": "^3.6.0"
+  },
+  "files": [
+    "out/**/*",
+    "src/**/*",
+    "LICENSE.md",
+    "readme.md",
+    "package.json"
+  ]
 }

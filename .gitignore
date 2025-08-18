@@ -4,3 +4,4 @@ out/
 CLAUDE.md
 *.xml
 *.vsix
+.vscode-test/

@@ -164,7 +164,7 @@ function formatFragmentCollection(fragments: { [key: string]: string[] }, indent
     if (fragmentList.length === 0) continue;
     
     // Add section header comment
-    sections.push(`\n<!-- ${sectionName} -->`);
+    sections.push(`\n\n<!-- ${sectionName} -->`);
     
     // Format each fragment in the section
     const formattedFragments = fragmentList.map(fragment => formatXml(fragment, indentSize));
@@ -219,10 +219,10 @@ function evaluateConditional(expression: string, tokenValues: Record<string, str
       invalidTokens.push(tokenName);
       hasValidTokens = false;
       // Replace with empty string for evaluation
-      processedExpression = processedExpression.replace(match[0], '""');
+      processedExpression = processedExpression.replace(match[0], "''");
     } else {
-      // Replace with quoted string value for evaluation
-      processedExpression = processedExpression.replace(match[0], `"${tokenValue.replace(/"/g, '\\"')}"`);
+      // Replace with quoted string value for evaluation (use single quotes to match expression syntax)
+      processedExpression = processedExpression.replace(match[0], `'${tokenValue.replace(/'/g, "\\'")}'`);
     }
   }
   
@@ -297,21 +297,21 @@ function evaluateExpression(expression: string): boolean {
     return list.includes(value);
   }
   
-  // Handle comparison operators
-  const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
+  // Handle comparison operators (single quotes for consistency with expression syntax)
+  const comparisonMatch = expression.match(/^'([^']*?)'\s*(==|!=|<=|>=|<>)\s*'([^']*?)'$/);
   if (comparisonMatch) {
     const [, left, operator, right] = comparisonMatch;
     
     switch (operator) {
       case '==':
-        return left === right;
+        return left.toLowerCase() === right.toLowerCase();
       case '!=':
       case '<>':
-        return left !== right;
+        return left.toLowerCase() !== right.toLowerCase();
       case '<=':
-        return left <= right;
+        return left.toLowerCase() <= right.toLowerCase();
       case '>=':
-        return left >= right;
+        return left.toLowerCase() >= right.toLowerCase();
       default:
         return false;
     }
@@ -444,71 +444,27 @@ function processStringInterpolation(
 }
 
 /**
- * Processes conditional blocks in template strings with improved parsing
+ * Processes conditional blocks in template strings - new simplified approach
+ * This assumes all {$token} replacements have already been done, so we're evaluating {expression} patterns
  */
 function processConditionalTemplate(template: string, tokenValues: Record<string, string>, suppressWarnings: boolean): { result: string; warnings: string[] } {
   const warnings: string[] = [];
   let result = template;
   
-  // Process conditional expressions by finding balanced braces
-  let pos = 0;
-  while (pos < result.length) {
-    const startPos = result.indexOf('{$', pos);
-    if (startPos === -1) break;
+  // Find all conditional expressions in the format {expression ? value : value}
+  const conditionalPattern = /\{[^{}]*\?[^{}]*:[^{}]*\}/g;
+  let match;
+  
+  while ((match = conditionalPattern.exec(result)) !== null) {
+    const fullMatch = match[0];
+    const expression = fullMatch.slice(1, -1); // Remove { and }
     
-    // Find the matching closing brace, respecting nesting
-    let braceCount = 0;
-    let endPos = startPos;
-    let foundQuestion = false;
-    let foundColon = false;
-    let inQuotes = false;
-    let quoteChar = '';
-    
-    for (let i = startPos; i < result.length; i++) {
-      const char = result[i];
-      const prevChar = i > 0 ? result[i - 1] : '';
-      
-      // Handle quoted strings
-      if ((char === '"' || char === "'") && prevChar !== '\\') {
-        if (!inQuotes) {
-          inQuotes = true;
-          quoteChar = char;
-        } else if (char === quoteChar) {
-          inQuotes = false;
-          quoteChar = '';
-        }
-      }
-      
-      if (!inQuotes) {
-        if (char === '{') braceCount++;
-        else if (char === '}') braceCount--;
-        else if (char === '?' && braceCount === 1) foundQuestion = true;
-        else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
-      }
-      // Note: We intentionally ignore $() tokens within strings during conditional parsing
-      // These will be processed later by processStringInterpolation()
-      
-      if (braceCount === 0) {
-        endPos = i;
-        break;
-      }
-    }
-    
-    if (foundQuestion && foundColon) {
-      // This is a conditional expression
-      const fullMatch = result.substring(startPos, endPos + 1);
-      const expression = fullMatch.slice(2, -1); // Remove {$ and }
-      
-      const evalResult = evaluateConditional(expression, tokenValues);
-      
-      if (!evalResult.hasValidTokens && !suppressWarnings) {
-        warnings.push(`Invalid tokens in conditional expression "${expression}": ${evalResult.invalidTokens.join(', ')}`);
-      }
-      
-      // Use the improved ternary parsing to extract values
+    try {
+      // Parse the ternary expression
       const ternaryResult = findTernaryOperator(expression);
       if (ternaryResult) {
-        const conditionResult = evaluateConditional(ternaryResult.condition, tokenValues);
+        // Evaluate the condition (should be simple like 'Text'=='Lookup')
+        const conditionResult = evaluateExpression(ternaryResult.condition);
         
         // Remove quotes from true/false values if they exist
         let trueValue = ternaryResult.trueValue;
@@ -524,16 +480,23 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
           falseValue = falseValue.slice(1, -1);
         }
         
-        const replacementValue = conditionResult.condition ? trueValue : falseValue;
-        result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
-        pos = startPos + replacementValue.length;
+        const replacementValue = conditionResult ? trueValue : falseValue;
+        result = result.replace(fullMatch, replacementValue);
+        
+        // Reset the regex since we modified the string
+        conditionalPattern.lastIndex = 0;
       } else {
-        // Fallback: remove the conditional block if malformed
-        result = result.substring(0, startPos) + result.substring(endPos + 1);
-        pos = startPos;
+        // Malformed conditional - remove it
+        result = result.replace(fullMatch, '');
+        conditionalPattern.lastIndex = 0;
       }
-    } else {
-      pos = startPos + 2; // Move past this {$ and continue looking
+    } catch (error) {
+      if (!suppressWarnings) {
+        warnings.push(`Error evaluating conditional "${expression}": ${error}`);
+      }
+      // Remove malformed conditional
+      result = result.replace(fullMatch, '');
+      conditionalPattern.lastIndex = 0;
     }
   }
   
@@ -555,8 +518,8 @@ function processFragmentTemplates(
     if (typeof template === 'object') {
       // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
       for (const [subKey, subTemplate] of Object.entries(template)) {
-        const fullKey = `${key} - ${subKey}`;
-        processedFragments[fullKey] = subTemplate;
+        // Use just the subKey for cleaner comment headers (e.g., "DataTags" instead of "body - DataTags")
+        processedFragments[subKey] = subTemplate;
       }
     } else {
       // Handle flat structure
@@ -793,22 +756,12 @@ function renderTemplate(
 ): { result: string; warnings: string[] } {
   const warnings: string[] = [];
   
-  // Phase 1: Process conditional expressions
-  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
-    template, 
-    cleanTokenValues, 
-    suppressWarnings
-  );
-  warnings.push(...conditionalWarnings);
-  
-  // Phase 2: Process PowerShell-style string interpolations $(token)
-  let rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
-  
-  // Phase 3: Handle remaining {$token} transformation-controlled token replacement
+  // Phase 1: Handle {$token} replacement FIRST (so conditionals can work on resolved values)
+  let rendered = template;
   for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
     const rawValue = rawTokenValues[tokenName] || '';
     
-    // Find all token references with transformations in the rendered template
+    // Find all token references with transformations
     const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
     let match;
     
@@ -823,7 +776,18 @@ function renderTemplate(
     }
   }
   
-  return { result: rendered, warnings };
+  // Phase 2: Process conditional expressions (now that tokens are resolved)
+  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
+    rendered, 
+    cleanTokenValues, 
+    suppressWarnings
+  );
+  warnings.push(...conditionalWarnings);
+  
+  // Phase 3: Process PowerShell-style string interpolations $(token) (if any remain)
+  const finalResult = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
+  
+  return { result: finalResult, warnings };
 }
 
 /**
@@ -1156,7 +1120,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         
         for (let i = 0; i < headerTokens.length; i++) {
           const token = headerTokens[i];
-          const rawPart = headerParts[i] || '';
+          const rawPart = (headerParts[i] || '').trim();
           const trimmedPart = rawPart.trim();
           
           headerRawValues[token.name] = rawPart || token.defaultValue;
@@ -1187,7 +1151,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         // Add table tokens
         for (let i = 0; i < tableTokens.length; i++) {
           const token = tableTokens[i];
-          const rawPart = rawParts[i] || '';
+          const rawPart = (rawParts[i] || '').trim();
           const trimmedPart = rawPart.trim();
           
           rawTokenValues[token.name] = rawPart || token.defaultValue;
@@ -1284,8 +1248,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       // Add grouped fragments (grouped type)
       for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
         for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-          //groupOutputSections.push(`\n<!-- ${fragmentName} - ${fragmentKey} -->\n\n${fragments.join('\n')}`);
-          groupOutputSections.push(`\n<!-- ${fragmentKey} -->\n\n${fragments.join('\n')}`);
+          groupOutputSections.push(`\n<!-- ${fragmentKey} -->\n\n${fragments.join('\n')}\n`);
         }
       }
       
