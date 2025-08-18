@@ -164,7 +164,7 @@ function formatFragmentCollection(fragments: { [key: string]: string[] }, indent
     if (fragmentList.length === 0) continue;
     
     // Add section header comment
-    sections.push(`<!-- ${sectionName} -->`);
+    sections.push(`\n<!-- ${sectionName} -->`);
     
     // Format each fragment in the section
     const formattedFragments = fragmentList.map(fragment => formatXml(fragment, indentSize));

@@ -210,7 +210,7 @@
         },
         "kahua.defaultSnippetTableRows": {
           "type": "number",
-          "default": 0,
+          "default": 10,
           "minimum": 0,
           "maximum": 100,
           "description": "Default number of table rows to generate in snippets. Set to 0 to disable and use current behavior (single row). When enabled, will prompt for row count if not specified."
@@ -219,16 +219,16 @@
           "type": "array",
           "default": [
             {
-              "id": "appname",
-              "name": "App Name Header",
+              "id": "attributeheader",
+              "name": "Attribute Header",
               "type": "header",
-              "tokens": "appname"
+              "tokens": "appname,entity"
             },
             {
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+              "tokens": "name,type,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
             },
             {
               "id": "lookupheader",
@@ -283,7 +283,7 @@
               "id": "attributes",
               "name": "Extension Attributes",
               "tokenReferences": [
-                "appname",
+                "attributeheader",
                 "attributes"
               ],
               "fragments": {
@@ -317,7 +317,7 @@
               "id": "supplements",
               "name": "Supplement Attributes",
               "tokenReferences": [
-                "appname",
+                "attributeheader",
                 "attributes"
               ],
               "fragments": {
