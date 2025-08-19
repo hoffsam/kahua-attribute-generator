@@ -121,33 +121,15 @@ function formatXml(xml: string, indentSize: number = 2): string {
   
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed) continue; // Skip empty lines
+    //if (!trimmed) continue; // Skip empty lines
     
     // Handle comments and non-XML content - no indentation changes
     if (trimmed.startsWith('<!--') || !trimmed.startsWith('<')) {
-      formatted.push(trimmed);
-      continue;
-    }
-    
-    // For XML tags, determine indentation based on content
-    if (trimmed.startsWith('<DataTag') && !trimmed.endsWith('/>')) {
-      // DataTag opening - no indent for the tag itself
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('</DataTag>')) {
-      // DataTag closing - no indent
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('<Key />') || trimmed.startsWith('<Value ')) {
-      // Nested elements within DataTag or LookupList - indent
-      formatted.push(indent + trimmed);
-    } else if (trimmed.startsWith('<LookupList') && !trimmed.endsWith('/>')) {
-      // LookupList opening - no indent
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('</LookupList>')) {
-      // LookupList closing - no indent  
-      formatted.push(trimmed);
+      formatted.push(line);
     } else {
       // All other XML elements (Attribute, Label, Field, etc.) - no indent
-      formatted.push(trimmed);
+      //formatted.push(trimmed);
+      formatted.push(line);
     }
   }
   
@@ -171,7 +153,7 @@ function formatFragmentCollection(fragments: { [key: string]: string[] }, indent
     sections.push(formattedFragments.join('\n'));
   }
   
-  return sections.join('\n\n');
+  return sections.join('\n');
 }
 
 /**
@@ -208,22 +190,30 @@ function evaluateConditional(expression: string, tokenValues: Record<string, str
   // Replace tokens in the expression with their values
   let processedExpression = expression;
   
-  // Find all token references in the expression
-  const tokenPattern = /\{\$(\w+)\}/g;
-  let match;
-  while ((match = tokenPattern.exec(expression)) !== null) {
-    const tokenName = match[1];
-    const tokenValue = tokenValues[tokenName];
-    
-    if (tokenValue === undefined || tokenValue === '') {
-      invalidTokens.push(tokenName);
-      hasValidTokens = false;
-      // Replace with empty string for evaluation
-      processedExpression = processedExpression.replace(match[0], "''");
-    } else {
-      // Replace with quoted string value for evaluation (use single quotes to match expression syntax)
-      processedExpression = processedExpression.replace(match[0], `'${tokenValue.replace(/'/g, "\\'")}'`);
+  // Find all token references in the expression (both {$token} and '$token' patterns)
+  const tokenPatterns = [
+    /\{\$(\w+)\}/g,    // {$token} pattern
+    /'\$(\w+)'/g       // '$token' pattern  
+  ];
+  
+  for (const tokenPattern of tokenPatterns) {
+    let match;
+    while ((match = tokenPattern.exec(processedExpression)) !== null) {
+      const tokenName = match[1];
+      const tokenValue = tokenValues[tokenName];
+      
+      if (tokenValue === undefined || tokenValue === '') {
+        invalidTokens.push(tokenName);
+        hasValidTokens = false;
+        // Replace with empty string for evaluation
+        processedExpression = processedExpression.replace(match[0], "''");
+      } else {
+        // Replace with quoted string value for evaluation (use single quotes to match expression syntax)
+        processedExpression = processedExpression.replace(match[0], `'${tokenValue.replace(/'/g, "\\'")}'`);
+      }
     }
+    // Reset regex for next iteration
+    tokenPattern.lastIndex = 0;
   }
   
   try {
@@ -508,7 +498,8 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
  */
 function processFragmentTemplates(
   fragmentTemplates: Record<string, string | Record<string, string>>, 
-  tokenValues: Record<string, string>, 
+  cleanTokenValues: Record<string, string>,
+  rawTokenValues: Record<string, string>, 
   suppressWarnings: boolean
 ): { processedFragments: Record<string, string>; warnings: string[] } {
   const processedFragments: Record<string, string> = {};
@@ -523,28 +514,51 @@ function processFragmentTemplates(
       }
     } else {
       // Handle flat structure
-      // Check if the key itself contains a conditional
-      const keyConditionalMatch = key.match(/^\{\$([^}]+\s*\?\s*[^}]+\s*:\s*[^}]+)\}(.*)$/);
+      // Check if the key itself contains a conditional expression
+      console.log(`[DEBUG] Processing fragment key: "${key}"`);
+      const isConditional = key.match(/^\{.+\?.+:.+\}.*$/);
+      console.log(`[DEBUG] Is conditional: ${!!isConditional}`);
       
-      if (keyConditionalMatch) {
-        const [, expression, keyRemainder] = keyConditionalMatch;
-        const evalResult = evaluateConditional(expression, tokenValues);
+      if (isConditional) {
+        // Pre-process tokens in the key (same as value processing)
+        let processedKey = key;
+        console.log(`[DEBUG] Original key: "${processedKey}"`);
+        console.log(`[DEBUG] Available tokens:`, Object.keys(cleanTokenValues));
         
-        if (!evalResult.hasValidTokens && !suppressWarnings) {
-          allWarnings.push(`Invalid tokens in conditional key "${key}": ${evalResult.invalidTokens.join(', ')}`);
-        }
-        
-        // Only include this fragment if the condition is true
-        if (evalResult.condition) {
-          // Extract the actual key name from the ternary expression
-          const ternaryMatch = expression.match(/^(.+?)\s*\?\s*'([^']*?)'\s*:\s*'([^']*?)'$/);
-          if (ternaryMatch) {
-            const [, , trueValue] = ternaryMatch;
-            const actualKey = trueValue + keyRemainder;
-            processedFragments[actualKey] = template;
+        // Replace {$token} patterns with values (same logic as renderTemplate)
+        for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+          const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
+          let match;
+          
+          while ((match = tokenPattern.exec(processedKey)) !== null) {
+            const fullMatch = match[0];
+            const transformation = match[1] || 'default';
+            // Use raw token value for proper evaluation
+            const rawValue = rawTokenValues[tokenName] || '';
+            const transformedValue = applyTokenTransformation(rawValue, transformation);
+            
+            console.log(`[DEBUG] Replacing ${fullMatch} with ${transformedValue}`);
+            processedKey = processedKey.replace(fullMatch, transformedValue);
+            // Reset the regex to continue searching from the beginning since we modified the string
+            tokenPattern.lastIndex = 0;
           }
         }
-        // If condition is false, this fragment is omitted entirely
+        
+        console.log(`[DEBUG] After token replacement: "${processedKey}"`);
+        
+        // Now use the SAME method as values: processConditionalTemplate()
+        const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
+        console.log(`[DEBUG] Conditional evaluation result: "${result}"`);
+        allWarnings.push(...conditionalWarnings);
+        
+        // If result is not empty, use it as the key
+        if (result.trim()) {
+          console.log(`[DEBUG] Using evaluated result as key: "${result.trim()}"`);
+          processedFragments[result.trim()] = template;
+        } else {
+          console.log(`[DEBUG] Omitting fragment - result was empty`);
+        }
+        // If empty or evaluates to false, fragment is omitted entirely
       } else {
         // Regular key without conditional
         processedFragments[key] = template;
@@ -1136,11 +1150,18 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       const structuredFragments: { [fragmentName: string]: { header?: string; body: string[]; footer?: string } } = {};
       const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
       
+      // Collect conditional fragments across all rows before processing
+      const conditionalFragmentsByRow: Array<{
+        tokenValues: { clean: Record<string, string>; raw: Record<string, string> };
+        fragmentsByDef: Map<string, { processedFragments: Record<string, string>; warnings: string[] }>;
+      }> = [];
+      
       // If we have no data lines but have table tokens, that's an error
       if (tableTokens.length > 0 && dataLines.length === 0) {
         throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
       }
       
+      // First pass: collect all row data and conditional fragment evaluations
       for (const line of dataLines) {
         const rawParts = line.split(',');
         
@@ -1161,68 +1182,117 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         // Store token data for the table
         groupTokenData.push({ ...cleanTokenValues });
 
-        // Process each selected fragment definition
+        // Process fragment definitions for this row and store results
+        const fragmentsByDef = new Map<string, { processedFragments: Record<string, string>; warnings: string[] }>();
+        
         for (const fragmentDef of selectedFragmentDefs) {
           const { processedFragments, warnings: fragmentWarnings } = processFragmentTemplates(
             fragmentDef.fragments, 
-            cleanTokenValues, 
+            cleanTokenValues,
+            rawTokenValues, 
             suppressWarnings
           );
-          allWarnings.push(...fragmentWarnings);
-
-          const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
           
-          if (fragmentType === 'table') {
-            // Table type uses header/body/footer structure
-            if (!(fragmentDef.name in structuredFragments)) {
-              structuredFragments[fragmentDef.name] = { body: [] };
-            }
+          fragmentsByDef.set(fragmentDef.id, { processedFragments, warnings: fragmentWarnings });
+        }
+        
+        conditionalFragmentsByRow.push({
+          tokenValues: { clean: cleanTokenValues, raw: rawTokenValues },
+          fragmentsByDef
+        });
+      }
+
+      // Second pass: process fragments, only including conditional fragments that evaluated to true for at least one row
+      for (const fragmentDef of selectedFragmentDefs) {
+        const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
+        
+        // Collect all fragment keys that appear in any row for this fragment definition
+        const allFragmentKeys = new Set<string>();
+        const fragmentRowsByKey = new Map<string, Array<{ rowIndex: number; template: string; tokenValues: { clean: Record<string, string>; raw: Record<string, string> }; warnings: string[] }>>();
+        
+        conditionalFragmentsByRow.forEach((rowData, rowIndex) => {
+          const rowFragmentData = rowData.fragmentsByDef.get(fragmentDef.id);
+          if (rowFragmentData) {
+            allWarnings.push(...rowFragmentData.warnings);
             
-            // Process header (only once per group)
-            if (!structuredFragments[fragmentDef.name].header && processedFragments.header) {
-              const rendered = renderTemplate(processedFragments.header, cleanTokenValues, rawTokenValues, suppressWarnings);
-              structuredFragments[fragmentDef.name].header = rendered.result;
-              allWarnings.push(...rendered.warnings);
+            for (const [key, template] of Object.entries(rowFragmentData.processedFragments)) {
+              allFragmentKeys.add(key);
+              
+              if (!fragmentRowsByKey.has(key)) {
+                fragmentRowsByKey.set(key, []);
+              }
+              
+              fragmentRowsByKey.get(key)!.push({
+                rowIndex,
+                template,
+                tokenValues: rowData.tokenValues,
+                warnings: rowFragmentData.warnings
+              });
             }
-            
-            // Process body (for each row) - handle both single body and nested fragments
-            if (processedFragments.body) {
-              const rendered = renderTemplate(processedFragments.body, cleanTokenValues, rawTokenValues, suppressWarnings);
+          }
+        });
+        
+        if (fragmentType === 'table') {
+          // Table type uses header/body/footer structure
+          if (!(fragmentDef.name in structuredFragments)) {
+            structuredFragments[fragmentDef.name] = { body: [] };
+          }
+          
+          // Process header (only once per group)
+          const headerRows = fragmentRowsByKey.get('header');
+          if (headerRows && headerRows.length > 0 && !structuredFragments[fragmentDef.name].header) {
+            const firstHeaderRow = headerRows[0];
+            const rendered = renderTemplate(firstHeaderRow.template, firstHeaderRow.tokenValues.clean, firstHeaderRow.tokenValues.raw, suppressWarnings);
+            structuredFragments[fragmentDef.name].header = rendered.result;
+            allWarnings.push(...rendered.warnings);
+          }
+          
+          // Process body - only include rows where conditional evaluated to true
+          const bodyRows = fragmentRowsByKey.get('body');
+          if (bodyRows) {
+            for (const rowData of bodyRows) {
+              const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
               structuredFragments[fragmentDef.name].body.push(rendered.result);
               allWarnings.push(...rendered.warnings);
             }
-            
-            // Process nested body fragments (like "body - Attributes", "body - Labels")
-            for (const [key, template] of Object.entries(processedFragments)) {
-              if (key.startsWith('body - ')) {
-                const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+          }
+          
+          // Process nested body fragments
+          for (const [key, rows] of fragmentRowsByKey.entries()) {
+            if (key.startsWith('body - ')) {
+              for (const rowData of rows) {
+                const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
                 structuredFragments[fragmentDef.name].body.push(rendered.result);
                 allWarnings.push(...rendered.warnings);
               }
             }
-            
-            // Process footer (only once per group, but we'll set it each time - last one wins)
-            if (processedFragments.footer) {
-              const rendered = renderTemplate(processedFragments.footer, cleanTokenValues, rawTokenValues, suppressWarnings);
-              structuredFragments[fragmentDef.name].footer = rendered.result;
-              allWarnings.push(...rendered.warnings);
-            }
-          } else {
-            // Grouped type uses original fragment grouping behavior
-            if (!(fragmentDef.name in groupedFragments)) {
-              groupedFragments[fragmentDef.name] = {};
-            }
-            
-            // Process each fragment template and group by fragment key
-            for (const [key, template] of Object.entries(processedFragments)) {
-              const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
-              allWarnings.push(...rendered.warnings);
-              
-              // Group fragments by key (e.g., "attribute", "label", etc.)
+          }
+          
+          // Process footer (only once per group)
+          const footerRows = fragmentRowsByKey.get('footer');
+          if (footerRows && footerRows.length > 0) {
+            const lastFooterRow = footerRows[footerRows.length - 1];
+            const rendered = renderTemplate(lastFooterRow.template, lastFooterRow.tokenValues.clean, lastFooterRow.tokenValues.raw, suppressWarnings);
+            structuredFragments[fragmentDef.name].footer = rendered.result;
+            allWarnings.push(...rendered.warnings);
+          }
+        } else {
+          // Grouped type - only create section if at least one row evaluated to true
+          if (!(fragmentDef.name in groupedFragments)) {
+            groupedFragments[fragmentDef.name] = {};
+          }
+          
+          for (const [key, rows] of fragmentRowsByKey.entries()) {
+            if (rows.length > 0) { // Only create section if at least one row evaluated to true
               if (!groupedFragments[fragmentDef.name][key]) {
                 groupedFragments[fragmentDef.name][key] = [];
               }
-              groupedFragments[fragmentDef.name][key].push(rendered.result);
+              
+              for (const rowData of rows) {
+                const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
+                allWarnings.push(...rendered.warnings);
+                groupedFragments[fragmentDef.name][key].push(rendered.result);
+              }
             }
           }
         }
@@ -1242,13 +1312,13 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         parts.push(...fragments.body);
         if (fragments.footer) parts.push(fragments.footer);
         
-        groupOutputSections.push(`\n<!-- ${fragmentName} -->\n\n${parts.join('\n')}`);
+        groupOutputSections.push(`\n\n<!-- ${fragmentName} -->\n${parts.join('\n')}`);
       }
       
       // Add grouped fragments (grouped type)
       for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
         for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-          groupOutputSections.push(`\n<!-- ${fragmentKey} -->\n\n${fragments.join('\n')}\n`);
+          groupOutputSections.push(`\n\n<!-- ${fragmentKey} -->\n${fragments.join('\n')}`);
         }
       }
       
