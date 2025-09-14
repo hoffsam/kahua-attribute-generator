@@ -279,60 +279,63 @@
         "kahua.fragmentDefinitions": {
           "type": "array",
           "default": [
-            {
-              "id": "attributes",
-              "name": "Extension Attributes",
-              "tokenReferences": [
-                "appname",
-                "attributes"
-              ],
-              "fragments": {
-                "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
-                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
-                  "Fields": "<Field Attribute=\"{$name}\" />",
-                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
-                  "DataStore": "<Column AttributeName=\"{$name}\" />",
-                  "LogFields": "<Field FieldDef=\"{$name}\" />",
-                  "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
-                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />"
-                }
+          {
+            "id": "attributes",
+            "name": "Extension Attributes",
+            "tokenReferences": [
+              "appname",
+              "attributes"
+            ],
+            "fragments": {
+              "body": {
+                "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
+                "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
+                "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+                "Fields": "<Field Attribute=\"{$name}\" />",
+                "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                "DataStore": "<Column AttributeName=\"{$name}\" />",
+                "LogFields": "<Field FieldDef=\"{$name}\" />",
+                "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
+                "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />"
               }
-            },
-            {
-              "id": "lookups",
-              "name": "Lookup Lists",
-              "tokenReferences": [
-                "lookupheader",
-                "lookups"
-              ],
-              "fragments": {
+            }
+          },
+          {
+            "id": "lookups",
+            "name": "Lookup Lists",
+            "tokenReferences": ["lookupheader","lookups"],
+            "fragments": {
+              "Lookup": {
                 "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">",
-                "body": "<Value Label=\"[{$label != '' ? '{$label}' : '{$entity}_{$listname}{$value}Label'}]\">{$value|friendly}</Value>",
+                "body": "<Value Label=\"[{$label != '' ? '{$label}' : '{$entity}_{$listname}{$value|title}Label'}]\">{$value|friendly}</Value>",
                 "footer": "</LookupList>"
+              },
+              "Labels": {
+                "header": "<Label Key=\"{$entity}_{$listname}LookupListLabel\">{$listlabel != '' ? $listlabel|friendly : $listname|friendly}</Label>\n<Label Key=\"{$entity}_{$listname}LookupListDescription\">{$listdescription != '' ? $listdescription : $listname|friendly}</Label>",
+                "body": "<Label Key=\"{$label != '' ? '{$label}' : '{$entity}_{$listname}{$value|title}Label'}\">{$label != '' ? $label|friendly : $value|friendly}</Label>"
               }
-            },
-            {
-              "id": "supplements",
-              "name": "Supplement Attributes",
-              "tokenReferences": [
-                "appname",
-                "attributes"
-              ],
-              "fragments": {
-                "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
-                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
-                  "Fields": "<Field Attribute=\"{$name}\" />",
-                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
-                  "DataStore": "<Column AttributeName=\"{$name}\" />",
-                  "LogFields": "<Field FieldDef=\"{$name}\" />",
-                  "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
-                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
-                  "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
-                }
+            }
+          },
+          {
+            "id": "supplements",
+            "name": "Supplement Attributes",
+            "tokenReferences": [
+              "appname",
+              "attributes"
+            ],
+            "fragments": {
+              "body": {
+                "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type=='Lookup' ? 'LookupListName=\"$(appname).$(entity)_$(name)LookupList\"' : ''} {$type=='entity' ? 'LinkedEntityDef=\"$(linkedEntityDef)\"' : ''} IsConfigurable=\"true\" />",
+                "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label!='' ? $label|friendly : $name|friendly}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel!='' ? $descriptionlabel : $name|friendly}</Label>",
+                "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
+                "Fields": "<Field Attribute=\"{$name}\" />",
+                "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                "DataStore": "<Column AttributeName=\"{$name}\" />",
+                "LogFields": "<Field FieldDef=\"{$name}\" />",
+                "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
+                "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type=='Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                "{$type=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
+              }
               }
             }
           ],

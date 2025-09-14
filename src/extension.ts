@@ -50,7 +50,7 @@ function toPascalCase(value: string): string {
   
   // Split on word boundaries (spaces, punctuation, etc.) and filter out empty strings
   return value
-    .split(/[^a-zA-Z0-9]+/)
+    .split(/[^a-zA-Z0-9]+|(?=[A-Z][a-z])/)
     .filter(word => word.length > 0)
     .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join('');
@@ -107,71 +107,76 @@ function escapeXml(value: string): string {
  * Formats XML content with proper indentation
  * Note: This is a simple formatter designed for the extension's typical output structure
  */
-function formatXml(xml: string, indentSize: number = 2): string {
-  if (!xml || xml.trim() === '') return xml;
-  
-  const lines = xml.split(/\r?\n/);
-  const formatted: string[] = [];
-  const indent = ' '.repeat(indentSize);
-  
-  // For the extension's output, we mainly want to:
-  // 1. Preserve comments and table data as-is
-  // 2. Indent nested XML elements
-  // 3. Keep self-closing tags at the base level
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue; // Skip empty lines
-    
-    // Handle comments and non-XML content - no indentation changes
-    if (trimmed.startsWith('<!--') || !trimmed.startsWith('<')) {
-      formatted.push(trimmed);
-      continue;
-    }
-    
-    // For XML tags, determine indentation based on content
-    if (trimmed.startsWith('<DataTag') && !trimmed.endsWith('/>')) {
-      // DataTag opening - no indent for the tag itself
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('</DataTag>')) {
-      // DataTag closing - no indent
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('<Key />') || trimmed.startsWith('<Value ')) {
-      // Nested elements within DataTag or LookupList - indent
-      formatted.push(indent + trimmed);
-    } else if (trimmed.startsWith('<LookupList') && !trimmed.endsWith('/>')) {
-      // LookupList opening - no indent
-      formatted.push(trimmed);
-    } else if (trimmed.startsWith('</LookupList>')) {
-      // LookupList closing - no indent  
-      formatted.push(trimmed);
-    } else {
-      // All other XML elements (Attribute, Label, Field, etc.) - no indent
-      formatted.push(trimmed);
-    }
-  }
-  
-  return formatted.join('\n');
+function formatXml(xml: string, _indentSize: number = 2): string {
+  if (xml == null) return xml as unknown as string;
+  return String(xml).replace(/\r\n?/g, '\n');
 }
 
 /**
  * Formats a collection of XML fragments with section headers and proper indentation
  */
-function formatFragmentCollection(fragments: { [key: string]: string[] }, indentSize: number = 2): string {
-  const sections: string[] = [];
-  
-  for (const [sectionName, fragmentList] of Object.entries(fragments)) {
-    if (fragmentList.length === 0) continue;
-    
-    // Add section header comment
-    sections.push(`<!-- ${sectionName} -->`);
-    
-    // Format each fragment in the section
-    const formattedFragments = fragmentList.map(fragment => formatXml(fragment, indentSize));
-    sections.push(formattedFragments.join('\n'));
+// Replaces the old, unused version
+type TableFragmentsMap = {
+  [fragmentName: string]: {
+    [group: string]: { header?: string; body: string[]; footer?: string }
   }
-  
-  return sections.join('\n\n');
+};
+
+type GroupedFragmentsMap = {
+  [fragmentName: string]: {
+    [fragmentKey: string]: string[]
+  }
+};
+
+/**
+ * Renders fragment collections (both table-style groups and grouped fragments)
+ * into a single string, preserving author formatting by default.
+ *
+ * - Adds a leading space before comment headers ( " <!-- ... -->" )
+ * - Preserves blank lines and fragment formatting; only calls formatXml if applyFormatting === true
+ */
+function formatFragmentCollection(
+  opts: {
+    table?: TableFragmentsMap,
+    grouped?: GroupedFragmentsMap,
+    applyFormatting?: boolean,
+    indentSize?: number
+  }
+): string {
+  const { table, grouped, applyFormatting = false, indentSize = 2 } = opts;
+  const sections: string[] = [];
+
+  // Table (header/body/footer) groups
+  if (table) {
+    for (const [fragmentName, groupsMap] of Object.entries(table)) {
+      for (const [group, partsObj] of Object.entries(groupsMap)) {
+        const parts: string[] = [];
+        if (partsObj.header) parts.push(partsObj.header);
+        parts.push(...partsObj.body);
+        if (partsObj.footer) parts.push(partsObj.footer);
+
+        const label = group === 'default' ? fragmentName : `${fragmentName} - ${group}`;
+        let body = parts.join('\n');
+        if (applyFormatting) body = formatXml(body, indentSize);
+
+        sections.push(`\n <!-- ${label} -->\n\n${body}`);
+      }
+    }
+  }
+
+  // Grouped (named) fragments
+  if (grouped) {
+    for (const [_fragmentName, fragmentGroups] of Object.entries(grouped)) {
+      for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
+        let body = fragments.join('\n');
+        if (applyFormatting) body = formatXml(body, indentSize);
+
+        sections.push(`\n <!-- ${fragmentKey} -->\n\n${body}`);
+      }
+    }
+  }
+
+  return sections.join('\n');
 }
 
 /**
@@ -555,8 +560,7 @@ function processFragmentTemplates(
     if (typeof template === 'object') {
       // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
       for (const [subKey, subTemplate] of Object.entries(template)) {
-        const fullKey = `${key} - ${subKey}`;
-        processedFragments[fullKey] = subTemplate;
+        processedFragments[subKey] = subTemplate;
       }
     } else {
       // Handle flat structure
@@ -1087,6 +1091,7 @@ export function deactivate() {
  */
 async function handleSelection(fragmentIds: string[]): Promise<void> {
   const editor = vscode.window.activeTextEditor;
+  
   if (!editor) {
     vscode.window.showErrorMessage('No active editor found');
     return;
@@ -1094,8 +1099,10 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
 
   try {
     const config = vscode.workspace.getConfiguration();
+    const xmlIndentSize = config.get<number>('kahua.xmlIndentSize') || 2;
+    const applyFormatting = config.get<boolean>('kahua.formatXmlOutput') === true;
     const suppressWarnings = config.get<boolean>('kahua.suppressInvalidConditionWarnings') || false;
-    
+  
     // Get configuration arrays
     const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
     const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
@@ -1169,7 +1176,12 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
 
       // Process table data for this group
       const groupTokenData: Array<Record<string, string>> = [];
-      const structuredFragments: { [fragmentName: string]: { header?: string; body: string[]; footer?: string } } = {};
+      const structuredFragments: {
+        [fragmentName: string]: {
+          [group: string]: { header?: string; body: string[]; footer?: string }
+        }
+      } = {};
+
       const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
       
       // If we have no data lines but have table tokens, that's an error
@@ -1209,39 +1221,49 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
           const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
           
           if (fragmentType === 'table') {
-            // Table type uses header/body/footer structure
-            if (!(fragmentDef.name in structuredFragments)) {
-              structuredFragments[fragmentDef.name] = { body: [] };
-            }
-            
-            // Process header (only once per group)
-            if (!structuredFragments[fragmentDef.name].header && processedFragments.header) {
-              const rendered = renderTemplate(processedFragments.header, cleanTokenValues, rawTokenValues, suppressWarnings);
-              structuredFragments[fragmentDef.name].header = rendered.result;
-              allWarnings.push(...rendered.warnings);
-            }
-            
-            // Process body (for each row) - handle both single body and nested fragments
-            if (processedFragments.body) {
-              const rendered = renderTemplate(processedFragments.body, cleanTokenValues, rawTokenValues, suppressWarnings);
-              structuredFragments[fragmentDef.name].body.push(rendered.result);
-              allWarnings.push(...rendered.warnings);
-            }
-            
-            // Process nested body fragments (like "body - Attributes", "body - Labels")
+            // Ensure container for this fragment name
+            structuredFragments[fragmentDef.name] ??= {};
+
+            // Accept keys:
+            //   "header" / "body" / "footer"                  -> group = "default"
+            //   "<group> - header/body/footer"                -> named group
+            //   "body - Something" (legacy nested bodies)     -> treat as default body
             for (const [key, template] of Object.entries(processedFragments)) {
-              if (key.startsWith('body - ')) {
-                const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
-                structuredFragments[fragmentDef.name].body.push(rendered.result);
-                allWarnings.push(...rendered.warnings);
+              let group = 'default';
+              let part = '';
+              let isLegacyBody = false;
+
+              const m1 = key.match(/^(header|body|footer)$/i);
+              const m2 = key.match(/^(.+?)\s*-\s*(header|body|footer)$/i);
+              const mLegacy = key.match(/^body\s*-\s*.+$/i);
+
+              if (m1) {
+                part = m1[1].toLowerCase();
+              } else if (m2) {
+                group = m2[1].trim();
+                part = m2[2].toLowerCase();
+              } else if (mLegacy) {
+                part = 'body';
+                isLegacyBody = true;
+              } else {
+                // Unrecognized key; skip
+                continue;
               }
-            }
-            
-            // Process footer (only once per group, but we'll set it each time - last one wins)
-            if (processedFragments.footer) {
-              const rendered = renderTemplate(processedFragments.footer, cleanTokenValues, rawTokenValues, suppressWarnings);
-              structuredFragments[fragmentDef.name].footer = rendered.result;
+
+              structuredFragments[fragmentDef.name][group] ??= { body: [] };
+
+              const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
               allWarnings.push(...rendered.warnings);
+
+              if (part === 'header') {
+                if (!structuredFragments[fragmentDef.name][group].header) {
+                  structuredFragments[fragmentDef.name][group].header = rendered.result; // first wins
+                }
+              } else if (part === 'footer') {
+                structuredFragments[fragmentDef.name][group].footer = rendered.result;   // last wins
+              } else {
+                structuredFragments[fragmentDef.name][group].body.push(rendered.result); // body
+              }
             }
           } else {
             // Grouped type uses original fragment grouping behavior
@@ -1271,24 +1293,15 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       // Build output for this group
       const groupOutputSections: string[] = [tokenTable];
       
-      // Add structured fragments (table type)
-      for (const [fragmentName, fragments] of Object.entries(structuredFragments)) {
-        const parts: string[] = [];
-        if (fragments.header) parts.push(fragments.header);
-        parts.push(...fragments.body);
-        if (fragments.footer) parts.push(fragments.footer);
-        
-        groupOutputSections.push(`\n<!-- ${fragmentName} -->\n\n${parts.join('\n')}`);
-      }
-      
-      // Add grouped fragments (grouped type)
-      for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
-        for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-          //groupOutputSections.push(`\n<!-- ${fragmentName} - ${fragmentKey} -->\n\n${fragments.join('\n')}`);
-          groupOutputSections.push(`\n<!-- ${fragmentKey} -->\n\n${fragments.join('\n')}`);
-        }
-      }
-      
+      // Add structured fragments (table type) — supports multiple groups
+      groupOutputSections.push(
+        formatFragmentCollection({
+          table: structuredFragments,
+          grouped: groupedFragments,
+          applyFormatting,
+          indentSize: xmlIndentSize
+        })
+      );    
       
       outputSections.push(groupOutputSections.join('\n\n'));
     }
@@ -1300,11 +1313,8 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
 
     let generatedXml = outputSections.join('\n\n');
     
-    // Apply XML formatting if enabled
-    const formatXmlOutput = config.get<boolean>('kahua.formatXmlOutput');
-    const xmlIndentSize = config.get<number>('kahua.xmlIndentSize') || 2;
-    
-    if (formatXmlOutput !== false) { // Default to true if not configured
+    // Apply XML formatting if explicitly enabled
+    if (applyFormatting) {
       generatedXml = formatXml(generatedXml, xmlIndentSize);
     }
       
