@@ -181,6 +181,48 @@ Generated output includes a table showing token configuration and values for eac
 
 ## Fragment System
 
+### Fragment Structure Types
+
+Fragment definitions support two main structure types:
+
+#### 1. Grouped Structure (Default)
+Traditional flat structure where each fragment key creates a separate section:
+
+```json
+{
+  "fragments": {
+    "body": {
+      "Attributes": "<Attribute .../>",
+      "Labels": "<Label .../>"
+    }
+  }
+}
+```
+
+#### 2. Table Structure (Header/Body/Footer)
+Structured format for lists and lookup tables:
+
+```json
+{
+  "type": "table",
+  "fragments": {
+    "Lookups": {
+      "header": "<LookupList ...>",
+      "body": "  <Value .../>",
+      "footer": "</LookupList>"
+    },
+    "Lookup Labels": {
+      "header": "<Label Key=\"ListLabel\">...</Label>",
+      "body": "<Label Key=\"ValueLabel\">...</Label>"
+    }
+  }
+}
+```
+
+### Multiple Fragment Sets
+
+A single fragment definition can contain multiple named fragment sets. For example, the lookup definition includes both "Lookups" and "Lookup Labels" sets, allowing generation of both the lookup structure and corresponding label definitions in a single operation.
+
 ### Default Fragments
 
 The extension generates XML using configurable fragment templates in `kahua.fragmentDefinitions`. Here's an example of the structure:
@@ -217,9 +259,9 @@ Fragments support the `{$token}` syntax with transformation options using the pi
 - **`{$token|upper}`** - Convert to uppercase and XML-escape
 - **`{$token|lower}`** - Convert to lowercase and XML-escape
 
-**PascalCase**: Removes spaces and special characters, capitalizes first letter of each word. Perfect for XML identifiers and attribute names.
+**PascalCase**: Converts text to PascalCase while preserving existing PascalCase formatting. If input already has mixed case (like "MyEntityName"), it's preserved. Otherwise, removes spaces and special characters, capitalizes first letter of each word. Perfect for XML identifiers and attribute names.
 
-**TitleCase**: Applies proper title capitalization rules - capitalizes major words but keeps articles, prepositions, and conjunctions lowercase (except when first or last word). Preserves spaces and XML-escapes output.
+**TitleCase**: Converts PascalCase and numbered text to properly spaced title case. Handles transitions like "ListNameIsThis" → "List Name Is This" and "Value1" → "Value 1". Applies proper title capitalization rules - capitalizes major words but keeps articles, prepositions, and conjunctions lowercase (except when first or last word). Preserves spaces and XML-escapes output.
 
 **XML Escaping**: Applied to `friendly`, `upper`, and `lower` transformations. Special characters like `<`, `>`, `&`, `"`, and `'` are converted to their XML entity equivalents.
 
@@ -233,6 +275,8 @@ Fragments support the `{$token}` syntax with transformation options using the pi
 <Label Key="MyEntity_FieldName">{$label|friendly}</Label>
 <!-- Input: "field of the rings" → Output: "Field of the Rings" -->
 <!-- Input: "fieldOfTheRings" → Output: "Field of the Rings" -->
+<!-- Input: "Value1" → Output: "Value 1" -->
+<!-- Input: "MyEntity123Name" → Output: "My Entity 123 Name" -->
 
 <!-- Uppercase transformation -->
 <Comment>{$description|upper}</Comment>
@@ -396,6 +440,16 @@ FieldC,MyEntity,Lookup,Field C,ListBox,true,Advanced
 <!-- AdvancedSettings (included because category=='Advanced') -->
 <Setting Name="FieldB" Level="Advanced" />
 ```
+
+### Custom Commands
+
+The extension provides Custom commands that allow access to any fragment definition:
+
+- **`Kahua: Generate from Custom`** - Generate output from any configured fragment
+- **`Kahua: Generate Snippet for Custom`** - Create VS Code snippets for any fragment
+- **`Kahua: Generate Template for Custom`** - Generate documentation templates for any fragment
+
+These commands read from `kahua.fragmentDefinitions` and present all available fragments in a quick-pick list, making any fragment accessible without needing dedicated menu commands.
 
 ### Custom Fragments
 

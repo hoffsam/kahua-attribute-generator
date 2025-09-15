@@ -667,24 +667,24 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateCustom', async () => {
       const config = vscode.workspace.getConfiguration();
-      const menuOptions = config.get<MenuOption[]>('kahua.menuOptions') || [];
-      
-      if (menuOptions.length === 0) {
-        vscode.window.showErrorMessage('No menu options configured. Please configure kahua.menuOptions in your settings.');
+      const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
+
+      if (fragmentDefinitions.length === 0) {
+        vscode.window.showErrorMessage('No fragment definitions configured. Please configure kahua.fragmentDefinitions in your settings.');
         return;
       }
-      
+
       const pick = await vscode.window.showQuickPick(
-        menuOptions.map(option => ({
-          label: option.name,
-          fragments: option.fragments
+        fragmentDefinitions.map(def => ({
+          label: def.name,
+          fragments: [def.id]
         })),
-        { 
+        {
           placeHolder: 'Select fragment type to generate',
           title: 'Kahua Custom Fragment Generator'
         }
       );
-      
+
       if (pick) {
         await handleSelection(pick.fragments);
       }
@@ -881,19 +881,19 @@ function renderTemplate(
  */
 async function selectCustomFragments(placeholder: string): Promise<{ label: string; fragments: string[] } | undefined> {
   const config = vscode.workspace.getConfiguration();
-  const menuOptions = config.get<MenuOption[]>('kahua.menuOptions') || [];
-  
-  if (menuOptions.length === 0) {
-    vscode.window.showErrorMessage('No menu options configured. Please configure kahua.menuOptions in your settings.');
+  const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
+
+  if (fragmentDefinitions.length === 0) {
+    vscode.window.showErrorMessage('No fragment definitions configured. Please configure kahua.fragmentDefinitions in your settings.');
     return undefined;
   }
-  
+
   return await vscode.window.showQuickPick(
-    menuOptions.map(option => ({
-      label: option.name,
-      fragments: option.fragments
+    fragmentDefinitions.map(def => ({
+      label: def.name,
+      fragments: [def.id]
     })),
-    { 
+    {
       placeHolder: placeholder,
       title: 'Kahua Custom Fragment Selector'
     }
