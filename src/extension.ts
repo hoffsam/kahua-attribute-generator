@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 
 /**
+ * Regex pattern for detecting conditional expressions in fragment keys
+ * Handles nested braces like {$token} inside conditionals
+ */
+const FRAGMENT_CONDITIONAL_PATTERN = /\{.*\?.*:.*\}/;
+
+/**
  * Represents a conditional expression result
  */
 interface ConditionalResult {
@@ -501,72 +507,50 @@ function processFragmentTemplates(
   cleanTokenValues: Record<string, string>,
   rawTokenValues: Record<string, string>, 
   suppressWarnings: boolean
-): { processedFragments: Record<string, string>; warnings: string[] } {
+): { 
+  processedFragments: Record<string, string>; 
+  conditionalFragments: Record<string, string>; // Map original conditional key -> template
+  warnings: string[] 
+} {
+  console.log('[KAHUA] processFragmentTemplates called with keys:', Object.keys(fragmentTemplates));
   const processedFragments: Record<string, string> = {};
+  const conditionalFragments: Record<string, string> = {};
   const allWarnings: string[] = [];
   
   for (const [key, template] of Object.entries(fragmentTemplates)) {
     if (typeof template === 'object') {
       // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
       for (const [subKey, subTemplate] of Object.entries(template)) {
-        // Use just the subKey for cleaner comment headers (e.g., "DataTags" instead of "body - DataTags")
-        processedFragments[subKey] = subTemplate;
+        // Check if the subKey itself contains a conditional expression
+        const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1'); // Remove quotes first
+        const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+        
+        if (isConditional) {
+          console.log('[KAHUA] Found conditional in nested structure:', subKey);
+          // Store conditional fragment for per-row evaluation later
+          conditionalFragments[subKey] = subTemplate;
+        } else {
+          // Regular nested key without conditional - process normally
+          processedFragments[subKey] = subTemplate;
+        }
       }
     } else {
       // Handle flat structure
-      // Check if the key itself contains a conditional expression
-      console.log(`[DEBUG] Processing fragment key: "${key}"`);
-      const isConditional = key.match(/^\{.+\?.+:.+\}.*$/);
-      console.log(`[DEBUG] Is conditional: ${!!isConditional}`);
+      const strippedKey = key.replace(/^"(.*)"$/, '$1'); // Remove quotes first
+      const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
       
       if (isConditional) {
-        // Pre-process tokens in the key (same as value processing)
-        let processedKey = key;
-        console.log(`[DEBUG] Original key: "${processedKey}"`);
-        console.log(`[DEBUG] Available tokens:`, Object.keys(cleanTokenValues));
-        
-        // Replace {$token} patterns with values (same logic as renderTemplate)
-        for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
-          const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
-          let match;
-          
-          while ((match = tokenPattern.exec(processedKey)) !== null) {
-            const fullMatch = match[0];
-            const transformation = match[1] || 'default';
-            // Use raw token value for proper evaluation
-            const rawValue = rawTokenValues[tokenName] || '';
-            const transformedValue = applyTokenTransformation(rawValue, transformation);
-            
-            console.log(`[DEBUG] Replacing ${fullMatch} with ${transformedValue}`);
-            processedKey = processedKey.replace(fullMatch, transformedValue);
-            // Reset the regex to continue searching from the beginning since we modified the string
-            tokenPattern.lastIndex = 0;
-          }
-        }
-        
-        console.log(`[DEBUG] After token replacement: "${processedKey}"`);
-        
-        // Now use the SAME method as values: processConditionalTemplate()
-        const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
-        console.log(`[DEBUG] Conditional evaluation result: "${result}"`);
-        allWarnings.push(...conditionalWarnings);
-        
-        // If result is not empty, use it as the key
-        if (result.trim()) {
-          console.log(`[DEBUG] Using evaluated result as key: "${result.trim()}"`);
-          processedFragments[result.trim()] = template;
-        } else {
-          console.log(`[DEBUG] Omitting fragment - result was empty`);
-        }
-        // If empty or evaluates to false, fragment is omitted entirely
+        console.log('[KAHUA] Found conditional in flat structure:', key);
+        // Store conditional fragment for per-row evaluation later
+        conditionalFragments[key] = template;
       } else {
-        // Regular key without conditional
+        // Regular key without conditional - process normally
         processedFragments[key] = template;
       }
     }
   }
   
-  return { processedFragments, warnings: allWarnings };
+  return { processedFragments, conditionalFragments, warnings: allWarnings };
 }
 
 /**
@@ -1186,14 +1170,54 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         const fragmentsByDef = new Map<string, { processedFragments: Record<string, string>; warnings: string[] }>();
         
         for (const fragmentDef of selectedFragmentDefs) {
-          const { processedFragments, warnings: fragmentWarnings } = processFragmentTemplates(
+          const { processedFragments, conditionalFragments, warnings: fragmentWarnings } = processFragmentTemplates(
             fragmentDef.fragments, 
             cleanTokenValues,
             rawTokenValues, 
             suppressWarnings
           );
           
+          console.log(`[KAHUA] Fragment processing result - processedFragments:`, Object.keys(processedFragments));
+          console.log(`[KAHUA] Fragment processing result - conditionalFragments:`, Object.keys(conditionalFragments));
+          
           fragmentsByDef.set(fragmentDef.id, { processedFragments, warnings: fragmentWarnings });
+          
+          // Process conditional fragments for this row
+          for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
+            // Evaluate the conditional key for this specific row
+            const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1'); // Remove quotes
+            let processedKey = strippedKey;
+            
+            // Replace {$token} patterns with values for this row
+            for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+              const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
+              let match;
+              
+              while ((match = tokenPattern.exec(processedKey)) !== null) {
+                const fullMatch = match[0];
+                const transformation = match[1] || 'default';
+                const rawValue = rawTokenValues[tokenName] || '';
+                const transformedValue = applyTokenTransformation(rawValue, transformation);
+                
+                processedKey = processedKey.replace(fullMatch, transformedValue);
+                tokenPattern.lastIndex = 0;
+              }
+            }
+            
+            // Evaluate the conditional expression
+            const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
+            allWarnings.push(...conditionalWarnings);
+            
+            // If the condition evaluated to something (not empty/false), include this row
+            if (result.trim()) {
+              console.log(`[KAHUA] Row evaluation: ${conditionalKey} -> "${result.trim()}"`);
+              // Add this to regular processed fragments so it gets included in output
+              fragmentsByDef.get(fragmentDef.id)!.processedFragments[result.trim()] = template;
+              console.log(`[KAHUA] Added to processedFragments:`, Object.keys(fragmentsByDef.get(fragmentDef.id)!.processedFragments));
+            } else {
+              console.log(`[KAHUA] Row evaluation: ${conditionalKey} -> SKIPPED (empty result)`);
+            }
+          }
         }
         
         conditionalFragmentsByRow.push({
