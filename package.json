@@ -322,9 +322,15 @@
                 "lookups"
               ],
               "fragments": {
-                "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">\n  <Value />",
-                "body": "  <Value Label=\"[{'{$label}' != '' ? '{$label}' : '{$entity}_{$listname}{$value}Label'}]\">{$value|friendly}</Value>",
-                "footer": "</LookupList>"
+                "Lookups": {
+                  "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">\n  <Value />",
+                  "body": "  <Value Label=\"[{$entity}_{$listname}{$value}Label]\">{$value|friendly}</Value>",
+                  "footer": "</LookupList>"
+                },
+                "Lookup Labels": {
+                  "header": "<Label Key=\"{$entity}_{$listname}LookupListLabel\">{$listname|friendly}</Label>\n<Label Key=\"{$entity}_{$listname}LookupListDescription\">{$listname|friendly}</Label>",
+                  "body": "<Label Key=\"{$entity}_{$listname}{$value}Label\">{'{$label}' != '' ? '{$label|friendly}' : '{$value|friendly}'}</Label>"
+                }
               }
             },
             {
@@ -349,6 +355,20 @@
                   "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
                   "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{$type=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
                   "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
+                }
+              }
+            },
+            {
+              "id": "test",
+              "name": "Test Fragment",
+              "tokenReferences": [
+                "attributeheader",
+                "attributes"
+              ],
+              "fragments": {
+                "body": {
+                  "TestElement": "<TestElement Name=\"{$name}\" Type=\"{$type}\" Label=\"{$label|friendly}\" Entity=\"{$entity}\" />",
+                  "TestComment": "<!-- Test: {$name} of type {$type} for entity {$entity} -->"
                 }
               }
             }

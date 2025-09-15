@@ -30,7 +30,14 @@ interface FragmentDefinition {
   name: string;
   type?: 'grouped' | 'table'; // Default is 'grouped'
   tokenReferences: string[];
-  fragments: Record<string, string | Record<string, string>>;
+  fragments: Record<string, string | Record<string, string | Record<string, string>>>;
+}
+
+interface FragmentSet {
+  header?: string;
+  body?: string;
+  footer?: string;
+  [key: string]: string | undefined;
 }
 
 interface MenuOption {
@@ -58,7 +65,14 @@ function toPascalCase(value: string): string {
   return value
     .split(/[^a-zA-Z0-9]+/)
     .filter(word => word.length > 0)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .map(word => {
+      // If word is already PascalCase (starts with uppercase and has mixed case), preserve it
+      if (word.charAt(0) === word.charAt(0).toUpperCase() && word !== word.toUpperCase() && word !== word.toLowerCase()) {
+        return word;
+      }
+      // Otherwise, apply standard PascalCase transformation
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
     .join('');
 }
 
@@ -67,30 +81,38 @@ function toPascalCase(value: string): string {
  */
 function toTitleCase(value: string): string {
   if (!value) return value;
-  
+
+  // First, convert PascalCase and numbers to space-separated words
+  // Insert space before capital letters (except the first character)
+  // Insert space before and after numbers when adjacent to letters
+  const spacedValue = value
+    .replace(/([a-z])([A-Z])/g, '$1 $2')  // PascalCase: letter before capital
+    .replace(/([a-zA-Z])(\d)/g, '$1 $2')  // Letter before number
+    .replace(/(\d)([a-zA-Z])/g, '$1 $2'); // Number before letter
+
   // Words that should remain lowercase (articles, short prepositions, conjunctions)
   const lowercaseWords = new Set([
     'a', 'an', 'the', 'and', 'or', 'but', 'nor', 'yet', 'so',
     'in', 'on', 'at', 'by', 'for', 'of', 'to', 'up', 'as'
   ]);
-  
+
   // Split into words while preserving spaces
-  const words = value.toLowerCase().split(/(\s+)/);
-  
+  const words = spacedValue.toLowerCase().split(/(\s+)/);
+
   return words.map((word, index) => {
     // Preserve whitespace as-is
     if (/^\s+$/.test(word)) {
       return word;
     }
-    
+
     // Always capitalize first and last word
     const isFirstWord = index === 0 || words.slice(0, index).every(w => /^\s+$/.test(w));
     const isLastWord = index === words.length - 1 || words.slice(index + 1).every(w => /^\s+$/.test(w));
-    
+
     if (isFirstWord || isLastWord || !lowercaseWords.has(word.toLowerCase())) {
       return word.charAt(0).toUpperCase() + word.slice(1);
     }
-    
+
     return word;
   }).join('');
 }
@@ -500,57 +522,123 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
 }
 
 /**
- * Processes template fragments to handle conditional keys and nested structures
+ * Checks if a template structure represents a fragment set (has header/body/footer structure)
+ */
+function isFragmentSet(template: any): template is FragmentSet {
+  return typeof template === 'object' &&
+         template !== null &&
+         (template.hasOwnProperty('header') || template.hasOwnProperty('body') || template.hasOwnProperty('footer'));
+}
+
+/**
+ * Processes template fragments to handle conditional keys, nested structures, and fragment sets
  */
 function processFragmentTemplates(
-  fragmentTemplates: Record<string, string | Record<string, string>>, 
+  fragmentTemplates: Record<string, string | Record<string, string | Record<string, string>>>,
   cleanTokenValues: Record<string, string>,
-  rawTokenValues: Record<string, string>, 
+  rawTokenValues: Record<string, string>,
   suppressWarnings: boolean
-): { 
-  processedFragments: Record<string, string>; 
-  conditionalFragments: Record<string, string>; // Map original conditional key -> template
-  warnings: string[] 
+): {
+  processedFragmentSets: Record<string, Record<string, string>>; // setName -> { fragmentKey -> template }
+  conditionalFragmentSets: Record<string, Record<string, string>>; // setName -> { conditionalKey -> template }
+  warnings: string[]
 } {
   console.log('[KAHUA] processFragmentTemplates called with keys:', Object.keys(fragmentTemplates));
-  const processedFragments: Record<string, string> = {};
-  const conditionalFragments: Record<string, string> = {};
+  const processedFragmentSets: Record<string, Record<string, string>> = {};
+  const conditionalFragmentSets: Record<string, Record<string, string>> = {};
   const allWarnings: string[] = [];
-  
-  for (const [key, template] of Object.entries(fragmentTemplates)) {
-    if (typeof template === 'object') {
-      // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
-      for (const [subKey, subTemplate] of Object.entries(template)) {
-        // Check if the subKey itself contains a conditional expression
-        const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1'); // Remove quotes first
-        const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
-        
-        if (isConditional) {
-          console.log('[KAHUA] Found conditional in nested structure:', subKey);
-          // Store conditional fragment for per-row evaluation later
-          conditionalFragments[subKey] = subTemplate;
+
+  // Check if this is the new nested structure (fragment sets) or legacy flat/single-level nested structure
+  const hasFragmentSets = Object.values(fragmentTemplates).some(template => isFragmentSet(template));
+
+  if (hasFragmentSets) {
+    // New structure: fragments contain sets like { setA: { header: "...", body: "..." }, setB: { ... } }
+    for (const [setName, setTemplate] of Object.entries(fragmentTemplates)) {
+      if (isFragmentSet(setTemplate)) {
+        console.log('[KAHUA] Processing fragment set:', setName);
+        processedFragmentSets[setName] = {};
+        conditionalFragmentSets[setName] = {};
+
+        for (const [fragmentKey, template] of Object.entries(setTemplate)) {
+          if (typeof template === 'string') {
+            const strippedKey = fragmentKey.replace(/^"(.*)"$/, '$1');
+            const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+
+            if (isConditional) {
+              console.log('[KAHUA] Found conditional in fragment set:', setName, fragmentKey);
+              conditionalFragmentSets[setName][fragmentKey] = template;
+            } else {
+              processedFragmentSets[setName][fragmentKey] = template;
+            }
+          }
+        }
+      } else {
+        // Mixed structure - treat non-fragment-set entries as legacy single set
+        console.log('[KAHUA] Mixed structure detected, processing legacy entry:', setName);
+        if (!processedFragmentSets['default']) {
+          processedFragmentSets['default'] = {};
+          conditionalFragmentSets['default'] = {};
+        }
+
+        if (typeof setTemplate === 'object') {
+          for (const [subKey, subTemplate] of Object.entries(setTemplate)) {
+            const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1');
+            const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+
+            if (isConditional) {
+              conditionalFragmentSets['default'][subKey] = subTemplate as string;
+            } else {
+              processedFragmentSets['default'][subKey] = subTemplate as string;
+            }
+          }
         } else {
-          // Regular nested key without conditional - process normally
-          processedFragments[subKey] = subTemplate;
+          const strippedKey = setName.replace(/^"(.*)"$/, '$1');
+          const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+
+          if (isConditional) {
+            conditionalFragmentSets['default'][setName] = setTemplate;
+          } else {
+            processedFragmentSets['default'][setName] = setTemplate;
+          }
         }
       }
-    } else {
-      // Handle flat structure
-      const strippedKey = key.replace(/^"(.*)"$/, '$1'); // Remove quotes first
-      const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
-      
-      if (isConditional) {
-        console.log('[KAHUA] Found conditional in flat structure:', key);
-        // Store conditional fragment for per-row evaluation later
-        conditionalFragments[key] = template;
+    }
+  } else {
+    // Legacy structure: treat as single default set
+    console.log('[KAHUA] Legacy structure detected, processing as default set');
+    processedFragmentSets['default'] = {};
+    conditionalFragmentSets['default'] = {};
+
+    for (const [key, template] of Object.entries(fragmentTemplates)) {
+      if (typeof template === 'object') {
+        // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
+        for (const [subKey, subTemplate] of Object.entries(template)) {
+          const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1');
+          const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+
+          if (isConditional) {
+            console.log('[KAHUA] Found conditional in nested structure:', subKey);
+            conditionalFragmentSets['default'][subKey] = subTemplate as string;
+          } else {
+            processedFragmentSets['default'][subKey] = subTemplate as string;
+          }
+        }
       } else {
-        // Regular key without conditional - process normally
-        processedFragments[key] = template;
+        // Handle flat structure
+        const strippedKey = key.replace(/^"(.*)"$/, '$1');
+        const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+
+        if (isConditional) {
+          console.log('[KAHUA] Found conditional in flat structure:', key);
+          conditionalFragmentSets['default'][key] = template;
+        } else {
+          processedFragmentSets['default'][key] = template;
+        }
       }
     }
   }
-  
-  return { processedFragments, conditionalFragments, warnings: allWarnings };
+
+  return { processedFragmentSets, conditionalFragmentSets, warnings: allWarnings };
 }
 
 /**
@@ -1137,7 +1225,11 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       // Collect conditional fragments across all rows before processing
       const conditionalFragmentsByRow: Array<{
         tokenValues: { clean: Record<string, string>; raw: Record<string, string> };
-        fragmentsByDef: Map<string, { processedFragments: Record<string, string>; warnings: string[] }>;
+        fragmentsByDef: Map<string, {
+          processedFragmentSets: Record<string, Record<string, string>>;
+          conditionalFragmentSets: Record<string, Record<string, string>>;
+          warnings: string[]
+        }>;
       }> = [];
       
       // If we have no data lines but have table tokens, that's an error
@@ -1167,55 +1259,64 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         groupTokenData.push({ ...cleanTokenValues });
 
         // Process fragment definitions for this row and store results
-        const fragmentsByDef = new Map<string, { processedFragments: Record<string, string>; warnings: string[] }>();
-        
+        const fragmentsByDef = new Map<string, {
+          processedFragmentSets: Record<string, Record<string, string>>;
+          conditionalFragmentSets: Record<string, Record<string, string>>;
+          warnings: string[]
+        }>();
+
         for (const fragmentDef of selectedFragmentDefs) {
-          const { processedFragments, conditionalFragments, warnings: fragmentWarnings } = processFragmentTemplates(
-            fragmentDef.fragments, 
+          const { processedFragmentSets, conditionalFragmentSets, warnings: fragmentWarnings } = processFragmentTemplates(
+            fragmentDef.fragments,
             cleanTokenValues,
-            rawTokenValues, 
+            rawTokenValues,
             suppressWarnings
           );
-          
-          console.log(`[KAHUA] Fragment processing result - processedFragments:`, Object.keys(processedFragments));
-          console.log(`[KAHUA] Fragment processing result - conditionalFragments:`, Object.keys(conditionalFragments));
-          
-          fragmentsByDef.set(fragmentDef.id, { processedFragments, warnings: fragmentWarnings });
-          
-          // Process conditional fragments for this row
-          for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
-            // Evaluate the conditional key for this specific row
-            const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1'); // Remove quotes
-            let processedKey = strippedKey;
-            
-            // Replace {$token} patterns with values for this row
-            for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
-              const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
-              let match;
-              
-              while ((match = tokenPattern.exec(processedKey)) !== null) {
-                const fullMatch = match[0];
-                const transformation = match[1] || 'default';
-                const rawValue = rawTokenValues[tokenName] || '';
-                const transformedValue = applyTokenTransformation(rawValue, transformation);
-                
-                processedKey = processedKey.replace(fullMatch, transformedValue);
-                tokenPattern.lastIndex = 0;
+
+          console.log(`[KAHUA] Fragment processing result - processedFragmentSets:`, Object.keys(processedFragmentSets));
+          console.log(`[KAHUA] Fragment processing result - conditionalFragmentSets:`, Object.keys(conditionalFragmentSets));
+
+          fragmentsByDef.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets, warnings: fragmentWarnings });
+
+          // Process conditional fragments for this row across all sets
+          for (const [setName, conditionalFragments] of Object.entries(conditionalFragmentSets)) {
+            for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
+              // Evaluate the conditional key for this specific row
+              const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1'); // Remove quotes
+              let processedKey = strippedKey;
+
+              // Replace {$token} patterns with values for this row
+              for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+                const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
+                let match;
+
+                while ((match = tokenPattern.exec(processedKey)) !== null) {
+                  const fullMatch = match[0];
+                  const transformation = match[1] || 'default';
+                  const rawValue = rawTokenValues[tokenName] || '';
+                  const transformedValue = applyTokenTransformation(rawValue, transformation);
+
+                  processedKey = processedKey.replace(fullMatch, transformedValue);
+                  tokenPattern.lastIndex = 0;
+                }
               }
-            }
-            
-            // Evaluate the conditional expression
-            const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
-            allWarnings.push(...conditionalWarnings);
-            
-            // If the condition evaluated to something (not empty/false), include this row
-            if (result.trim()) {
-              console.log(`[KAHUA] Row evaluation: ${conditionalKey} -> "${result.trim()}"`);
-              // Add this to regular processed fragments so it gets included in output
-              fragmentsByDef.get(fragmentDef.id)!.processedFragments[result.trim()] = template;
-              console.log(`[KAHUA] Added to processedFragments:`, Object.keys(fragmentsByDef.get(fragmentDef.id)!.processedFragments));
-            } else {
-              console.log(`[KAHUA] Row evaluation: ${conditionalKey} -> SKIPPED (empty result)`);
+
+              // Evaluate the conditional expression
+              const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
+              allWarnings.push(...conditionalWarnings);
+
+              // If the condition evaluated to something (not empty/false), include this row
+              if (result.trim()) {
+                console.log(`[KAHUA] Row evaluation: ${setName}.${conditionalKey} -> "${result.trim()}"`);
+                // Add this to regular processed fragments so it gets included in output
+                if (!fragmentsByDef.get(fragmentDef.id)!.processedFragmentSets[setName]) {
+                  fragmentsByDef.get(fragmentDef.id)!.processedFragmentSets[setName] = {};
+                }
+                fragmentsByDef.get(fragmentDef.id)!.processedFragmentSets[setName][result.trim()] = template;
+                console.log(`[KAHUA] Added to processedFragmentSets[${setName}]:`, Object.keys(fragmentsByDef.get(fragmentDef.id)!.processedFragmentSets[setName]));
+              } else {
+                console.log(`[KAHUA] Row evaluation: ${setName}.${conditionalKey} -> SKIPPED (empty result)`);
+              }
             }
           }
         }
@@ -1226,96 +1327,107 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         });
       }
 
-      // Second pass: process fragments, only including conditional fragments that evaluated to true for at least one row
+      // Second pass: process fragment sets, only including conditional fragments that evaluated to true for at least one row
       for (const fragmentDef of selectedFragmentDefs) {
         const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
-        
-        // Collect all fragment keys that appear in any row for this fragment definition
-        const allFragmentKeys = new Set<string>();
-        const fragmentRowsByKey = new Map<string, Array<{ rowIndex: number; template: string; tokenValues: { clean: Record<string, string>; raw: Record<string, string> }; warnings: string[] }>>();
-        
+
+        // Collect all fragment sets and their keys that appear in any row for this fragment definition
+        const fragmentSetsByName = new Map<string, Map<string, Array<{ rowIndex: number; template: string; tokenValues: { clean: Record<string, string>; raw: Record<string, string> }; warnings: string[] }>>>();
+
         conditionalFragmentsByRow.forEach((rowData, rowIndex) => {
           const rowFragmentData = rowData.fragmentsByDef.get(fragmentDef.id);
           if (rowFragmentData) {
             allWarnings.push(...rowFragmentData.warnings);
-            
-            for (const [key, template] of Object.entries(rowFragmentData.processedFragments)) {
-              allFragmentKeys.add(key);
-              
-              if (!fragmentRowsByKey.has(key)) {
-                fragmentRowsByKey.set(key, []);
+
+            // Process each fragment set for this row
+            for (const [setName, fragmentSet] of Object.entries(rowFragmentData.processedFragmentSets)) {
+              if (!fragmentSetsByName.has(setName)) {
+                fragmentSetsByName.set(setName, new Map());
               }
-              
-              fragmentRowsByKey.get(key)!.push({
-                rowIndex,
-                template,
-                tokenValues: rowData.tokenValues,
-                warnings: rowFragmentData.warnings
-              });
+
+              const fragmentRowsByKey = fragmentSetsByName.get(setName)!;
+
+              for (const [key, template] of Object.entries(fragmentSet)) {
+                if (!fragmentRowsByKey.has(key)) {
+                  fragmentRowsByKey.set(key, []);
+                }
+
+                fragmentRowsByKey.get(key)!.push({
+                  rowIndex,
+                  template,
+                  tokenValues: rowData.tokenValues,
+                  warnings: rowFragmentData.warnings
+                });
+              }
             }
           }
         });
-        
-        if (fragmentType === 'table') {
-          // Table type uses header/body/footer structure
-          if (!(fragmentDef.name in structuredFragments)) {
-            structuredFragments[fragmentDef.name] = { body: [] };
-          }
-          
-          // Process header (only once per group)
-          const headerRows = fragmentRowsByKey.get('header');
-          if (headerRows && headerRows.length > 0 && !structuredFragments[fragmentDef.name].header) {
-            const firstHeaderRow = headerRows[0];
-            const rendered = renderTemplate(firstHeaderRow.template, firstHeaderRow.tokenValues.clean, firstHeaderRow.tokenValues.raw, suppressWarnings);
-            structuredFragments[fragmentDef.name].header = rendered.result;
-            allWarnings.push(...rendered.warnings);
-          }
-          
-          // Process body - only include rows where conditional evaluated to true
-          const bodyRows = fragmentRowsByKey.get('body');
-          if (bodyRows) {
-            for (const rowData of bodyRows) {
-              const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-              structuredFragments[fragmentDef.name].body.push(rendered.result);
+
+        // Process each fragment set
+        for (const [setName, fragmentRowsByKey] of fragmentSetsByName.entries()) {
+          const setDisplayName = setName === 'default' ? fragmentDef.name : `${fragmentDef.name} - ${setName}`;
+
+          if (fragmentType === 'table') {
+            // Table type uses header/body/footer structure
+            if (!(setDisplayName in structuredFragments)) {
+              structuredFragments[setDisplayName] = { body: [] };
+            }
+
+            // Process header (only once per group per set)
+            const headerRows = fragmentRowsByKey.get('header');
+            if (headerRows && headerRows.length > 0 && !structuredFragments[setDisplayName].header) {
+              const firstHeaderRow = headerRows[0];
+              const rendered = renderTemplate(firstHeaderRow.template, firstHeaderRow.tokenValues.clean, firstHeaderRow.tokenValues.raw, suppressWarnings);
+              structuredFragments[setDisplayName].header = rendered.result;
               allWarnings.push(...rendered.warnings);
             }
-          }
-          
-          // Process nested body fragments
-          for (const [key, rows] of fragmentRowsByKey.entries()) {
-            if (key.startsWith('body - ')) {
-              for (const rowData of rows) {
+
+            // Process body - only include rows where conditional evaluated to true
+            const bodyRows = fragmentRowsByKey.get('body');
+            if (bodyRows) {
+              for (const rowData of bodyRows) {
                 const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                structuredFragments[fragmentDef.name].body.push(rendered.result);
+                structuredFragments[setDisplayName].body.push(rendered.result);
                 allWarnings.push(...rendered.warnings);
               }
             }
-          }
-          
-          // Process footer (only once per group)
-          const footerRows = fragmentRowsByKey.get('footer');
-          if (footerRows && footerRows.length > 0) {
-            const lastFooterRow = footerRows[footerRows.length - 1];
-            const rendered = renderTemplate(lastFooterRow.template, lastFooterRow.tokenValues.clean, lastFooterRow.tokenValues.raw, suppressWarnings);
-            structuredFragments[fragmentDef.name].footer = rendered.result;
-            allWarnings.push(...rendered.warnings);
-          }
-        } else {
-          // Grouped type - only create section if at least one row evaluated to true
-          if (!(fragmentDef.name in groupedFragments)) {
-            groupedFragments[fragmentDef.name] = {};
-          }
-          
-          for (const [key, rows] of fragmentRowsByKey.entries()) {
-            if (rows.length > 0) { // Only create section if at least one row evaluated to true
-              if (!groupedFragments[fragmentDef.name][key]) {
-                groupedFragments[fragmentDef.name][key] = [];
+
+            // Process nested body fragments
+            for (const [key, rows] of fragmentRowsByKey.entries()) {
+              if (key.startsWith('body - ')) {
+                for (const rowData of rows) {
+                  const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
+                  structuredFragments[setDisplayName].body.push(rendered.result);
+                  allWarnings.push(...rendered.warnings);
+                }
               }
-              
-              for (const rowData of rows) {
-                const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                allWarnings.push(...rendered.warnings);
-                groupedFragments[fragmentDef.name][key].push(rendered.result);
+            }
+
+            // Process footer (only once per group per set)
+            const footerRows = fragmentRowsByKey.get('footer');
+            if (footerRows && footerRows.length > 0) {
+              const lastFooterRow = footerRows[footerRows.length - 1];
+              const rendered = renderTemplate(lastFooterRow.template, lastFooterRow.tokenValues.clean, lastFooterRow.tokenValues.raw, suppressWarnings);
+              structuredFragments[setDisplayName].footer = rendered.result;
+              allWarnings.push(...rendered.warnings);
+            }
+          } else {
+            // Grouped type - only create section if at least one row evaluated to true
+            if (!(setDisplayName in groupedFragments)) {
+              groupedFragments[setDisplayName] = {};
+            }
+
+            for (const [key, rows] of fragmentRowsByKey.entries()) {
+              if (rows.length > 0) { // Only create section if at least one row evaluated to true
+                if (!groupedFragments[setDisplayName][key]) {
+                  groupedFragments[setDisplayName][key] = [];
+                }
+
+                for (const rowData of rows) {
+                  const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
+                  allWarnings.push(...rendered.warnings);
+                  groupedFragments[setDisplayName][key].push(rendered.result);
+                }
               }
             }
           }
