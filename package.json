@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "1.9.5",
+  "version": "1.9.6",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -288,16 +288,19 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type == 'Lookup' ? 'LookupListName=\"$(appname).{$entity}_{$name}LookupList\"' : ''} {$type == 'entity' ? 'LinkedEntityDef=\"$(linkedEntityDef|raw)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label != '' ? '$(label|friendly)' : '$(name|friendly)'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel != '' ? '$(descriptionlabel|raw)' : '$(name|friendly)'}</Label>",
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}'=='EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" />",
+                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
+                  "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Label Key=\"{$entity}_{$name}LookupListLabel\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}LookupListDescription\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
                   "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
                   "Fields": "<Field Attribute=\"{$name}\" />",
                   "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
                   "DataStore": "<Column AttributeName=\"{$name}\" />",
                   "LogFields": "<Field FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
-                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type == 'Lookup' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
-                  "{$type == 'Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
+                  "VisualsTextBlock": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />",
+                  "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
+                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{$type=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                  "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
                 }
               }
             },
@@ -330,16 +333,19 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\" {$type == 'Lookup' ? 'LookupListName=\"$(appname).{$entity}_{$name}LookupList\"' : ''} {$type == 'entity' ? 'LinkedEntityDef=\"$(linkedEntityDef|raw)\"' : ''} IsConfigurable=\"true\" />",
-                  "Labels": "<Label Key=\"{$entity}_{$name}Label\">{$label != '' ? '$(label|friendly)' : '$(name|friendly)'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{$descriptionlabel != ' ? '$(descriptionlabel|raw)' : '$(name|friendly)'}</Label>",
-                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
-                  "Fields": "<Field Attribute=\"{$name}\" />",
-                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
-                  "DataStore": "<Column AttributeName=\"{$name}\" />",
-                  "LogFields": "<Field FieldDef=\"{$name}\" />",
+                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}' == 'EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
+                  "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'${label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{$descriptionlabel!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />'",
+                  "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Label Key=\"{$entity}_{$name}LookupListLabel\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}LookupListDescription\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
+                  "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
+                  "Fields": "<Add Attribute=\"{$name}\" />",
+                  "FieldDefs": "<Add Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "DataStore": "<Add AttributeName=\"{$name}\" />",
+                  "LogFields": "<Add FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
-                  "Visuals": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />\n<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" {$type == 'Lookup'' ? 'List=\"{$entity}_{$name}LookupList\"' : ''} />",
-                  "{$type == 'Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" />\n   <Value />\n</LookupList>"
+                  "VisualsTextBlock": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />",
+                  "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
+                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{$type=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                  "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
                 }
               }
             }
