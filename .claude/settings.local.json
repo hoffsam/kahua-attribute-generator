@@ -6,7 +6,9 @@
       "Bash(node:*)",
       "Bash(npm run build-clean:*)",
       "Bash(dir:*)",
-      "Bash(forfiles:*)"
+      "Bash(forfiles:*)",
+      "Bash(npm run package:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

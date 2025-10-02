@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "2.5.2",
+  "version": "2.5.3",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -344,8 +344,8 @@
               "fragments": {
                 "body": {
                   "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
-                  "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'${label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{$descriptionlabel!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />'",
-                  "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Label Key=\"{$entity}_{$name}LookupListLabel\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}LookupListDescription\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
+                  "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
+                  "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Add Key=\"{$entity}_{$name}LookupListLabel\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}LookupListDescription\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
                   "Fields": "<Add Attribute=\"{$name}\" />",
                   "FieldDefs": "<Add Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
