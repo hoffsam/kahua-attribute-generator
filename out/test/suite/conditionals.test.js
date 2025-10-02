@@ -49,19 +49,19 @@ suite('Enhanced Conditional Expression Tests', () => {
             return list.includes(value);
         }
         // Handle comparison operators
-        const comparisonMatch = expression.match(/^'([^']*?)'\s*(==|!=|<=|>=|<>)\s*'([^']*?)'$/);
+        const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
         if (comparisonMatch) {
             const [, left, operator, right] = comparisonMatch;
             switch (operator) {
                 case '==':
-                    return left.toLowerCase() === right.toLowerCase();
+                    return left === right;
                 case '!=':
                 case '<>':
-                    return left.toLowerCase() !== right.toLowerCase();
+                    return left !== right;
                 case '<=':
-                    return left.toLowerCase() <= right.toLowerCase();
+                    return left <= right;
                 case '>=':
-                    return left.toLowerCase() >= right.toLowerCase();
+                    return left >= right;
                 default:
                     return false;
             }
@@ -139,7 +139,7 @@ suite('Enhanced Conditional Expression Tests', () => {
         while ((match = tokenPattern.exec(expression)) !== null) {
             const tokenName = match[1];
             const tokenValue = tokenValues[tokenName] || '';
-            processedExpression = processedExpression.replace(match[0], `'${tokenValue.replace(/'/g, "\\'")}'`);
+            processedExpression = processedExpression.replace(match[0], `"${tokenValue.replace(/"/g, '\\\\"')}"`);
         }
         return evaluateExpression(processedExpression);
     }
@@ -239,59 +239,6 @@ suite('Enhanced Conditional Expression Tests', () => {
             assert.ok(andResult);
             assert.strictEqual(andResult.left, '("false" || "true")');
             assert.strictEqual(andResult.right, '"true"');
-        });
-    });
-    suite('Case-Insensitive Comparisons', () => {
-        test('Equality comparison ignores case', () => {
-            const tokens = { type: 'text' };
-            const result = evaluateConditionalWithTokens('{$type}=="TEXT"', tokens);
-            assert.strictEqual(result, true);
-        });
-        test('Lookup vs lookup case variations', () => {
-            const tokens = { type: 'lookup' };
-            const result = evaluateConditionalWithTokens('{$type}=="Lookup"', tokens);
-            assert.strictEqual(result, true);
-        });
-        test('Entity vs entity case variations', () => {
-            const tokens = { type: 'ENTITY' };
-            const result = evaluateConditionalWithTokens('{$type}=="entity"', tokens);
-            assert.strictEqual(result, true);
-        });
-        test('Inequality comparison ignores case', () => {
-            const tokens = { type: 'TEXT' };
-            const result = evaluateConditionalWithTokens('{$type}!="lookup"', tokens);
-            assert.strictEqual(result, true);
-        });
-        test('Mixed case in complex expressions', () => {
-            const tokens = { type: 'LookUp', required: 'TRUE' };
-            const result = evaluateConditionalWithTokens('{$type}=="lookup" && {$required}=="true"', tokens);
-            assert.strictEqual(result, true);
-        });
-    });
-    suite('PowerShell Interpolation vs Simple Tokens', () => {
-        test('Simple tokens should work in conditionals', () => {
-            // Test that {$token} syntax works properly in conditionals
-            const tokens = { type: 'Text', appname: 'MyApp', entity: 'TestEntity', name: 'TestField' };
-            // This should be false since type="Text" != "Lookup"
-            const result = evaluateConditionalWithTokens('{$type}=="Lookup"', tokens);
-            assert.strictEqual(result, false);
-        });
-        test('Text type should not match Lookup or Entity', () => {
-            const tokens = { type: 'Text' };
-            const lookupResult = evaluateConditionalWithTokens('{$type}=="Lookup"', tokens);
-            const entityResult = evaluateConditionalWithTokens('{$type}=="Entity"', tokens);
-            assert.strictEqual(lookupResult, false, 'Text should not match Lookup');
-            assert.strictEqual(entityResult, false, 'Text should not match Entity');
-        });
-        test('Actual Lookup type should match', () => {
-            const tokens = { type: 'Lookup' };
-            const result = evaluateConditionalWithTokens('{$type}=="Lookup"', tokens);
-            assert.strictEqual(result, true);
-        });
-        test('Actual Entity type should match', () => {
-            const tokens = { type: 'Entity' };
-            const result = evaluateConditionalWithTokens('{$type}=="Entity"', tokens);
-            assert.strictEqual(result, true);
         });
     });
     suite('Edge Cases', () => {

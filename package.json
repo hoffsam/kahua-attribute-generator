@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "2.5.3",
+  "version": "2.6.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -32,16 +32,7 @@
     "typescript": "^5.4.0"
   },
   "activationEvents": [
-    "onCommand:kahua.generateAttributesExtension",
-    "onCommand:kahua.generateAttributesSupplement",
-    "onCommand:kahua.generateSnippetAttributes",
-    "onCommand:kahua.generateTemplateAttributes",
-    "onCommand:kahua.generateLookups",
-    "onCommand:kahua.generateSnippetLookups",
-    "onCommand:kahua.generateTemplateLookups",
-    "onCommand:kahua.generateCustom",
-    "onCommand:kahua.generateSnippetCustom",
-    "onCommand:kahua.generateTemplateCustom"
+    "*"
   ],
   "contributes": {
     "menus": {
@@ -158,15 +149,15 @@
       },
       {
         "command": "kahua.generateLookups",
-        "title": "Kahua: Generate Lookup List"
+        "title": "Kahua: Generate Lookup Lists"
       },
       {
         "command": "kahua.generateSnippetLookups",
-        "title": "Kahua: Generate Snippet for Lookup List"
+        "title": "Kahua: Generate Snippet for Lookup Lists"
       },
       {
         "command": "kahua.generateTemplateLookups",
-        "title": "Kahua: Generate Template for Lookup List"
+        "title": "Kahua: Generate Template for Lookup Lists"
       },
       {
         "command": "kahua.generateCustom",
@@ -220,7 +211,7 @@
         },
         "kahua.defaultSnippetTableRows": {
           "type": "number",
-          "default": 10,
+          "default": 0,
           "minimum": 0,
           "maximum": 100,
           "description": "Default number of table rows to generate in snippets. Set to 0 to disable and use current behavior (single row). When enabled, will prompt for row count if not specified."
@@ -229,16 +220,16 @@
           "type": "array",
           "default": [
             {
-              "id": "attributeheader",
-              "name": "Attribute Header",
+              "id": "appname",
+              "name": "App Name Header",
               "type": "header",
-              "tokens": "appname,entity"
+              "tokens": "appname"
             },
             {
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type:Text,label,descriptionlabel,visualtype:TextBox,linkedEntityDef"
+              "tokens": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
             },
             {
               "id": "lookupheader",
@@ -293,12 +284,12 @@
               "id": "attributes",
               "name": "Extension Attributes",
               "tokenReferences": [
-                "attributeheader",
+                "appname",
                 "attributes"
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" />",
+                  "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}'=='EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" />",
                   "Labels": "<Label Key=\"{$entity}_{$name}Label\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
                   "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Label Key=\"{$entity}_{$name}LookupListLabel\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}LookupListDescription\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
                   "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\">\n  <Key />\n</DataTag>",
@@ -316,12 +307,12 @@
             },
             {
               "id": "lookups",
-              "name": "Lookup List",
-              "type": "table",
+              "name": "Lookup Lists",
               "tokenReferences": [
                 "lookupheader",
                 "lookups"
               ],
+              "type": "table",
               "fragments": {
                 "Lookups": {
                   "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">\n  <Value />",
@@ -338,12 +329,12 @@
               "id": "supplements",
               "name": "Supplement Attributes",
               "tokenReferences": [
-                "attributeheader",
+                "appname",
                 "attributes"
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
+                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}' == 'EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
                   "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Add Key=\"{$entity}_{$name}LookupListLabel\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}LookupListDescription\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
@@ -422,7 +413,7 @@
               ]
             },
             {
-              "name": "Generate Lookup List",
+              "name": "Generate Lookup Lists",
               "fragments": [
                 "lookups"
               ]
@@ -457,15 +448,5 @@
     "type": "git",
     "url": "https://github.com/hoffsam/kahua-attribute-generator.git"
   },
-  "license": "MIT",
-  "dependencies": {
-    "@vscode/vsce": "^3.6.0"
-  },
-  "files": [
-    "out/**/*",
-    "src/**/*",
-    "LICENSE.md",
-    "README.md",
-    "package.json"
-  ]
+  "license": "MIT"
 }

@@ -1,12 +1,6 @@
 import * as vscode from 'vscode';
 
 /**
- * Regex pattern for detecting conditional expressions in fragment keys
- * Handles nested braces like {$token} inside conditionals
- */
-const FRAGMENT_CONDITIONAL_PATTERN = /\{.*\?.*:.*\}/;
-
-/**
  * Represents a conditional expression result
  */
 interface ConditionalResult {
@@ -53,6 +47,16 @@ interface ParsedToken {
   defaultValue: string;
 }
 
+/* ----------------------------- config helpers ----------------------------- */
+
+function currentResource(): vscode.Uri | undefined {
+  return vscode.window.activeTextEditor?.document?.uri
+      ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+}
+
+function getKahuaConfig(resource?: vscode.Uri) {
+  return vscode.workspace.getConfiguration('kahua', resource);
+}
 
 /**
  * Converts a token value to PascalCase by removing spaces and special characters
@@ -60,10 +64,10 @@ interface ParsedToken {
  */
 function toPascalCase(value: string): string {
   if (!value) return value;
-  
+
   // Split on word boundaries (spaces, punctuation, etc.) and filter out empty strings
   return value
-    .split(/[^a-zA-Z0-9]+/)
+    .split(/[^a-zA-Z0-9]+|(?=[A-Z][a-z])/)
     .filter(word => word.length > 0)
     .map(word => {
       // If word is already PascalCase (starts with uppercase and has mixed case), preserve it
@@ -96,6 +100,7 @@ function toTitleCase(value: string): string {
     'in', 'on', 'at', 'by', 'for', 'of', 'to', 'up', 'as'
   ]);
 
+
   // Split into words while preserving spaces
   const words = spacedValue.toLowerCase().split(/(\s+)/);
 
@@ -105,13 +110,16 @@ function toTitleCase(value: string): string {
       return word;
     }
 
+
     // Always capitalize first and last word
     const isFirstWord = index === 0 || words.slice(0, index).every(w => /^\s+$/.test(w));
     const isLastWord = index === words.length - 1 || words.slice(index + 1).every(w => /^\s+$/.test(w));
 
+
     if (isFirstWord || isLastWord || !lowercaseWords.has(word.toLowerCase())) {
       return word.charAt(0).toUpperCase() + word.slice(1);
     }
+
 
     return word;
   }).join('');
@@ -122,7 +130,7 @@ function toTitleCase(value: string): string {
  */
 function escapeXml(value: string): string {
   if (!value) return value;
-  
+
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -135,52 +143,75 @@ function escapeXml(value: string): string {
  * Formats XML content with proper indentation
  * Note: This is a simple formatter designed for the extension's typical output structure
  */
-function formatXml(xml: string, indentSize: number = 2): string {
-  if (!xml || xml.trim() === '') return xml;
-  
-  const lines = xml.split(/\r?\n/);
-  const formatted: string[] = [];
-  const indent = ' '.repeat(indentSize);
-  
-  // For the extension's output, we mainly want to:
-  // 1. Preserve comments and table data as-is
-  // 2. Indent nested XML elements
-  // 3. Keep self-closing tags at the base level
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    //if (!trimmed) continue; // Skip empty lines
-    
-    // Handle comments and non-XML content - no indentation changes
-    if (trimmed.startsWith('<!--') || !trimmed.startsWith('<')) {
-      formatted.push(line);
-    } else {
-      // All other XML elements (Attribute, Label, Field, etc.) - no indent
-      //formatted.push(trimmed);
-      formatted.push(line);
-    }
-  }
-  
-  return formatted.join('\n');
+function formatXml(xml: string, _indentSize: number = 2): string {
+  if (xml == null) return xml as unknown as string;
+  return String(xml).replace(/\r\n?/g, '\n');
 }
 
 /**
  * Formats a collection of XML fragments with section headers and proper indentation
  */
-function formatFragmentCollection(fragments: { [key: string]: string[] }, indentSize: number = 2): string {
-  const sections: string[] = [];
-  
-  for (const [sectionName, fragmentList] of Object.entries(fragments)) {
-    if (fragmentList.length === 0) continue;
-    
-    // Add section header comment
-    sections.push(`\n\n<!-- ${sectionName} -->`);
-    
-    // Format each fragment in the section
-    const formattedFragments = fragmentList.map(fragment => formatXml(fragment, indentSize));
-    sections.push(formattedFragments.join('\n'));
+// Replaces the old, unused version
+type TableFragmentsMap = {
+  [fragmentName: string]: {
+    [group: string]: { header?: string; body: string[]; footer?: string }
   }
-  
+};
+
+type GroupedFragmentsMap = {
+  [fragmentName: string]: {
+    [fragmentKey: string]: string[]
+  }
+};
+
+/**
+ * Renders fragment collections (both table-style groups and grouped fragments)
+ * into a single string, preserving author formatting by default.
+ *
+ * - Adds a leading space before comment headers ( " <!-- ... -->" )
+ * - Preserves blank lines and fragment formatting; only calls formatXml if applyFormatting === true
+ */
+function formatFragmentCollection(
+  opts: {
+    table?: TableFragmentsMap,
+    grouped?: GroupedFragmentsMap,
+    applyFormatting?: boolean,
+    indentSize?: number
+  }
+): string {
+  const { table, grouped, applyFormatting = false, indentSize = 2 } = opts;
+  const sections: string[] = [];
+
+  // Table (header/body/footer) groups
+  if (table) {
+    for (const [fragmentName, groupsMap] of Object.entries(table)) {
+      for (const [group, partsObj] of Object.entries(groupsMap)) {
+        const parts: string[] = [];
+        if (partsObj.header) parts.push(partsObj.header);
+        parts.push(...partsObj.body);
+        if (partsObj.footer) parts.push(partsObj.footer);
+
+        const label = group === 'default' ? fragmentName : `${fragmentName} - ${group}`;
+        let body = parts.join('\n');
+        if (applyFormatting) body = formatXml(body, indentSize);
+
+        sections.push(`\n <!-- ${label} -->\n\n${body}`);
+      }
+    }
+  }
+
+  // Grouped (named) fragments
+  if (grouped) {
+    for (const [_fragmentName, fragmentGroups] of Object.entries(grouped)) {
+      for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
+        let body = fragments.join('\n');
+        if (applyFormatting) body = formatXml(body, indentSize);
+
+        sections.push(`\n <!-- ${fragmentKey} -->\n\n${body}`);
+      }
+    }
+  }
+
   return sections.join('\n');
 }
 
@@ -189,9 +220,10 @@ function formatFragmentCollection(fragments: { [key: string]: string[] }, indent
  */
 function applyTokenTransformation(value: string, transformation: string): string {
   if (!value) return value;
-  
+
   switch (transformation.toLowerCase()) {
     case 'friendly':
+    case 'title':
       return escapeXml(toTitleCase(value)); // Apply TitleCase and XML escape
     case 'internal':
       return toPascalCase(value); // Convert to PascalCase (no XML escaping needed for identifiers)
@@ -214,36 +246,28 @@ function applyTokenTransformation(value: string, transformation: string): string
 function evaluateConditional(expression: string, tokenValues: Record<string, string>): ConditionalResult {
   const invalidTokens: string[] = [];
   let hasValidTokens = true;
-  
+
   // Replace tokens in the expression with their values
   let processedExpression = expression;
-  
-  // Find all token references in the expression (both {$token} and '$token' patterns)
-  const tokenPatterns = [
-    /\{\$(\w+)\}/g,    // {$token} pattern
-    /'\$(\w+)'/g       // '$token' pattern  
-  ];
-  
-  for (const tokenPattern of tokenPatterns) {
-    let match;
-    while ((match = tokenPattern.exec(processedExpression)) !== null) {
-      const tokenName = match[1];
-      const tokenValue = tokenValues[tokenName];
-      
-      if (tokenValue === undefined || tokenValue === '') {
-        invalidTokens.push(tokenName);
-        hasValidTokens = false;
-        // Replace with empty string for evaluation
-        processedExpression = processedExpression.replace(match[0], "''");
-      } else {
-        // Replace with quoted string value for evaluation (use single quotes to match expression syntax)
-        processedExpression = processedExpression.replace(match[0], `'${tokenValue.replace(/'/g, "\\'")}'`);
-      }
+
+  // Find all token references in the expression
+  const tokenPattern = /\{\$(\w+)\}/g;
+  let match;
+  while ((match = tokenPattern.exec(expression)) !== null) {
+    const tokenName = match[1];
+    const tokenValue = tokenValues[tokenName];
+
+    if (tokenValue === undefined || tokenValue === '') {
+      invalidTokens.push(tokenName);
+      hasValidTokens = false;
+      // Replace with empty string for evaluation
+      processedExpression = processedExpression.replace(match[0], '""');
+    } else {
+      // Replace with quoted string value for evaluation
+      processedExpression = processedExpression.replace(match[0], `"${tokenValue.replace(/"/g, '\\"')}"`);
     }
-    // Reset regex for next iteration
-    tokenPattern.lastIndex = 0;
   }
-  
+
   try {
     // Parse and evaluate the conditional expression
     const result = evaluateExpression(processedExpression);
@@ -268,29 +292,29 @@ function evaluateConditional(expression: string, tokenValues: Record<string, str
 function evaluateExpression(expression: string): boolean {
   // Remove extra whitespace
   expression = expression.trim();
-  
+
   // Handle ternary operator (condition ? value : fallback) - need to find the main ? and : carefully
   const ternaryResult = findTernaryOperator(expression);
   if (ternaryResult) {
-    const { condition, trueValue, falseValue } = ternaryResult;
+    const { condition } = ternaryResult;
     const conditionResult = evaluateExpression(condition);
     return conditionResult;
   }
-  
+
   // Handle logical OR (||) - lowest precedence
   const orResult = findLogicalOperator(expression, '||');
   if (orResult) {
     const { left, right } = orResult;
     return evaluateExpression(left) || evaluateExpression(right);
   }
-  
+
   // Handle logical AND (&&) - higher precedence than OR
   const andResult = findLogicalOperator(expression, '&&');
   if (andResult) {
     const { left, right } = andResult;
     return evaluateExpression(left) && evaluateExpression(right);
   }
-  
+
   // Handle parentheses
   if (expression.startsWith('(') && expression.endsWith(')')) {
     const inner = expression.slice(1, -1).trim();
@@ -298,7 +322,7 @@ function evaluateExpression(expression: string): boolean {
       return evaluateExpression(inner);
     }
   }
-  
+
   // Handle 'not in' operator
   const notInMatch = expression.match(/^"([^"]*?)"\s+not\s+in\s+\(([^)]+)\)$/i);
   if (notInMatch) {
@@ -306,7 +330,7 @@ function evaluateExpression(expression: string): boolean {
     const list = listStr.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, ''));
     return !list.includes(value);
   }
-  
+
   // Handle 'in' operator
   const inMatch = expression.match(/^"([^"]*?)"\s+in\s+\(([^)]+)\)$/i);
   if (inMatch) {
@@ -314,32 +338,32 @@ function evaluateExpression(expression: string): boolean {
     const list = listStr.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, ''));
     return list.includes(value);
   }
-  
-  // Handle comparison operators (single quotes for consistency with expression syntax)
-  const comparisonMatch = expression.match(/^'([^']*?)'\s*(==|!=|<=|>=|<>)\s*'([^']*?)'$/);
+
+  // Handle comparison operators
+  const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
   if (comparisonMatch) {
     const [, left, operator, right] = comparisonMatch;
-    
+
     switch (operator) {
       case '==':
-        return left.toLowerCase() === right.toLowerCase();
+        return left === right;
       case '!=':
       case '<>':
-        return left.toLowerCase() !== right.toLowerCase();
+        return left !== right;
       case '<=':
-        return left.toLowerCase() <= right.toLowerCase();
+        return left <= right;
       case '>=':
-        return left.toLowerCase() >= right.toLowerCase();
+        return left >= right;
       default:
         return false;
     }
   }
-  
+
   // Handle simple boolean expressions (just the token value)
   if (expression === '""' || expression === 'false' || expression === '0') {
     return false;
   }
-  
+
   return true; // Default to true for non-empty values
 }
 
@@ -365,12 +389,12 @@ function findTernaryOperator(expression: string): { condition: string; trueValue
   let colonPos = -1;
   let inQuotes = false;
   let quoteChar = '';
-  
+
   // Find the main ? and : operators (not inside parentheses or quotes)
   for (let i = 0; i < expression.length; i++) {
     const char = expression[i];
     const prevChar = i > 0 ? expression[i - 1] : '';
-    
+
     // Handle quoted strings
     if ((char === '"' || char === "'") && prevChar !== '\\') {
       if (!inQuotes) {
@@ -381,7 +405,7 @@ function findTernaryOperator(expression: string): { condition: string; trueValue
         quoteChar = '';
       }
     }
-    
+
     // Only process operators when not inside quotes
     if (!inQuotes) {
       if (char === '(') parenCount++;
@@ -394,14 +418,14 @@ function findTernaryOperator(expression: string): { condition: string; trueValue
       }
     }
   }
-  
+
   if (questionPos !== -1 && colonPos !== -1) {
     const condition = expression.substring(0, questionPos).trim();
     const trueValue = expression.substring(questionPos + 1, colonPos).trim();
     const falseValue = expression.substring(colonPos + 1).trim();
     return { condition, trueValue, falseValue };
   }
-  
+
   return null;
 }
 
@@ -411,14 +435,11 @@ function findTernaryOperator(expression: string): { condition: string; trueValue
 function findLogicalOperator(expression: string, operator: '&&' | '||'): { left: string; right: string } | null {
   let parenCount = 0;
   const opLength = operator.length;
-  
+
   // Find the rightmost occurrence of the operator (right-to-left for correct precedence)
   for (let i = expression.length - opLength; i >= 0; i--) {
-    const char = expression[i];
-    const nextChar = expression[i + 1];
-    
-    if (char === ')') parenCount++;
-    else if (char === '(') parenCount--;
+    if (expression[i] === ')') parenCount++;
+    else if (expression[i] === '(') parenCount--;
     else if (parenCount === 0 && expression.substr(i, opLength) === operator) {
       const left = expression.substring(0, i).trim();
       const right = expression.substring(i + opLength).trim();
@@ -427,7 +448,7 @@ function findLogicalOperator(expression: string, operator: '&&' | '||'): { left:
       }
     }
   }
-  
+
   return null;
 }
 
@@ -435,89 +456,126 @@ function findLogicalOperator(expression: string, operator: '&&' | '||'): { left:
  * Processes PowerShell-style string interpolation tokens $(token) and $(token|transformation)
  */
 function processStringInterpolation(
-  template: string, 
+  template: string,
   cleanTokenValues: Record<string, string>,
   rawTokenValues: Record<string, string>
 ): string {
   let result = template;
-  
+
   // Process $(token) and $(token|transformation) patterns
   const interpolationPattern = /\$\((\w+)(?:\|([^)]+))?\)/g;
   let match;
-  
+
   while ((match = interpolationPattern.exec(result)) !== null) {
     const fullMatch = match[0];
     const tokenName = match[1];
     const transformation = match[2] || 'default';
-    
+
     const rawValue = rawTokenValues[tokenName] || '';
     const transformedValue = applyTokenTransformation(rawValue, transformation);
-    
+
     result = result.replace(fullMatch, transformedValue);
     // Reset regex to continue searching from beginning since we modified the string
     interpolationPattern.lastIndex = 0;
   }
-  
+
   return result;
 }
 
 /**
- * Processes conditional blocks in template strings - new simplified approach
- * This assumes all {$token} replacements have already been done, so we're evaluating {expression} patterns
+ * Processes conditional blocks in template strings with improved parsing
  */
 function processConditionalTemplate(template: string, tokenValues: Record<string, string>, suppressWarnings: boolean): { result: string; warnings: string[] } {
   const warnings: string[] = [];
   let result = template;
-  
-  // Find all conditional expressions in the format {expression ? value : value}
-  const conditionalPattern = /\{[^{}]*\?[^{}]*:[^{}]*\}/g;
-  let match;
-  
-  while ((match = conditionalPattern.exec(result)) !== null) {
-    const fullMatch = match[0];
-    const expression = fullMatch.slice(1, -1); // Remove { and }
-    
-    try {
-      // Parse the ternary expression
+
+  // Process conditional expressions by finding balanced braces
+  let pos = 0;
+  while (pos < result.length) {
+    const startPos = result.indexOf('{$', pos);
+    if (startPos === -1) break;
+
+    // Find the matching closing brace, respecting nesting
+    let braceCount = 0;
+    let endPos = startPos;
+    let foundQuestion = false;
+    let foundColon = false;
+    let inQuotes = false;
+    let quoteChar = '';
+
+    for (let i = startPos; i < result.length; i++) {
+      const char = result[i];
+      const prevChar = i > 0 ? result[i - 1] : '';
+
+      // Handle quoted strings
+      if ((char === '"' || char === "'") && prevChar !== '\\') {
+        if (!inQuotes) {
+          inQuotes = true;
+          quoteChar = char;
+        } else if (char === quoteChar) {
+          inQuotes = false;
+          quoteChar = '';
+        }
+      }
+
+      if (!inQuotes) {
+        if (char === '{') braceCount++;
+        else if (char === '}') braceCount--;
+        else if (char === '?' && braceCount === 1) foundQuestion = true;
+        else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
+      }
+      // Note: We intentionally ignore $() tokens within strings during conditional parsing
+      // These will be processed later by processStringInterpolation()
+
+      if (braceCount === 0) {
+        endPos = i;
+        break;
+      }
+    }
+
+    if (foundQuestion && foundColon) {
+      // This is a conditional expression
+      const fullMatch = result.substring(startPos, endPos + 1);
+      const expression = fullMatch.slice(2, -1); // Remove {$ and }
+
+      const evalResult = evaluateConditional(expression, tokenValues);
+
+      if (!evalResult.hasValidTokens && !suppressWarnings) {
+        warnings.push(`Invalid tokens in conditional expression "${expression}": ${evalResult.invalidTokens.join(', ')}`);
+      }
+
+      // Use the improved ternary parsing to extract values
       const ternaryResult = findTernaryOperator(expression);
       if (ternaryResult) {
-        // Evaluate the condition (should be simple like 'Text'=='Lookup')
-        const conditionResult = evaluateExpression(ternaryResult.condition);
-        
+        const conditionResult = evaluateConditional(ternaryResult.condition, tokenValues);
+
         // Remove quotes from true/false values if they exist
         let trueValue = ternaryResult.trueValue;
         let falseValue = ternaryResult.falseValue;
-        
-        if ((trueValue.startsWith("'") && trueValue.endsWith("'")) || 
+
+        if ((trueValue.startsWith("'") && trueValue.endsWith("'")) ||
             (trueValue.startsWith('"') && trueValue.endsWith('"'))) {
           trueValue = trueValue.slice(1, -1);
         }
-        
-        if ((falseValue.startsWith("'") && falseValue.endsWith("'")) || 
+
+        if ((falseValue.startsWith("'") && falseValue.endsWith("'")) ||
             (falseValue.startsWith('"') && falseValue.endsWith('"'))) {
           falseValue = falseValue.slice(1, -1);
         }
-        
-        const replacementValue = conditionResult ? trueValue : falseValue;
-        result = result.replace(fullMatch, replacementValue);
-        
-        // Reset the regex since we modified the string
-        conditionalPattern.lastIndex = 0;
+
+        const replacementValue = conditionResult.condition ? trueValue : falseValue;
+        result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
+        pos = startPos + replacementValue.length;
       } else {
-        // Malformed conditional - remove it
-        result = result.replace(fullMatch, '');
-        conditionalPattern.lastIndex = 0;
+        // Fallback: remove the conditional block if malformed
+        result = result.substring(0, startPos) + result.substring(endPos + 1);
+        pos = startPos;
       }
-    } catch (error) {
-      if (!suppressWarnings) {
-        warnings.push(`Error evaluating conditional "${expression}": ${error}`);
-      }
-      // Remove malformed conditional
-      result = result.replace(fullMatch, '');
-      conditionalPattern.lastIndex = 0;
+    } else {
+      pos = startPos + 2; // Move past this {$ and continue looking
     }
   }
-  
+
   return { result, warnings };
 }
 
@@ -647,7 +705,7 @@ function processFragmentTemplates(
 export function activate(context: vscode.ExtensionContext) {
   // Set up context menu visibility
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
-  
+
   // Register attribute generation commands
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateAttributesExtension', () => handleSelection(['attributes'])),
@@ -655,15 +713,15 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('kahua.generateSnippetAttributes', () => generateSnippetForFragments(['attributes'])),
     vscode.commands.registerCommand('kahua.generateTemplateAttributes', () => generateTemplateForFragments(['attributes']))
   );
-  
+
   // Register lookup generation commands
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateLookups', () => handleSelection(['lookups'])),
     vscode.commands.registerCommand('kahua.generateSnippetLookups', () => generateSnippetForFragments(['lookups'])),
     vscode.commands.registerCommand('kahua.generateTemplateLookups', () => generateTemplateForFragments(['lookups']))
   );
-  
-  // Register custom generation commands
+
+  // Register custom generation commands (read kahua-scoped config with resource)
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateCustom', async () => {
       const config = vscode.workspace.getConfiguration();
@@ -674,16 +732,19 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
+
       const pick = await vscode.window.showQuickPick(
         fragmentDefinitions.map(def => ({
           label: def.name,
           fragments: [def.id]
         })),
         {
+        {
           placeHolder: 'Select fragment type to generate',
           title: 'Kahua Custom Fragment Generator'
         }
       );
+
 
       if (pick) {
         await handleSelection(pick.fragments);
@@ -703,7 +764,6 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 }
-
 
 /**
  * Parses token definitions from configuration string
@@ -725,26 +785,26 @@ function parseTokenDefinition(tokens: string): ParsedToken[] {
  * Merges token definitions with priority handling
  */
 function mergeTokenDefinitions(
-  tokenDefs: TokenNameDefinition[], 
+  tokenDefs: TokenNameDefinition[],
   referencedIds: string[]
 ): { headerTokens: ParsedToken[]; tableTokens: ParsedToken[]; tokenDefaults: Record<string, string> } {
   const headerTokens: ParsedToken[] = [];
   const tableTokens: ParsedToken[] = [];
   const tokenDefaults: Record<string, string> = {};
   const seenTokens = new Set<string>();
-  
+
   // Process token definitions in priority order (first referenced has priority)
   for (const refId of referencedIds) {
     const tokenDef = tokenDefs.find(def => def.id === refId);
     if (!tokenDef) continue;
-    
+
     const parsedTokens = parseTokenDefinition(tokenDef.tokens);
-    
+
     for (const token of parsedTokens) {
       if (!seenTokens.has(token.name)) {
         seenTokens.add(token.name);
         tokenDefaults[token.name] = token.defaultValue;
-        
+
         if (tokenDef.type === 'header') {
           headerTokens.push(token);
         } else {
@@ -753,7 +813,7 @@ function mergeTokenDefinitions(
       }
     }
   }
-  
+
   return { headerTokens, tableTokens, tokenDefaults };
 }
 
@@ -764,7 +824,7 @@ function splitIntoGroups(text: string): string[][] {
   const allLines = text.split(/\r?\n/);
   const groups: string[][] = [];
   let currentGroup: string[] = [];
-  
+
   for (const line of allLines) {
     if (line.trim() === '') {
       // Empty line - end current group if it has content
@@ -777,15 +837,14 @@ function splitIntoGroups(text: string): string[][] {
       currentGroup.push(line.trim());
     }
   }
-  
+
   // Add final group if it has content
   if (currentGroup.length > 0) {
     groups.push(currentGroup);
   }
-  
+
   return groups;
 }
-
 
 /**
  * Creates a properly formatted table with aligned columns
@@ -799,35 +858,35 @@ function createFormattedTokenTable(
   if (tokenData.length === 0) {
     return `<!-- Group ${groupNumber} - No token data -->`;
   }
-  
+
   // Calculate column widths
   const columns = ['Token', 'Default', ...tokenData.map((_, i) => `Line ${i + 1}`)];
   const columnWidths = columns.map(col => col.length);
-  
+
   // Update widths based on token names
   tokenNames.forEach((tokenName, tokenIndex) => {
     columnWidths[0] = Math.max(columnWidths[0], tokenName.length);
-    
+
     const defaultValue = tokenDefaults[tokenName] || '';
     columnWidths[1] = Math.max(columnWidths[1], defaultValue.length);
-    
+
     tokenData.forEach((data, dataIndex) => {
       const value = data[tokenName] || '';
       columnWidths[dataIndex + 2] = Math.max(columnWidths[dataIndex + 2], value.length);
     });
   });
-  
+
   // Create header
   const header = '| ' + columns.map((col, i) => col.padEnd(columnWidths[i])).join(' | ') + ' |';
   const separator = '|' + columnWidths.map(width => '-'.repeat(width + 2)).join('|') + '|';
-  
+
   // Create data rows
   const rows = tokenNames.map(tokenName => {
     const defaultValue = (tokenDefaults[tokenName] || '').padEnd(columnWidths[1]);
     const values = tokenData.map((data, i) => (data[tokenName] || '').padEnd(columnWidths[i + 2]));
     return '| ' + tokenName.padEnd(columnWidths[0]) + ' | ' + defaultValue + ' | ' + values.join(' | ') + ' |';
   });
-  
+
   return `<!-- Group ${groupNumber} Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
 }
 
@@ -835,45 +894,44 @@ function createFormattedTokenTable(
  * Renders a template with token replacement and conditional processing
  */
 function renderTemplate(
-  template: string, 
+  template: string,
   cleanTokenValues: Record<string, string>,
   rawTokenValues: Record<string, string>,
   suppressWarnings: boolean
 ): { result: string; warnings: string[] } {
   const warnings: string[] = [];
-  
-  // Phase 1: Handle {$token} replacement FIRST (so conditionals can work on resolved values)
-  let rendered = template;
-  for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+
+  // Phase 1: Process conditional expressions
+  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
+    template,
+    cleanTokenValues,
+    suppressWarnings
+  );
+  warnings.push(...conditionalWarnings);
+
+  // Phase 2: Process PowerShell-style string interpolations $(token)
+  let rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
+
+  // Phase 3: Handle remaining {$token} transformation-controlled token replacement
+  for (const [tokenName, _cleanValue] of Object.entries(cleanTokenValues)) {
     const rawValue = rawTokenValues[tokenName] || '';
-    
-    // Find all token references with transformations
+
+    // Find all token references with transformations in the rendered template
     const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
     let match;
-    
+
     while ((match = tokenPattern.exec(rendered)) !== null) {
       const fullMatch = match[0];
       const transformation = match[1] || 'default'; // Use 'default' if no transformation specified
       const transformedValue = applyTokenTransformation(rawValue, transformation);
-      
+
       rendered = rendered.replace(fullMatch, transformedValue);
       // Reset the regex to continue searching from the beginning since we modified the string
       tokenPattern.lastIndex = 0;
     }
   }
-  
-  // Phase 2: Process conditional expressions (now that tokens are resolved)
-  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
-    rendered, 
-    cleanTokenValues, 
-    suppressWarnings
-  );
-  warnings.push(...conditionalWarnings);
-  
-  // Phase 3: Process PowerShell-style string interpolations $(token) (if any remain)
-  const finalResult = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
-  
-  return { result: finalResult, warnings };
+
+  return { result: rendered, warnings };
 }
 
 /**
@@ -888,11 +946,13 @@ async function selectCustomFragments(placeholder: string): Promise<{ label: stri
     return undefined;
   }
 
+
   return await vscode.window.showQuickPick(
     fragmentDefinitions.map(def => ({
       label: def.name,
       fragments: [def.id]
     })),
+    {
     {
       placeHolder: placeholder,
       title: 'Kahua Custom Fragment Selector'
@@ -911,29 +971,39 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
   }
 
   try {
-    const config = vscode.workspace.getConfiguration();
-    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
-    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
-    
+    const config = getKahuaConfig(currentResource());
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
+
     if (tokenDefinitions.length === 0) {
       throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
     }
-    
+
+    if (fragmentDefinitions.length === 0) {
+      throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
+    }
+
+    // Validate fragment ids are known
+    const unknown = fragmentIds.filter(id => !fragmentDefinitions.some(d => d.id === id));
+    if (unknown.length) {
+      throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
+    }
+
     // Find the fragment definitions we need
     const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
     if (selectedFragmentDefs.length === 0) {
       throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
     }
-    
+
     // Collect all unique token references from selected fragments
     const allTokenReferences = new Set<string>();
     selectedFragmentDefs.forEach(def => {
       def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
     });
-    
+
     // Merge token definitions based on references
     const { headerTokens, tableTokens } = mergeTokenDefinitions(
-      tokenDefinitions, 
+      tokenDefinitions,
       Array.from(allTokenReferences)
     );
 
@@ -941,15 +1011,15 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     const snippetLines: string[] = [];
     let tabStopIndex = 1;
     let numberOfRows = 0; // Track total rows for message
-    
+
     // Create header line if there are header tokens
     if (headerTokens.length > 0) {
       const headerParts: string[] = [];
-      
+
       for (let i = 0; i < headerTokens.length; i++) {
         const token = headerTokens[i];
         const placeholder = token.defaultValue || token.name;
-        
+
         // Include comma in the tabstop for proper step-over behavior
         if (i < headerTokens.length - 1) {
           headerParts.push(`\${${tabStopIndex}:${placeholder}}, `);
@@ -959,23 +1029,22 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
         }
         tabStopIndex++;
       }
-      
+
       snippetLines.push(headerParts.join(''));
     }
-    
+
     // Create table data lines if there are table tokens
     if (tableTokens.length > 0) {
-      const config = vscode.workspace.getConfiguration();
-      const defaultTableRows = config.get<number>('kahua.defaultSnippetTableRows') || 0;
-      
+      const defaultTableRows = config.get<number>('defaultSnippetTableRows') || 0;
+
       numberOfRows = defaultTableRows;
-      
+
       // If default is 0, use current behavior (single row)
       // If default > 0, prompt user for row count with default value
       if (defaultTableRows > 0) {
-        // Get the maximum value from configuration schema (fallback to 100 if not found)
+        // Get the maximum value (fallback to 100 if not found)
         const maxRows = 100;
-        
+
         const userInput = await vscode.window.showInputBox({
           prompt: `How many table data rows to generate? (1-${maxRows})`,
           value: defaultTableRows.toString(),
@@ -987,28 +1056,28 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
             return undefined;
           }
         });
-        
+
         if (userInput === undefined) {
           // User cancelled the prompt
           vscode.window.showInformationMessage('Snippet generation cancelled');
           return;
         }
-        
+
         numberOfRows = parseInt(userInput);
       } else {
         // Default behavior: single row
         numberOfRows = 1;
       }
-      
+
       // Generate the specified number of table rows
       for (let rowIndex = 0; rowIndex < numberOfRows; rowIndex++) {
         const tableParts: string[] = [];
-        
+
         for (let i = 0; i < tableTokens.length; i++) {
           const token = tableTokens[i];
           const placeholder = token.defaultValue || token.name;
-          
-          // Include comma in the tabstop for proper step-over behavior  
+
+          // Include comma in the tabstop for proper step-over behavior
           if (i < tableTokens.length - 1) {
             tableParts.push(`\${${tabStopIndex}:${placeholder}}, `);
           } else {
@@ -1017,11 +1086,11 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
           }
           tabStopIndex++;
         }
-        
+
         snippetLines.push(tableParts.join(''));
       }
     }
-    
+
     // If no lines were created, show an error
     if (snippetLines.length === 0) {
       throw new Error('No header or table token definitions found.');
@@ -1029,14 +1098,14 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
 
     const snippetText = snippetLines.join('\n');
     const snippet = new vscode.SnippetString(snippetText);
-    
+
     // Insert snippet at cursor position
     await editor.insertSnippet(snippet);
 
-    const rowText = numberOfRows === 0 
-      ? 'header only' 
-      : numberOfRows === 1 
-        ? '1 table row' 
+    const rowText = numberOfRows === 0
+      ? 'header only'
+      : numberOfRows === 1
+        ? '1 table row'
         : `${numberOfRows} table rows`;
     vscode.window.showInformationMessage(`Kahua: Token snippet inserted for ${fragmentIds.join(', ')} with ${rowText}`);
 
@@ -1057,56 +1126,66 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
   }
 
   try {
-    const config = vscode.workspace.getConfiguration();
-    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
-    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
-    
+    const config = getKahuaConfig(currentResource());
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
+
     if (tokenDefinitions.length === 0) {
       throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
     }
-    
+
+    if (fragmentDefinitions.length === 0) {
+      throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
+    }
+
+    // Validate fragment ids are known
+    const unknown = fragmentIds.filter(id => !fragmentDefinitions.some(d => d.id === id));
+    if (unknown.length) {
+      throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
+    }
+
     // Find the fragment definitions we need
     const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
     if (selectedFragmentDefs.length === 0) {
       throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
     }
-    
+
     // Collect all unique token references from selected fragments
     const allTokenReferences = new Set<string>();
     selectedFragmentDefs.forEach(def => {
       def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
     });
-    
+
     // Merge token definitions based on references
     const { headerTokens, tableTokens } = mergeTokenDefinitions(
-      tokenDefinitions, 
+      tokenDefinitions,
       Array.from(allTokenReferences)
     );
 
     // Build template text showing all token definitions
     const templateLines: string[] = [];
     templateLines.push(`// Token Template for ${fragmentIds.join(', ')}:`);
-    
+
     if (headerTokens.length > 0) {
-      const headerTokenDisplays = headerTokens.map(token => 
+      const headerTokenDisplays = headerTokens.map(token =>
         token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
       );
       templateLines.push(`// Header tokens: ${headerTokenDisplays.join(', ')}`);
     }
-    
+
     if (tableTokens.length > 0) {
-      const tableTokenDisplays = tableTokens.map(token => 
+      const tableTokenDisplays = tableTokens.map(token =>
         token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
       );
       templateLines.push(`// Table tokens: ${tableTokenDisplays.join(', ')}`);
     }
-    
+
     templateLines.push('//');
     templateLines.push('// Usage: First line contains header tokens, subsequent lines contain table tokens');
     templateLines.push('');
 
     const templateText = templateLines.join('\n');
-    
+
     // Insert at cursor position
     const position = editor.selection.active;
     await editor.edit(editBuilder => {
@@ -1137,51 +1216,60 @@ export function deactivate() {
  */
 async function handleSelection(fragmentIds: string[]): Promise<void> {
   const editor = vscode.window.activeTextEditor;
+
   if (!editor) {
     vscode.window.showErrorMessage('No active editor found');
     return;
   }
 
   try {
-    const config = vscode.workspace.getConfiguration();
-    const suppressWarnings = config.get<boolean>('kahua.suppressInvalidConditionWarnings') || false;
-    
+    const config = getKahuaConfig(currentResource());
+    const xmlIndentSize = config.get<number>('xmlIndentSize') || 2;
+    const applyFormatting = config.get<boolean>('formatXmlOutput') === true;
+    const suppressWarnings = config.get<boolean>('suppressInvalidConditionWarnings') || false;
+
     // Get configuration arrays
-    const tokenDefinitions = config.get<TokenNameDefinition[]>('kahua.tokenNameDefinitions') || [];
-    const fragmentDefinitions = config.get<FragmentDefinition[]>('kahua.fragmentDefinitions') || [];
-    
+    const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
+    const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
+
     if (tokenDefinitions.length === 0) {
       throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
     }
-    
+
     if (fragmentDefinitions.length === 0) {
       throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
     }
-    
+
+    // Validate fragment ids are known
+    const unknown = fragmentIds.filter(id => !fragmentDefinitions.some(d => d.id === id));
+    if (unknown.length) {
+      throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
+    }
+
     // Find the fragment definitions we need to process
     const selectedFragmentDefs = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
     if (selectedFragmentDefs.length === 0) {
       throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
     }
-    
+
     // Collect all unique token references from selected fragments
     const allTokenReferences = new Set<string>();
     selectedFragmentDefs.forEach(def => {
       def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
     });
-    
+
     // Merge token definitions based on references
     const { headerTokens, tableTokens, tokenDefaults } = mergeTokenDefinitions(
-      tokenDefinitions, 
+      tokenDefinitions,
       Array.from(allTokenReferences)
     );
-    
+
     // Validate selection
     const selection = editor.document.getText(editor.selection);
     if (!selection || selection.trim() === '') {
       throw new Error('No text selected. Please select one or more lines of text to generate attributes.');
     }
-    
+
     // Split into groups by empty lines
     const groups = splitIntoGroups(selection);
     if (groups.length === 0) {
@@ -1191,35 +1279,40 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     // Process each group
     const allWarnings: string[] = [];
     const outputSections: string[] = [];
-    
+
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
       const group = groups[groupIndex];
-      
+
       // Process header tokens (first line if any header tokens exist)
       const headerTokenValues: Record<string, string> = {};
       const headerRawValues: Record<string, string> = {};
       let dataLines = group;
-      
+
       if (headerTokens.length > 0 && group.length > 0) {
         const headerLine = group[0];
         const headerParts = headerLine.split(',');
-        
+
         for (let i = 0; i < headerTokens.length; i++) {
           const token = headerTokens[i];
-          const rawPart = (headerParts[i] || '').trim();
+          const rawPart = headerParts[i] || '';
           const trimmedPart = rawPart.trim();
-          
+
           headerRawValues[token.name] = rawPart || token.defaultValue;
           headerTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
         }
-        
+
         // Skip the header line for table processing
         dataLines = group.slice(1);
       }
 
       // Process table data for this group
       const groupTokenData: Array<Record<string, string>> = [];
-      const structuredFragments: { [fragmentName: string]: { header?: string; body: string[]; footer?: string } } = {};
+      const structuredFragments: {
+        [fragmentName: string]: {
+          [group: string]: { header?: string; body: string[]; footer?: string }
+        }
+      } = {};
+
       const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
       
       // Collect conditional fragments across all rows before processing
@@ -1236,25 +1329,24 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       if (tableTokens.length > 0 && dataLines.length === 0) {
         throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
       }
-      
-      // First pass: collect all row data and conditional fragment evaluations
+
       for (const line of dataLines) {
         const rawParts = line.split(',');
-        
+
         // Build token values for this line (combine header and table tokens)
         const rawTokenValues: Record<string, string> = { ...headerRawValues };
         const cleanTokenValues: Record<string, string> = { ...headerTokenValues };
-        
+
         // Add table tokens
         for (let i = 0; i < tableTokens.length; i++) {
           const token = tableTokens[i];
-          const rawPart = (rawParts[i] || '').trim();
+          const rawPart = rawParts[i] || '';
           const trimmedPart = rawPart.trim();
-          
+
           rawTokenValues[token.name] = rawPart || token.defaultValue;
           cleanTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
         }
-        
+
         // Store token data for the table
         groupTokenData.push({ ...cleanTokenValues });
 
@@ -1437,28 +1529,20 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       // Create token table for this group
       const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
       const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
-      
+
       // Build output for this group
       const groupOutputSections: string[] = [tokenTable];
-      
-      // Add structured fragments (table type)
-      for (const [fragmentName, fragments] of Object.entries(structuredFragments)) {
-        const parts: string[] = [];
-        if (fragments.header) parts.push(fragments.header);
-        parts.push(...fragments.body);
-        if (fragments.footer) parts.push(fragments.footer);
-        
-        groupOutputSections.push(`\n\n<!-- ${fragmentName} -->\n${parts.join('\n')}`);
-      }
-      
-      // Add grouped fragments (grouped type)
-      for (const [fragmentName, fragmentGroups] of Object.entries(groupedFragments)) {
-        for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-          groupOutputSections.push(`\n\n<!-- ${fragmentKey} -->\n${fragments.join('\n')}`);
-        }
-      }
-      
-      
+
+      // Add structured fragments (table type) — supports multiple groups
+      groupOutputSections.push(
+        formatFragmentCollection({
+          table: structuredFragments,
+          grouped: groupedFragments,
+          applyFormatting,
+          indentSize: xmlIndentSize
+        })
+      );
+
       outputSections.push(groupOutputSections.join('\n\n'));
     }
 
@@ -1468,17 +1552,14 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     }
 
     let generatedXml = outputSections.join('\n\n');
-    
-    // Apply XML formatting if enabled
-    const formatXmlOutput = config.get<boolean>('kahua.formatXmlOutput');
-    const xmlIndentSize = config.get<number>('kahua.xmlIndentSize') || 2;
-    
-    if (formatXmlOutput !== false) { // Default to true if not configured
+
+    // Apply XML formatting if explicitly enabled
+    if (applyFormatting) {
       generatedXml = formatXml(generatedXml, xmlIndentSize);
     }
-      
+
     // Get the output target setting
-    const outputTarget = config.get<string>('kahua.outputTarget') || 'newEditor';
+    const outputTarget = config.get<string>('outputTarget') || 'newEditor';
 
     if (outputTarget === 'newEditor') {
       const newDocument = await vscode.workspace.openTextDocument({
@@ -1502,5 +1583,3 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     vscode.window.showErrorMessage(`Kahua Attribute Generator: ${message}`);
   }
 }
-
-
