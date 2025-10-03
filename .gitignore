@@ -4,3 +4,5 @@ out/
 CLAUDE.md
 *.xml
 *.vsix
+.claude\settings.local.json
+.vscode-test/

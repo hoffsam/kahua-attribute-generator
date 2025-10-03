@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "2.6.0",
+  "version": "2.6.5",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -300,7 +300,7 @@
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
                   "VisualsTextBlock": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />",
                   "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
-                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{$type=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{'{$type}'=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
                   "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
                 }
               }
@@ -334,7 +334,7 @@
               ],
               "fragments": {
                 "body": {
-                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}' == 'EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
+                  "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
                   "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Add Key=\"{$entity}_{$name}LookupListLabel\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}LookupListDescription\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
@@ -345,7 +345,7 @@
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
                   "VisualsTextBlock": "<TextBlock Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" />",
                   "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
-                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{$type=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
+                  "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{'{$type}'=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
                   "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
                 }
               }

@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 
 /**
+ * Regex pattern for detecting conditional expressions in fragment keys
+ * Handles nested braces like {$token} inside conditionals
+ */
+const FRAGMENT_CONDITIONAL_PATTERN = /\{.*\?.*:.*\}/;
+
+/**
  * Represents a conditional expression result
  */
 interface ConditionalResult {
@@ -224,19 +230,19 @@ function applyTokenTransformation(value: string, transformation: string): string
   switch (transformation.toLowerCase()) {
     case 'friendly':
     case 'title':
-      return escapeXml(toTitleCase(value)); // Apply TitleCase and XML escape
+      return escapeXml(toTitleCase(value.trim())); // Trim, apply TitleCase and XML escape
     case 'internal':
-      return toPascalCase(value); // Convert to PascalCase (no XML escaping needed for identifiers)
+      return toPascalCase(value.trim()); // Trim and convert to PascalCase
     case 'upper':
-      return escapeXml(value.toUpperCase()); // Convert to uppercase and XML escape
+      return escapeXml(value.trim().toUpperCase()); // Trim, convert to uppercase and XML escape
     case 'lower':
-      return escapeXml(value.toLowerCase()); // Convert to lowercase and XML escape
+      return escapeXml(value.trim().toLowerCase()); // Trim, convert to lowercase and XML escape
     case 'slug':
-      return toPascalCase(value) + '_'; // Convert to PascalCase and append underscore
+      return toPascalCase(value.trim()) + '_'; // Trim, convert to PascalCase and append underscore
     case 'raw':
-      return value; // Leave exactly as user typed it (no processing)
+      return value.trim(); // Leave exactly as user typed it (no processing, including whitespace)
     default:
-      return toPascalCase(value); // Default: PascalCase (no XML escaping for identifiers)
+      return toPascalCase(value.trim()); // Default: Trim and PascalCase
   }
 }
 
@@ -339,10 +345,10 @@ function evaluateExpression(expression: string): boolean {
     return list.includes(value);
   }
 
-  // Handle comparison operators
-  const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
+  // Handle comparison operators (support both single and double quotes)
+  const comparisonMatch = expression.match(/^(['"])([^'"]*?)\1\s*(==|!=|<=|>=|<>)\s*(['"])([^'"]*?)\4$/);
   if (comparisonMatch) {
-    const [, left, operator, right] = comparisonMatch;
+    const [, , left, operator, , right] = comparisonMatch;
 
     switch (operator) {
       case '==':
@@ -360,7 +366,7 @@ function evaluateExpression(expression: string): boolean {
   }
 
   // Handle simple boolean expressions (just the token value)
-  if (expression === '""' || expression === 'false' || expression === '0') {
+  if (expression === '""' || expression === "''" || expression === 'false' || expression === '0') {
     return false;
   }
 
@@ -489,65 +495,20 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
   const warnings: string[] = [];
   let result = template;
 
-  // Process conditional expressions by finding balanced braces
-  let pos = 0;
-  while (pos < result.length) {
-    const startPos = result.indexOf('{$', pos);
-    if (startPos === -1) break;
+  // Find all conditional expressions in the format {expression ? value : value}
+  const conditionalPattern = /\{[^{}]*\?[^{}]*:[^{}]*\}/g;
+  let match;
 
-    // Find the matching closing brace, respecting nesting
-    let braceCount = 0;
-    let endPos = startPos;
-    let foundQuestion = false;
-    let foundColon = false;
-    let inQuotes = false;
-    let quoteChar = '';
+  while ((match = conditionalPattern.exec(result)) !== null) {
+    const fullMatch = match[0];
+    const expression = fullMatch.slice(1, -1); // Remove { and }
 
-    for (let i = startPos; i < result.length; i++) {
-      const char = result[i];
-      const prevChar = i > 0 ? result[i - 1] : '';
-
-      // Handle quoted strings
-      if ((char === '"' || char === "'") && prevChar !== '\\') {
-        if (!inQuotes) {
-          inQuotes = true;
-          quoteChar = char;
-        } else if (char === quoteChar) {
-          inQuotes = false;
-          quoteChar = '';
-        }
-      }
-
-      if (!inQuotes) {
-        if (char === '{') braceCount++;
-        else if (char === '}') braceCount--;
-        else if (char === '?' && braceCount === 1) foundQuestion = true;
-        else if (char === ':' && braceCount === 1 && foundQuestion) foundColon = true;
-      }
-      // Note: We intentionally ignore $() tokens within strings during conditional parsing
-      // These will be processed later by processStringInterpolation()
-
-      if (braceCount === 0) {
-        endPos = i;
-        break;
-      }
-    }
-
-    if (foundQuestion && foundColon) {
-      // This is a conditional expression
-      const fullMatch = result.substring(startPos, endPos + 1);
-      const expression = fullMatch.slice(2, -1); // Remove {$ and }
-
-      const evalResult = evaluateConditional(expression, tokenValues);
-
-      if (!evalResult.hasValidTokens && !suppressWarnings) {
-        warnings.push(`Invalid tokens in conditional expression "${expression}": ${evalResult.invalidTokens.join(', ')}`);
-      }
-
-      // Use the improved ternary parsing to extract values
+    try {
+      // Parse the ternary expression
       const ternaryResult = findTernaryOperator(expression);
       if (ternaryResult) {
-        const conditionResult = evaluateConditional(ternaryResult.condition, tokenValues);
+        // Evaluate the condition (should be simple like 'Text'=='Lookup')
+        const conditionResult = evaluateExpression(ternaryResult.condition);
 
         // Remove quotes from true/false values if they exist
         let trueValue = ternaryResult.trueValue;
@@ -563,16 +524,23 @@ function processConditionalTemplate(template: string, tokenValues: Record<string
           falseValue = falseValue.slice(1, -1);
         }
 
-        const replacementValue = conditionResult.condition ? trueValue : falseValue;
-        result = result.substring(0, startPos) + replacementValue + result.substring(endPos + 1);
-        pos = startPos + replacementValue.length;
+        const replacementValue = conditionResult ? trueValue : falseValue;
+        result = result.replace(fullMatch, replacementValue);
+
+        // Reset the regex since we modified the string
+        conditionalPattern.lastIndex = 0;
       } else {
-        // Fallback: remove the conditional block if malformed
-        result = result.substring(0, startPos) + result.substring(endPos + 1);
-        pos = startPos;
+        // Malformed conditional - remove it
+        result = result.replace(fullMatch, '');
+        conditionalPattern.lastIndex = 0;
       }
-    } else {
-      pos = startPos + 2; // Move past this {$ and continue looking
+    } catch (error) {
+      if (!suppressWarnings) {
+        warnings.push(`Error evaluating conditional "${expression}": ${error}`);
+      }
+      // Remove malformed conditional
+      result = result.replace(fullMatch, '');
+      conditionalPattern.lastIndex = 0;
     }
   }
 
@@ -620,7 +588,7 @@ function processFragmentTemplates(
         for (const [fragmentKey, template] of Object.entries(setTemplate)) {
           if (typeof template === 'string') {
             const strippedKey = fragmentKey.replace(/^"(.*)"$/, '$1');
-            const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+            const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
             if (isConditional) {
               console.log('[KAHUA] Found conditional in fragment set:', setName, fragmentKey);
@@ -641,7 +609,7 @@ function processFragmentTemplates(
         if (typeof setTemplate === 'object') {
           for (const [subKey, subTemplate] of Object.entries(setTemplate)) {
             const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1');
-            const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+            const isConditional = strippedSubKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
             if (isConditional) {
               conditionalFragmentSets['default'][subKey] = subTemplate as string;
@@ -651,7 +619,7 @@ function processFragmentTemplates(
           }
         } else {
           const strippedKey = setName.replace(/^"(.*)"$/, '$1');
-          const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+          const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
           if (isConditional) {
             conditionalFragmentSets['default'][setName] = setTemplate;
@@ -672,7 +640,7 @@ function processFragmentTemplates(
         // Handle nested structure (like body: { Attributes: "...", Labels: "..." })
         for (const [subKey, subTemplate] of Object.entries(template)) {
           const strippedSubKey = subKey.replace(/^"(.*)"$/, '$1');
-          const isConditional = strippedSubKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+          const isConditional = strippedSubKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
           if (isConditional) {
             console.log('[KAHUA] Found conditional in nested structure:', subKey);
@@ -684,7 +652,7 @@ function processFragmentTemplates(
       } else {
         // Handle flat structure
         const strippedKey = key.replace(/^"(.*)"$/, '$1');
-        const isConditional = strippedKey.match(new RegExp(`^${FRAGMENT_CONDITIONAL_PATTERN.source}.*$`));
+        const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
         if (isConditional) {
           console.log('[KAHUA] Found conditional in flat structure:', key);
@@ -738,7 +706,6 @@ export function activate(context: vscode.ExtensionContext) {
           label: def.name,
           fragments: [def.id]
         })),
-        {
         {
           placeHolder: 'Select fragment type to generate',
           title: 'Kahua Custom Fragment Generator'
@@ -901,18 +868,8 @@ function renderTemplate(
 ): { result: string; warnings: string[] } {
   const warnings: string[] = [];
 
-  // Phase 1: Process conditional expressions
-  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
-    template,
-    cleanTokenValues,
-    suppressWarnings
-  );
-  warnings.push(...conditionalWarnings);
-
-  // Phase 2: Process PowerShell-style string interpolations $(token)
-  let rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
-
-  // Phase 3: Handle remaining {$token} transformation-controlled token replacement
+  // Phase 1: Handle {$token} transformation-controlled token replacement FIRST
+  let rendered = template;
   for (const [tokenName, _cleanValue] of Object.entries(cleanTokenValues)) {
     const rawValue = rawTokenValues[tokenName] || '';
 
@@ -930,6 +887,17 @@ function renderTemplate(
       tokenPattern.lastIndex = 0;
     }
   }
+
+  // Phase 2: Process conditional expressions (AFTER token replacement)
+  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
+    rendered,
+    cleanTokenValues,
+    suppressWarnings
+  );
+  warnings.push(...conditionalWarnings);
+
+  // Phase 3: Process PowerShell-style string interpolations $(token)
+  rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
 
   return { result: rendered, warnings };
 }
@@ -952,7 +920,6 @@ async function selectCustomFragments(placeholder: string): Promise<{ label: stri
       label: def.name,
       fragments: [def.id]
     })),
-    {
     {
       placeHolder: placeholder,
       title: 'Kahua Custom Fragment Selector'
@@ -1462,15 +1429,20 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
           if (fragmentType === 'table') {
             // Table type uses header/body/footer structure
             if (!(setDisplayName in structuredFragments)) {
-              structuredFragments[setDisplayName] = { body: [] };
+              structuredFragments[setDisplayName] = { 'default': { body: [] } };
+            }
+
+            const groupKey = 'default';
+            if (!structuredFragments[setDisplayName][groupKey]) {
+              structuredFragments[setDisplayName][groupKey] = { body: [] };
             }
 
             // Process header (only once per group per set)
             const headerRows = fragmentRowsByKey.get('header');
-            if (headerRows && headerRows.length > 0 && !structuredFragments[setDisplayName].header) {
+            if (headerRows && headerRows.length > 0 && !structuredFragments[setDisplayName][groupKey].header) {
               const firstHeaderRow = headerRows[0];
               const rendered = renderTemplate(firstHeaderRow.template, firstHeaderRow.tokenValues.clean, firstHeaderRow.tokenValues.raw, suppressWarnings);
-              structuredFragments[setDisplayName].header = rendered.result;
+              structuredFragments[setDisplayName][groupKey].header = rendered.result;
               allWarnings.push(...rendered.warnings);
             }
 
@@ -1479,7 +1451,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
             if (bodyRows) {
               for (const rowData of bodyRows) {
                 const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                structuredFragments[setDisplayName].body.push(rendered.result);
+                structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
                 allWarnings.push(...rendered.warnings);
               }
             }
@@ -1489,7 +1461,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
               if (key.startsWith('body - ')) {
                 for (const rowData of rows) {
                   const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                  structuredFragments[setDisplayName].body.push(rendered.result);
+                  structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
                   allWarnings.push(...rendered.warnings);
                 }
               }
@@ -1500,7 +1472,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
             if (footerRows && footerRows.length > 0) {
               const lastFooterRow = footerRows[footerRows.length - 1];
               const rendered = renderTemplate(lastFooterRow.template, lastFooterRow.tokenValues.clean, lastFooterRow.tokenValues.raw, suppressWarnings);
-              structuredFragments[setDisplayName].footer = rendered.result;
+              structuredFragments[setDisplayName][groupKey].footer = rendered.result;
               allWarnings.push(...rendered.warnings);
             }
           } else {

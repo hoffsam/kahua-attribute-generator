@@ -57,11 +57,11 @@ suite('Enhanced Conditional Expression Tests', () => {
 			return list.includes(value);
 		}
 		
-		// Handle comparison operators
-		const comparisonMatch = expression.match(/^"([^"]*?)"\s*(==|!=|<=|>=|<>)\s*"([^"]*?)"$/);
+		// Handle comparison operators (support both single and double quotes)
+		const comparisonMatch = expression.match(/^(['"])([^'"]*?)\1\s*(==|!=|<=|>=|<>)\s*(['"])([^'"]*?)\4$/);
 		if (comparisonMatch) {
-			const [, left, operator, right] = comparisonMatch;
-			
+			const [, , left, operator, , right] = comparisonMatch;
+
 			switch (operator) {
 				case '==':
 					return left === right;
@@ -76,12 +76,12 @@ suite('Enhanced Conditional Expression Tests', () => {
 					return false;
 			}
 		}
-		
+
 		// Handle simple boolean expressions
-		if (expression === '""' || expression === 'false' || expression === '0') {
+		if (expression === '""' || expression === "''" || expression === 'false' || expression === '0') {
 			return false;
 		}
-		
+
 		return true;
 	}
 
@@ -296,6 +296,78 @@ suite('Enhanced Conditional Expression Tests', () => {
 			assert.strictEqual(isBalancedParentheses(expression), true);
 		});
 	});
+
+	suite('Single Quote Comparison Tests', () => {
+		test('Single quotes: Text type should not match Lookup', () => {
+			const result = evaluateExpression("'Text'=='Lookup'");
+			assert.strictEqual(result, false, 'Text should not equal Lookup with single quotes');
+		});
+
+		test('Single quotes: Lookup type should match Lookup', () => {
+			const result = evaluateExpression("'Lookup'=='Lookup'");
+			assert.strictEqual(result, true, 'Lookup should equal Lookup with single quotes');
+		});
+
+		test('Single quotes: LookupList type should match LookupList', () => {
+			const result = evaluateExpression("'LookupList'=='LookupList'");
+			assert.strictEqual(result, true, 'LookupList should equal LookupList with single quotes');
+		});
+
+		test('Single quotes: Entity type should match Entity', () => {
+			const result = evaluateExpression("'Entity'=='Entity'");
+			assert.strictEqual(result, true, 'Entity should equal Entity with single quotes');
+		});
+
+		test('Single quotes: Text type should not equal Entity', () => {
+			const result = evaluateExpression("'Text'=='Entity'");
+			assert.strictEqual(result, false, 'Text should not equal Entity with single quotes');
+		});
+
+		test('Single quotes: OR operator with Lookup', () => {
+			const result1 = evaluateExpression("'Lookup'=='Lookup' || 'Lookup'=='LookupList'");
+			assert.strictEqual(result1, true, 'Lookup should match first condition');
+
+			const result2 = evaluateExpression("'LookupList'=='Lookup' || 'LookupList'=='LookupList'");
+			assert.strictEqual(result2, true, 'LookupList should match second condition');
+
+			const result3 = evaluateExpression("'Text'=='Lookup' || 'Text'=='LookupList'");
+			assert.strictEqual(result3, false, 'Text should match neither condition');
+		});
+
+		test('Single quotes: OR operator with Entity', () => {
+			const result1 = evaluateExpression("'Entity'=='Entity' || 'Entity'=='EntityDef'");
+			assert.strictEqual(result1, true, 'Entity should match first condition');
+
+			const result2 = evaluateExpression("'EntityDef'=='Entity' || 'EntityDef'=='EntityDef'");
+			assert.strictEqual(result2, true, 'EntityDef should match second condition');
+
+			const result3 = evaluateExpression("'Text'=='Entity' || 'Text'=='EntityDef'");
+			assert.strictEqual(result3, false, 'Text should match neither condition');
+		});
+
+		test('Single quotes: != operator', () => {
+			const result1 = evaluateExpression("'Text'!='Lookup'");
+			assert.strictEqual(result1, true, 'Text should not equal Lookup');
+
+			const result2 = evaluateExpression("'Lookup'!='Lookup'");
+			assert.strictEqual(result2, false, 'Lookup should equal Lookup');
+		});
+
+		test('Double quotes: Text type should not match Lookup', () => {
+			const result = evaluateExpression('"Text"=="Lookup"');
+			assert.strictEqual(result, false, 'Text should not equal Lookup with double quotes');
+		});
+
+		test('Double quotes: Lookup type should match Lookup', () => {
+			const result = evaluateExpression('"Lookup"=="Lookup"');
+			assert.strictEqual(result, true, 'Lookup should equal Lookup with double quotes');
+		});
+
+		test('Mixed quote styles should not match (intentional)', () => {
+			const result = evaluateExpression("'Text'==\"Text\"");
+			assert.strictEqual(result, true, 'Mixed quotes should default to true as no match pattern');
+		});
+	});
 });
 
 suite('Token Transformation Tests', () => {
@@ -347,18 +419,20 @@ suite('Token Transformation Tests', () => {
 
 	function applyTokenTransformation(value: string, transformation: string): string {
 		if (!value) return value;
-		
+
 		switch (transformation.toLowerCase()) {
 			case 'friendly':
-				return escapeXml(toTitleCase(value));
+				return escapeXml(toTitleCase(value.trim()));
 			case 'internal':
-				return toPascalCase(value);
+				return toPascalCase(value.trim());
 			case 'upper':
-				return escapeXml(value.toUpperCase());
+				return escapeXml(value.trim().toUpperCase());
 			case 'lower':
-				return escapeXml(value.toLowerCase());
+				return escapeXml(value.trim().toLowerCase());
+			case 'raw':
+				return value; // Leave exactly as user typed it (no processing, including whitespace)
 			default:
-				return toPascalCase(value);
+				return toPascalCase(value.trim());
 		}
 	}
 
@@ -430,12 +504,39 @@ suite('Token Transformation Tests', () => {
 		assert.strictEqual(matches[1].token, 'value');
 		assert.strictEqual(matches[1].transformation, 'friendly');
 	});
-});
 
-suite('Template Processing Integration Tests', () => {
-	test('Full template processing with enhanced conditionals', () => {
-		// This would test the full pipeline from template to output
-		// For now, just verify the structure exists
-		assert.ok(true, 'Integration tests placeholder');
+	test('Friendly transformation trims leading whitespace', () => {
+		const result = applyTokenTransformation(' with label', 'friendly');
+		assert.strictEqual(result, 'With Label', 'Leading space should be trimmed');
+	});
+
+	test('Friendly transformation trims trailing whitespace', () => {
+		const result = applyTokenTransformation('with label ', 'friendly');
+		assert.strictEqual(result, 'With Label', 'Trailing space should be trimmed');
+	});
+
+	test('Friendly transformation trims leading and trailing whitespace', () => {
+		const result = applyTokenTransformation('  ListNameIsThis  ', 'friendly');
+		assert.strictEqual(result, 'List Name Is This', 'Both leading and trailing spaces should be trimmed');
+	});
+
+	test('Internal transformation trims whitespace', () => {
+		const result = applyTokenTransformation(' field name ', 'internal');
+		assert.strictEqual(result, 'FieldName', 'Whitespace should be trimmed for PascalCase');
+	});
+
+	test('Upper transformation trims whitespace', () => {
+		const result = applyTokenTransformation(' value ', 'upper');
+		assert.strictEqual(result, 'VALUE', 'Whitespace should be trimmed before uppercase');
+	});
+
+	test('Lower transformation trims whitespace', () => {
+		const result = applyTokenTransformation(' VALUE ', 'lower');
+		assert.strictEqual(result, 'value', 'Whitespace should be trimmed before lowercase');
+	});
+
+	test('Raw transformation preserves all whitespace', () => {
+		const result = applyTokenTransformation('  value with spaces  ', 'raw');
+		assert.strictEqual(result, '  value with spaces  ', 'Raw should preserve all whitespace');
 	});
 });
