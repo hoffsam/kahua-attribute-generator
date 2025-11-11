@@ -9,7 +9,8 @@
       "Bash(forfiles:*)",
       "Bash(npm run package:*)",
       "Bash(find:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(vsce package:*)"
     ],
     "deny": [],
     "ask": []

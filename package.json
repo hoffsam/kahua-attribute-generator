@@ -287,6 +287,17 @@
                 "appname",
                 "attributes"
               ],
+              "injectionPaths": {
+                "Attributes": "EntityDefs/EntityDef/Attributes",
+                "Labels": "Cultures/Culture[@Code='en']/Labels",
+                "LookupListLabels": "Cultures/Culture[@Code='en']/Labels",
+                "DataTags": "DataTags",
+                "LookupLists": "LookupLists",
+                "LookupList": "LookupLists",
+                "FieldDefs": "HubDef.LogDef/LogDef.FieldDefs",
+                "DataStore": "DataStore/Tables/Table/Columns",
+                "ImportDefs": "HubDef.ImportDefs/ImportDef/ImportDef.Sheets/Sheet/Sheet.Columns"
+              },
               "fragments": {
                 "body": {
                   "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}'=='EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" />",
@@ -313,6 +324,10 @@
                 "lookups"
               ],
               "type": "table",
+              "injectionPaths": {
+                "Lookups": "LookupLists",
+                "Lookup Labels": "Cultures/Culture[@Code='en']/Labels"
+              },
               "fragments": {
                 "Lookups": {
                   "header": "<LookupList Name=\"{$entity}_{$listname}LookupList\" Label=\"{$entity}_{$listname}LookupListLabel\" Description=\"{$entity}_{$listname}LookupListDescription\">\n  <Value />",
@@ -332,6 +347,16 @@
                 "appname",
                 "attributes"
               ],
+              "injectionPaths": {
+                "Attributes": "App.Supplements/Supplement/Supplement.EntityDefs/Update/Update.Attributes",
+                "Labels": "App.Supplements/Supplement/Supplement.Cultures/Update[@Code='en']/Update.Labels",
+                "LookupListLabels": "App.Supplements/Supplement/Supplement.Cultures/Update[@Code='en']/Update.Labels",
+                "DataTags": "App.Supplements/Supplement/Supplement.DataTags",
+                "LookupLists": "App.Supplements/Supplement/Supplement.LookupLists",
+                "LookupList": "App.Supplements/Supplement/Supplement.LookupLists",
+                "FieldDefs": "App.Supplements/Supplement/Supplement.HubDefs/Update/Update.LogDef/Update/Update.FieldDefs",
+                "DataStore": "App.Supplements/Supplement/Supplement.DataStore/Update/Update.Tables/Update/Update.Columns"
+              },
               "fragments": {
                 "body": {
                   "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",

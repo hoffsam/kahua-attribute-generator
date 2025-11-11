@@ -1,0 +1,45 @@
+# Source files
+src/**
+*.ts
+!out/**/*.d.ts
+
+# Test files
+out/test/**
+.vscode-test/**
+
+# Development files
+.vscode/**
+.vscode-test/**
+.gitignore
+.yarnrc
+vsc-extension-quickstart.md
+tsconfig.json
+tslint.json
+.eslintrc.json
+.prettierrc
+
+# Build artifacts
+*.vsix
+
+# Git
+.git
+.gitattributes
+.gitignore
+
+# Node modules
+node_modules/**
+
+# Documentation (optional - include if you want docs in package)
+# Remove the line below if you want to include readme.md in the package
+# readme.md
+
+# Claude files (development only)
+.claude/**
+CLAUDE.md
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

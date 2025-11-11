@@ -53,6 +53,60 @@ interface ParsedToken {
   defaultValue: string;
 }
 
+/**
+ * Output target options for generated XML
+ */
+type OutputTarget =
+  | { type: 'currentFile'; uri: vscode.Uri }
+  | { type: 'selectFile'; uri: vscode.Uri }
+  | { type: 'newEditor' }
+  | { type: 'clipboard' };
+
+/**
+ * Map to track which XML file a snippet/template document came from
+ * Key: URI of snippet/template document
+ * Value: URI of the source XML file
+ */
+const sourceXmlFileMap = new Map<string, vscode.Uri>();
+
+/**
+ * Represents a parsed section from generated XML output
+ */
+interface XmlSection {
+  name: string;          // e.g., "Attributes", "Labels", "DataTags"
+  content: string;       // The actual XML content
+  startLine: number;     // Line number in generated output
+  endLine: number;       // Line number in generated output
+}
+
+/**
+ * Represents a section in the target XML file
+ */
+interface XmlTargetSection {
+  tagName: string;              // e.g., "Attributes", "Labels"
+  openTagLine: number;          // Line number of opening tag
+  closeTagLine: number;         // Line number of closing tag
+  indentation: string;          // Whitespace prefix for indentation
+  isSelfClosing: boolean;       // True if <Tag />
+  lastChildLine: number;        // Line number of last child element
+  context?: string;             // Context info for disambiguation (e.g., Name="Invoice")
+  injectionPath?: string;       // The injection path that found this section
+}
+
+/**
+ * Insertion strategy for XML content
+ */
+type InsertionStrategy = 'smart' | 'cursor';
+
+/**
+ * Result of an injection operation
+ */
+interface InjectionResult {
+  sectionName: string;
+  status: 'injected' | 'skipped';
+  reason?: 'not-configured' | 'not-found';
+}
+
 /* ----------------------------- config helpers ----------------------------- */
 
 function currentResource(): vscode.Uri | undefined {
@@ -219,6 +273,758 @@ function formatFragmentCollection(
   }
 
   return sections.join('\n');
+}
+
+/**
+ * Finds all XML files in the workspace
+ */
+async function findXmlFilesInWorkspace(): Promise<vscode.Uri[]> {
+  const files = await vscode.workspace.findFiles(
+    '**/*.xml',
+    '{**/node_modules/**,**/out/**,**/.vscode/**}'
+  );
+  return files.sort((a, b) => a.fsPath.localeCompare(b.fsPath));
+}
+
+/**
+ * Gets workspace-relative path for a URI, or full path if not in workspace
+ */
+function getWorkspaceRelativePath(uri: vscode.Uri): string {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (workspaceFolder) {
+    return vscode.workspace.asRelativePath(uri, false);
+  }
+  return uri.fsPath;
+}
+
+/**
+ * Shows a quick pick menu for selecting where to output generated XML
+ */
+async function showOutputTargetQuickPick(currentFileUri?: vscode.Uri): Promise<OutputTarget | undefined> {
+  const items: vscode.QuickPickItem[] = [];
+
+  // Check if current document has an associated source XML file (from snippet/template generation)
+  let targetXmlFile: vscode.Uri | undefined;
+  if (currentFileUri) {
+    targetXmlFile = sourceXmlFileMap.get(currentFileUri.toString());
+  }
+
+  // Option 1: Associated XML file from snippet/template generation, or current file if it's XML
+  if (targetXmlFile) {
+    // We have a remembered XML file from snippet/template generation
+    items.push({
+      label: `$(file) Source XML File`,
+      description: getWorkspaceRelativePath(targetXmlFile),
+      detail: 'Insert into the XML file where this snippet/template was generated from',
+      alwaysShow: true
+    });
+  } else if (currentFileUri?.fsPath.toLowerCase().endsWith('.xml')) {
+    // Current file itself is an XML file
+    items.push({
+      label: `$(file) Current File`,
+      description: getWorkspaceRelativePath(currentFileUri),
+      detail: 'Insert into the current XML file at cursor position',
+      alwaysShow: true
+    });
+  }
+
+  // Option 2: Select XML file from workspace
+  const xmlFiles = await findXmlFilesInWorkspace();
+  if (xmlFiles.length > 0) {
+    items.push({
+      label: `$(search) Select XML File...`,
+      description: `${xmlFiles.length} XML file(s) found in workspace`,
+      detail: 'Choose a specific XML file to insert into',
+      alwaysShow: true
+    });
+  }
+
+  // Option 3: Browse for file
+  items.push({
+    label: `$(folder-opened) Browse for File...`,
+    detail: 'Browse for any XML file on your system',
+    alwaysShow: true
+  });
+
+  // Option 4: New editor tab
+  items.push({
+    label: `$(new-file) New Editor Tab`,
+    detail: 'Open generated XML in a new editor window',
+    alwaysShow: true
+  });
+
+  // Option 5: Clipboard
+  items.push({
+    label: `$(clippy) Clipboard`,
+    detail: 'Copy generated XML to clipboard',
+    alwaysShow: true
+  });
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Where would you like to output the generated XML?',
+    title: 'Kahua: Select Output Target'
+  });
+
+  if (!selected) {
+    return undefined;
+  }
+
+  // Handle selection
+  if (selected.label.includes('Source XML File') && targetXmlFile) {
+    return { type: 'currentFile', uri: targetXmlFile };
+  } else if (selected.label.includes('Current File') && currentFileUri) {
+    return { type: 'currentFile', uri: currentFileUri };
+  } else if (selected.label.includes('Select XML File')) {
+    const fileItems = xmlFiles.map(uri => ({
+      label: getWorkspaceRelativePath(uri),
+      description: uri.fsPath,
+      uri
+    }));
+
+    const selectedFile = await vscode.window.showQuickPick(fileItems, {
+      placeHolder: 'Select an XML file',
+      title: 'Kahua: Choose XML File'
+    });
+
+    if (!selectedFile) {
+      return undefined;
+    }
+
+    return { type: 'selectFile', uri: selectedFile.uri };
+  } else if (selected.label.includes('Browse for File')) {
+    const browseResult = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      filters: {
+        'XML Files': ['xml'],
+        'All Files': ['*']
+      },
+      title: 'Select XML File to Insert Into'
+    });
+
+    if (!browseResult || browseResult.length === 0) {
+      return undefined;
+    }
+
+    return { type: 'selectFile', uri: browseResult[0] };
+  } else if (selected.label.includes('New Editor Tab')) {
+    return { type: 'newEditor' };
+  } else {
+    return { type: 'clipboard' };
+  }
+}
+
+/**
+ * Inserts XML content into a file with smart section-aware insertion or cursor-based insertion
+ * Returns injection results for reporting
+ */
+async function insertXmlIntoFile(uri: vscode.Uri, content: string, strategy?: InsertionStrategy, fragmentDefinition?: any): Promise<InjectionResult[]> {
+  const document = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(document, {
+    preserveFocus: false,
+    preview: false
+  });
+
+  if (!strategy || strategy === 'cursor') {
+    // Simple insertion at cursor position
+    const position = editor.selection.active;
+    await editor.edit(editBuilder => {
+      editBuilder.insert(position, '\n' + content + '\n');
+    });
+
+    const lines = content.split('\n').length;
+    const newPosition = position.translate(lines + 2, 0);
+    editor.selection = new vscode.Selection(newPosition, newPosition);
+    return []; // No tracking for cursor mode
+  }
+
+  // Smart insertion - get injection paths from the fragment definition
+  const injectionPaths: Record<string, string> = fragmentDefinition?.injectionPaths || {};
+  const results: InjectionResult[] = [];
+
+  const generatedSections = parseGeneratedXmlSections(content);
+  const targetSections = parseTargetXmlStructure(document, injectionPaths);
+  const matches = matchSectionsToTargets(generatedSections, targetSections);
+
+  // Prompt user for strategy
+  const insertionStrategy = await showInsertionStrategyPick(
+    Array.from(matches.values()).some(m => m.length > 0)
+  );
+
+  if (!insertionStrategy) {
+    return []; // User cancelled
+  }
+
+  if (insertionStrategy === 'cursor') {
+    // Fall back to cursor insertion
+    const position = editor.selection.active;
+    await editor.edit(editBuilder => {
+      editBuilder.insert(position, '\n' + content + '\n');
+    });
+    return [];
+  }
+
+  // For sections with multiple targets, prompt user to select which to use
+  const selectedTargets = new Map<string, XmlTargetSection[]>();
+
+  for (const [sectionName, targetMatches] of matches.entries()) {
+    if (targetMatches.length === 0) {
+      selectedTargets.set(sectionName, []);
+    } else if (targetMatches.length === 1) {
+      selectedTargets.set(sectionName, targetMatches);
+    } else {
+      // Multiple matches - ask user to select
+      const selected = await selectTargetsFromMultiple(sectionName, targetMatches);
+      if (selected) {
+        selectedTargets.set(sectionName, selected);
+      } else {
+        selectedTargets.set(sectionName, []);
+      }
+    }
+  }
+
+  // Perform smart insertion
+  await editor.edit(editBuilder => {
+    for (const [sectionName, targets] of selectedTargets.entries()) {
+      const genSection = generatedSections.find(s => s.name === sectionName);
+      if (!genSection) {
+        continue;
+      }
+
+      if (targets.length > 0) {
+        // Insert into all selected targets
+        for (const targetSection of targets) {
+          const insertLine = targetSection.lastChildLine;
+          const insertPosition = document.lineAt(insertLine).range.end;
+          const indentedContent = indentContent(
+            genSection.content,
+            targetSection.indentation + '  '
+          );
+
+          editBuilder.insert(
+            insertPosition,
+            '\n' + indentedContent
+          );
+        }
+
+        // Track successful injection
+        results.push({
+          sectionName: `${sectionName}${targets.length > 1 ? ` (${targets.length} locations)` : ''}`,
+          status: 'injected'
+        });
+      } else {
+        // Section not matched - determine why
+        const isConfigured = isSectionConfigured(sectionName, injectionPaths);
+
+        results.push({
+          sectionName: sectionName,
+          status: 'skipped',
+          reason: isConfigured ? 'not-found' : 'not-configured'
+        });
+      }
+    }
+  });
+
+  return results;
+}
+
+/**
+ * Parses generated XML into sections based on comment headers, excluding reporting grids
+ */
+function parseGeneratedXmlSections(generatedXml: string): XmlSection[] {
+  const sections: XmlSection[] = [];
+  const lines = generatedXml.split('\n');
+  let currentSection: XmlSection | null = null;
+  const sectionContent: string[] = [];
+  let skipUntilNextSection = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    // Detect section headers: <!-- SectionName -->
+    const headerMatch = line.match(/^<!--\s*(.+?)\s*-->$/);
+
+    if (headerMatch) {
+      const sectionName = headerMatch[1];
+
+      // Skip sections that are reporting grids (contain "Token", "Configuration", "Values", etc.)
+      if (sectionName.includes('Token') || sectionName.includes('Configuration') || sectionName.includes('Values')) {
+        skipUntilNextSection = true;
+        if (currentSection) {
+          currentSection.content = sectionContent.join('\n').trim();
+          currentSection.endLine = i - 1;
+          sections.push(currentSection);
+          sectionContent.length = 0;
+          currentSection = null;
+        }
+        continue;
+      }
+
+      // Save previous section if exists
+      if (currentSection) {
+        currentSection.content = sectionContent.join('\n').trim();
+        currentSection.endLine = i - 1;
+        sections.push(currentSection);
+        sectionContent.length = 0;
+      }
+
+      skipUntilNextSection = false;
+
+      // Start new section
+      currentSection = {
+        name: sectionName,
+        content: '',
+        startLine: i + 1,
+        endLine: i + 1
+      };
+    } else if (!skipUntilNextSection && currentSection && line && !line.startsWith('<!--')) {
+      // Add non-comment, non-empty lines to current section (but not if we're in a skip section)
+      sectionContent.push(lines[i]);
+    }
+  }
+
+  // Save final section (only if not skipping)
+  if (!skipUntilNextSection && currentSection && sectionContent.length > 0) {
+    currentSection.content = sectionContent.join('\n').trim();
+    currentSection.endLine = lines.length - 1;
+    sections.push(currentSection);
+  }
+
+  return sections;
+}
+
+/**
+ * Finds the closing tag for a given opening tag
+ */
+function findClosingTag(document: vscode.TextDocument, tagName: string, startLine: number): number {
+  let depth = 1;
+  for (let i = startLine + 1; i < document.lineCount; i++) {
+    const text = document.lineAt(i).text;
+    if (text.includes(`<${tagName}`)) {
+      depth++;
+    }
+    if (text.includes(`</${tagName}>`)) {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return startLine; // Fallback
+}
+
+/**
+ * Finds the last child element before the closing tag
+ */
+function findLastChildElement(document: vscode.TextDocument, openLine: number, closeLine: number): number {
+  // Find the last non-empty, non-comment line before closing tag
+  for (let i = closeLine - 1; i > openLine; i--) {
+    const text = document.lineAt(i).text.trim();
+    if (text && !text.startsWith('<!--') && !text.startsWith('</')) {
+      return i;
+    }
+  }
+  return openLine;
+}
+
+/**
+ * Parses target XML file to find section tags where content can be inserted using configured injection paths
+ * Creates multiple target sections when there are multiple matches for a path
+ */
+function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: Record<string, string>): XmlTargetSection[] {
+  const sections: XmlTargetSection[] = [];
+
+  for (const [sectionName, xpath] of Object.entries(injectionPaths)) {
+    const allTargets = findAllXPathTargets(document, xpath);
+
+    for (const target of allTargets) {
+      const targetLine = target.line;
+      const line = document.lineAt(targetLine);
+      const text = line.text;
+
+      // Extract tag name from the line
+      const tagMatch = text.match(/<(\w+)/);
+      if (tagMatch) {
+        const tagName = tagMatch[1];
+        const indentation = text.match(/^(\s*)</)?.[1] || '';
+        const isSelfClosing = text.includes('/>');
+
+        if (isSelfClosing) {
+          sections.push({
+            tagName: sectionName,
+            openTagLine: targetLine,
+            closeTagLine: targetLine,
+            indentation,
+            isSelfClosing: true,
+            lastChildLine: targetLine,
+            context: target.context,
+            injectionPath: xpath
+          });
+        } else {
+          const closeTagLine = findClosingTag(document, tagName, targetLine);
+          const lastChildLine = findLastChildElement(document, targetLine, closeTagLine);
+
+          sections.push({
+            tagName: sectionName,
+            openTagLine: targetLine,
+            closeTagLine,
+            indentation,
+            isSelfClosing: false,
+            lastChildLine,
+            context: target.context,
+            injectionPath: xpath
+          });
+        }
+      }
+    }
+  }
+
+  return sections;
+}
+
+/**
+ * Finds all target lines for an XPath-like expression in the XML document
+ * Supports: TagName, Parent/Child, Parent/Child[@Attr='value']
+ * Returns array of {line, context} where context includes identifying attributes
+ */
+function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, context: string}> {
+  const parts = xpath.split('/').filter(p => p);
+
+  // Start with initial search - find all matches of the first part
+  let currentMatches: number[] = [0];
+
+  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+    const part = parts[partIndex];
+    const isLastPart = partIndex === parts.length - 1;
+
+    // Parse part for tag name and optional attribute condition
+    const attrMatch = part.match(/^(\w+)\[@(\w+)='([^']+)'\]$/);
+    const tagName = attrMatch ? attrMatch[1] : part;
+    const attrName = attrMatch ? attrMatch[2] : null;
+    const attrValue = attrMatch ? attrMatch[3] : null;
+
+    const nextMatches: number[] = [];
+
+    // For each current match position, find the next part
+    for (const searchStart of currentMatches) {
+      for (let i = searchStart; i < document.lineCount; i++) {
+        const text = document.lineAt(i).text;
+
+        // Check if this line contains the opening tag
+        const tagPattern = new RegExp(`^\\s*<${tagName}[\\s>]`);
+        if (tagPattern.test(text)) {
+          // If attribute condition specified, check it
+          if (attrName && attrValue) {
+            const attrPattern = new RegExp(`${attrName}\\s*=\\s*["']${attrValue}["']`);
+            if (!attrPattern.test(text)) {
+              continue; // Attribute doesn't match, keep searching
+            }
+          }
+
+          // Found a match - if this is not the last part, we need to keep searching within this element
+          // If it is the last part, record this as a result
+          if (isLastPart) {
+            nextMatches.push(i);
+          } else {
+            // Continue searching from the next line for child elements
+            nextMatches.push(i + 1);
+            break; // Only take first match at this level, then recurse into it
+          }
+        }
+      }
+    }
+
+    if (nextMatches.length === 0) {
+      return []; // Path not found
+    }
+
+    currentMatches = nextMatches;
+  }
+
+  // Build context strings for each match
+  return currentMatches.map(line => {
+    const text = document.lineAt(line).text;
+    let context = '';
+
+    // Extract any attributes from the line to provide context
+    const nameMatch = text.match(/Name\s*=\s*["']([^"']+)["']/);
+    const idMatch = text.match(/ID\s*=\s*["']([^"']+)["']/);
+    const codeMatch = text.match(/Code\s*=\s*["']([^"']+)["']/);
+
+    if (nameMatch) {
+      context = `Name="${nameMatch[1]}"`;
+    } else if (idMatch) {
+      context = `ID="${idMatch[1]}"`;
+    } else if (codeMatch) {
+      context = `Code="${codeMatch[1]}"`;
+    } else {
+      // No identifying attributes, use line number
+      context = `Line ${line + 1}`;
+    }
+
+    return { line, context };
+  });
+}
+
+/**
+ * Finds the target line for an XPath-like expression in the XML document (first match only)
+ * Supports: TagName, Parent/Child, Parent/Child[@Attr='value']
+ */
+function findXPathTarget(document: vscode.TextDocument, xpath: string): number {
+  const matches = findAllXPathTargets(document, xpath);
+  return matches.length > 0 ? matches[0].line : -1;
+}
+
+/**
+ * Generates a report text from injection results
+ */
+function generateInjectionReport(results: InjectionResult[], targetFileName: string): string {
+  const injected = results.filter(r => r.status === 'injected');
+  const skipped = results.filter(r => r.status === 'skipped');
+
+  let report = `Kahua Attribute Generator - Injection Report\n`;
+  report += `Target File: ${targetFileName}\n`;
+  report += `Date: ${new Date().toLocaleString()}\n`;
+  report += `${'='.repeat(70)}\n\n`;
+
+  report += `Summary:\n`;
+  report += `  Total Sections: ${results.length}\n`;
+  report += `  Injected: ${injected.length}\n`;
+  report += `  Skipped: ${skipped.length}\n\n`;
+
+  if (injected.length > 0) {
+    report += `Successfully Injected Sections:\n`;
+    report += `${'-'.repeat(70)}\n`;
+    for (const result of injected) {
+      report += `  ✓ ${result.sectionName}\n`;
+    }
+    report += `\n`;
+  }
+
+  if (skipped.length > 0) {
+    report += `Skipped Sections:\n`;
+    report += `${'-'.repeat(70)}\n`;
+
+    const notConfigured = skipped.filter(r => r.reason === 'not-configured');
+    const notFound = skipped.filter(r => r.reason === 'not-found');
+
+    if (notConfigured.length > 0) {
+      report += `\n  Not Configured for Injection:\n`;
+      for (const result of notConfigured) {
+        report += `    ✗ ${result.sectionName}\n`;
+        report += `      Reason: No injection path configured for this section\n`;
+      }
+    }
+
+    if (notFound.length > 0) {
+      report += `\n  Target Not Found:\n`;
+      for (const result of notFound) {
+        report += `    ✗ ${result.sectionName}\n`;
+        report += `      Reason: Injection path configured, but target location not found in XML file\n`;
+      }
+    }
+    report += `\n`;
+  }
+
+  report += `${'='.repeat(70)}\n`;
+  report += `End of Report\n`;
+
+  return report;
+}
+
+/**
+ * Opens a new editor tab with the injection report
+ */
+async function openInjectionReport(results: InjectionResult[], targetFileUri: vscode.Uri): Promise<void> {
+  if (results.length === 0) {
+    return;
+  }
+
+  const targetFileName = getWorkspaceRelativePath(targetFileUri);
+  const reportText = generateInjectionReport(results, targetFileName);
+
+  const reportDocument = await vscode.workspace.openTextDocument({
+    content: reportText,
+    language: 'plaintext'
+  });
+
+  await vscode.window.showTextDocument(reportDocument, {
+    viewColumn: vscode.ViewColumn.Beside,
+    preview: false
+  });
+}
+
+/**
+ * Shows a quick pick for selecting target locations when there are multiple matches
+ * Returns the selected targets, or undefined if cancelled
+ */
+async function selectTargetsFromMultiple(
+  sectionName: string,
+  targets: XmlTargetSection[]
+): Promise<XmlTargetSection[] | undefined> {
+  if (targets.length === 0) {
+    return undefined;
+  }
+
+  if (targets.length === 1) {
+    return targets;
+  }
+
+  const items = targets.map((target, index) => ({
+    label: target.context || `Target ${index + 1}`,
+    description: `Line ${target.openTagLine + 1}`,
+    detail: target.injectionPath,
+    target: target,
+    picked: false
+  }));
+
+  items.push({
+    label: '$(check-all) Select All',
+    description: `Inject into all ${targets.length} locations`,
+    detail: 'Apply to all matching targets',
+    target: null as any,
+    picked: false
+  });
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: `Multiple targets found for "${sectionName}". Select target location(s)`,
+    title: 'Kahua: Select Injection Target',
+    canPickMany: true,
+    ignoreFocusOut: true
+  });
+
+  if (!selected || selected.length === 0) {
+    return undefined;
+  }
+
+  const selectAllChosen = selected.some(s => s.label.includes('Select All'));
+
+  if (selectAllChosen) {
+    return targets;
+  }
+
+  return selected.map(s => s.target).filter(t => t !== null);
+}
+
+/**
+ * Checks if a section name is configured in the injection paths
+ */
+function isSectionConfigured(sectionName: string, injectionPaths: Record<string, string>): boolean {
+  // Extract key words from section name
+  const genWords = sectionName
+    .toLowerCase()
+    .replace(/extension|supplement|group \d+|default/gi, '')
+    .split(/[-\s]+/)
+    .filter(w => w.length > 2);
+
+  // Check if any configured path name matches
+  for (const configuredName of Object.keys(injectionPaths)) {
+    const configName = configuredName.toLowerCase();
+
+    for (const word of genWords) {
+      // Direct match or plural match
+      if (configName === word ||
+          configName === word + 's' ||
+          configName + 's' === word ||
+          configName.includes(word) ||
+          word.includes(configName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Matches generated sections to target XML sections intelligently
+ * Returns all matching targets for each section (may be multiple)
+ */
+function matchSectionsToTargets(
+  generatedSections: XmlSection[],
+  targetSections: XmlTargetSection[]
+): Map<string, XmlTargetSection[]> {
+  const matches = new Map<string, XmlTargetSection[]>();
+
+  for (const genSection of generatedSections) {
+    const allMatches: XmlTargetSection[] = [];
+
+    // Extract key words from generated section name
+    // e.g., "Extension Attributes - Attributes" -> ["Attributes"]
+    const genWords = genSection.name
+      .toLowerCase()
+      .replace(/extension|supplement|group \d+|default/gi, '')
+      .split(/[-\s]+/)
+      .filter(w => w.length > 2);
+
+    for (const targetSection of targetSections) {
+      const targetName = targetSection.tagName.toLowerCase();
+
+      // Check if any word from generated section matches target
+      for (const word of genWords) {
+        // Direct match or plural match
+        if (targetName === word ||
+            targetName === word + 's' ||
+            targetName + 's' === word ||
+            targetName.includes(word) ||
+            word.includes(targetName)) {
+          allMatches.push(targetSection);
+          break;
+        }
+      }
+    }
+
+    matches.set(genSection.name, allMatches);
+  }
+
+  return matches;
+}
+
+/**
+ * Shows a quick pick menu for selecting insertion strategy
+ */
+async function showInsertionStrategyPick(
+  hasMatchableSections: boolean
+): Promise<InsertionStrategy | undefined> {
+  if (!hasMatchableSections) {
+    // No smart options available, just use cursor
+    return 'cursor';
+  }
+
+  const items: vscode.QuickPickItem[] = [
+    {
+      label: `$(symbol-method) Smart Insertion`,
+      detail: 'Automatically insert fragments into matching XML sections',
+      alwaysShow: true
+    },
+    {
+      label: `$(edit) Cursor Position`,
+      detail: 'Insert all content at current cursor position',
+      alwaysShow: true
+    }
+  ];
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'How would you like to insert the XML?',
+    title: 'Kahua: Choose Insertion Method'
+  });
+
+  if (!selected) {
+    return undefined;
+  }
+
+  return selected.label.includes('Smart') ? 'smart' : 'cursor';
+}
+
+/**
+ * Indents content lines with the specified indentation string
+ */
+function indentContent(content: string, indentation: string): string {
+  return content
+    .split('\n')
+    .map(line => line.trim() ? indentation + line : line)
+    .join('\n');
 }
 
 /**
@@ -674,6 +1480,13 @@ export function activate(context: vscode.ExtensionContext) {
   // Set up context menu visibility
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
 
+  // Clean up source XML file map when documents are closed
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument(document => {
+      sourceXmlFileMap.delete(document.uri.toString());
+    })
+  );
+
   // Register attribute generation commands
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateAttributesExtension', () => handleSelection(['attributes'])),
@@ -928,12 +1741,12 @@ async function selectCustomFragments(placeholder: string): Promise<{ label: stri
 }
 
 /**
- * Generates and inserts a snippet for the specified fragment types
+ * Generates and inserts a snippet for the specified fragment types with tab-stop functionality
  */
 async function generateSnippetForFragments(fragmentIds: string[]): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showErrorMessage('No active editor found');
+    vscode.window.showErrorMessage('No active editor found. Please open a file to insert the snippet.');
     return;
   }
 
@@ -1064,17 +1877,33 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     }
 
     const snippetText = snippetLines.join('\n');
-    const snippet = new vscode.SnippetString(snippetText);
 
-    // Insert snippet at cursor position
-    await editor.insertSnippet(snippet);
+    // Remember the current XML file if we're in one
+    const currentFileUri = editor.document.uri;
+    const isCurrentFileXml = currentFileUri.fsPath.toLowerCase().endsWith('.xml');
+
+    // Open snippet in new tab so user can fill it out
+    const newDocument = await vscode.workspace.openTextDocument({
+      content: snippetText,
+      language: 'plaintext'
+    });
+
+    const snippetEditor = await vscode.window.showTextDocument(newDocument, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: false
+    });
+
+    // If we came from an XML file, remember it for later
+    if (isCurrentFileXml) {
+      sourceXmlFileMap.set(newDocument.uri.toString(), currentFileUri);
+    }
 
     const rowText = numberOfRows === 0
       ? 'header only'
       : numberOfRows === 1
         ? '1 table row'
         : `${numberOfRows} table rows`;
-    vscode.window.showInformationMessage(`Kahua: Token snippet inserted for ${fragmentIds.join(', ')} with ${rowText}`);
+    vscode.window.showInformationMessage(`Kahua: Token snippet opened in new tab for ${fragmentIds.join(', ')} with ${rowText}`);
 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -1083,14 +1912,10 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
 }
 
 /**
- * Generates and inserts a template for the specified fragment types
+ * Generates and opens a template for the specified fragment types in a new editor
  */
 async function generateTemplateForFragments(fragmentIds: string[]): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found');
-    return;
-  }
+  const currentEditor = vscode.window.activeTextEditor;
 
   try {
     const config = getKahuaConfig(currentResource());
@@ -1153,13 +1978,27 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
 
     const templateText = templateLines.join('\n');
 
-    // Insert at cursor position
-    const position = editor.selection.active;
-    await editor.edit(editBuilder => {
-      editBuilder.insert(position, templateText);
+    // Remember the current XML file if we're in one
+    const currentFileUri = currentEditor?.document.uri;
+    const isCurrentFileXml = currentFileUri?.fsPath.toLowerCase().endsWith('.xml');
+
+    // Open template in a new editor window
+    const newDocument = await vscode.workspace.openTextDocument({
+      content: templateText,
+      language: 'plaintext'
     });
 
-    vscode.window.showInformationMessage(`Kahua: Token template inserted for ${fragmentIds.join(', ')}`);
+    await vscode.window.showTextDocument(newDocument, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: false
+    });
+
+    // If we came from an XML file, remember it for later
+    if (isCurrentFileXml && currentFileUri) {
+      sourceXmlFileMap.set(newDocument.uri.toString(), currentFileUri);
+    }
+
+    vscode.window.showInformationMessage(`Kahua: Token template opened in new editor for ${fragmentIds.join(', ')}`);
 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -1530,24 +2369,54 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       generatedXml = formatXml(generatedXml, xmlIndentSize);
     }
 
-    // Get the output target setting
-    const outputTarget = config.get<string>('outputTarget') || 'newEditor';
+    // Show quick pick to select output target
+    const currentFileUri = editor?.document?.uri;
+    const target = await showOutputTargetQuickPick(currentFileUri);
 
-    if (outputTarget === 'newEditor') {
-      const newDocument = await vscode.workspace.openTextDocument({
-        content: generatedXml,
-        language: 'xml'
-      });
+    if (!target) {
+      vscode.window.showInformationMessage('Kahua: Generation cancelled');
+      return;
+    }
 
-      await vscode.window.showTextDocument(newDocument, {
-        viewColumn: vscode.ViewColumn.Beside,
-        preview: false
-      });
+    // Handle selected output target
+    switch (target.type) {
+      case 'currentFile':
+        const currentFileResults = await insertXmlIntoFile(target.uri, generatedXml, 'smart', selectedFragmentDefs[0]);
+        await openInjectionReport(currentFileResults, target.uri);
+        vscode.window.showInformationMessage(
+          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
+        );
+        break;
 
-      vscode.window.showInformationMessage(`Kahua: Generated fragments for ${fragmentIds.join(', ')} in new editor window`);
-    } else {
-      await vscode.env.clipboard.writeText(generatedXml);
-      vscode.window.showInformationMessage(`Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`);
+      case 'selectFile':
+        const selectFileResults = await insertXmlIntoFile(target.uri, generatedXml, 'smart', selectedFragmentDefs[0]);
+        const fileName = getWorkspaceRelativePath(target.uri);
+        await openInjectionReport(selectFileResults, target.uri);
+        vscode.window.showInformationMessage(
+          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
+        );
+        break;
+
+      case 'newEditor':
+        const newDocument = await vscode.workspace.openTextDocument({
+          content: generatedXml,
+          language: 'xml'
+        });
+        await vscode.window.showTextDocument(newDocument, {
+          viewColumn: vscode.ViewColumn.Beside,
+          preview: false
+        });
+        vscode.window.showInformationMessage(
+          `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
+        );
+        break;
+
+      case 'clipboard':
+        await vscode.env.clipboard.writeText(generatedXml);
+        vscode.window.showInformationMessage(
+          `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
+        );
+        break;
     }
 
   } catch (error) {
