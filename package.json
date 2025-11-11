@@ -290,7 +290,11 @@
                   "properties": {
                     "type": {
                       "type": "string",
-                      "enum": ["attribute", "text", "selection"],
+                      "enum": [
+                        "attribute",
+                        "text",
+                        "selection"
+                      ],
                       "description": "Type of read: 'attribute' reads an XML attribute value, 'text' reads element text content, 'selection' prompts user to select from multiple options"
                     },
                     "path": {
@@ -310,7 +314,10 @@
                       "description": "Template for dynamic injection path. Use {value} as placeholder for the selected token value (e.g., 'EntityDefs/EntityDef[@Name='{value}']/Attributes')"
                     }
                   },
-                  "required": ["type", "path"]
+                  "required": [
+                    "type",
+                    "path"
+                  ]
                 }
               }
             },
@@ -519,5 +526,8 @@
     "type": "git",
     "url": "https://github.com/hoffsam/kahua-attribute-generator.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "fast-xml-parser": "^5.3.1"
+  }
 }

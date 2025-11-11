@@ -10,7 +10,8 @@
       "Bash(npm run package:*)",
       "Bash(find:*)",
       "Bash(git log:*)",
-      "Bash(vsce package:*)"
+      "Bash(vsce package:*)",
+      "Bash(npm install:*)"
     ],
     "deny": [],
     "ask": []
