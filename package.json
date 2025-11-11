@@ -223,13 +223,28 @@
               "id": "appname",
               "name": "App Name Header",
               "type": "header",
-              "tokens": "appname"
+              "tokens": "appname",
+              "tokenReadPaths": {
+                "appname": {
+                  "type": "attribute",
+                  "path": "App/@Name"
+                }
+              }
             },
             {
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+              "tokens": "name,type,entity:Field,visualtype:TextBox,label,descriptionlabel,linkedEntityDef",
+              "tokenReadPaths": {
+                "entity": {
+                  "type": "selection",
+                  "path": "EntityDefs/EntityDef",
+                  "attribute": "Name",
+                  "affectsInjection": true,
+                  "injectionPathTemplate": "EntityDefs/EntityDef[@Name='{value}']/Attributes"
+                }
+              }
             },
             {
               "id": "lookupheader",
@@ -266,6 +281,37 @@
               "tokens": {
                 "type": "string",
                 "description": "Comma-separated list of token names. Format: 'name,type' or 'name:DefaultValue,type:DefaultValue'"
+              },
+              "tokenReadPaths": {
+                "type": "object",
+                "description": "Optional configuration for reading token values from source XML files",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": ["attribute", "text", "selection"],
+                      "description": "Type of read: 'attribute' reads an XML attribute value, 'text' reads element text content, 'selection' prompts user to select from multiple options"
+                    },
+                    "path": {
+                      "type": "string",
+                      "description": "XPath-like expression to locate the value. For attributes use '@AttributeName' at the end (e.g., 'App/@Name'). For selection type, path to elements to choose from"
+                    },
+                    "attribute": {
+                      "type": "string",
+                      "description": "For selection type: which attribute to use for display and value (e.g., 'Name')"
+                    },
+                    "affectsInjection": {
+                      "type": "boolean",
+                      "description": "If true, the selected value will be used to modify injection paths dynamically (e.g., entity selection determines which EntityDef to inject into)"
+                    },
+                    "injectionPathTemplate": {
+                      "type": "string",
+                      "description": "Template for dynamic injection path. Use {value} as placeholder for the selected token value (e.g., 'EntityDefs/EntityDef[@Name='{value}']/Attributes')"
+                    }
+                  },
+                  "required": ["type", "path"]
+                }
               }
             },
             "required": [

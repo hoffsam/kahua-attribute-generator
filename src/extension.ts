@@ -16,6 +16,17 @@ interface ConditionalResult {
 }
 
 /**
+ * Configuration for reading token values from source XML
+ */
+interface TokenReadPath {
+  type: 'attribute' | 'text' | 'selection';
+  path: string;
+  attribute?: string;
+  affectsInjection?: boolean;
+  injectionPathTemplate?: string;
+}
+
+/**
  * Configuration interfaces for the new system
  */
 interface TokenNameDefinition {
@@ -23,6 +34,7 @@ interface TokenNameDefinition {
   name: string;
   type: 'header' | 'table';
   tokens: string;
+  tokenReadPaths?: Record<string, TokenReadPath>;
 }
 
 interface FragmentDefinition {
@@ -636,10 +648,13 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
   const sections: XmlTargetSection[] = [];
 
   for (const [sectionName, xpath] of Object.entries(injectionPaths)) {
-    const allTargets = findAllXPathTargets(document, xpath);
+    const allTargetLines = findAllXPathTargets(document, xpath);
 
-    for (const target of allTargets) {
-      const targetLine = target.line;
+    // Deduplicate line numbers
+    const uniqueLines = [...new Set(allTargetLines)];
+    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueLines.length} unique lines (from ${allTargetLines.length} total)`);
+
+    for (const targetLine of uniqueLines) {
       const line = document.lineAt(targetLine);
       const text = line.text;
 
@@ -658,7 +673,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
             indentation,
             isSelfClosing: true,
             lastChildLine: targetLine,
-            context: target.context,
+            context: `Line ${targetLine + 1}`,
             injectionPath: xpath
           });
         } else {
@@ -672,7 +687,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
             indentation,
             isSelfClosing: false,
             lastChildLine,
-            context: target.context,
+            context: `Line ${targetLine + 1}`,
             injectionPath: xpath
           });
         }
@@ -686,85 +701,116 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
 /**
  * Finds all target lines for an XPath-like expression in the XML document
  * Supports: TagName, Parent/Child, Parent/Child[@Attr='value']
- * Returns array of {line, context} where context includes identifying attributes
+ * Returns array of line numbers only - no context extraction (context is configuration-based)
+ * Only finds direct children at each level, not nested elements
  */
-function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, context: string}> {
+function findAllXPathTargets(document: vscode.TextDocument, xpath: string): number[] {
+  console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
   const parts = xpath.split('/').filter(p => p);
 
-  // Start with initial search - find all matches of the first part
-  let currentMatches: number[] = [0];
+  // Simple approach: for each path segment, find all matching elements
+  // Then filter to only direct children by checking indentation levels
+
+  let candidateLines: number[] = [];
+
+  // Start with the entire document
+  for (let i = 0; i < document.lineCount; i++) {
+    candidateLines.push(i);
+  }
+
+  let matchedLines: number[] = [];
 
   for (let partIndex = 0; partIndex < parts.length; partIndex++) {
     const part = parts[partIndex];
     const isLastPart = partIndex === parts.length - 1;
-
+    console.log(`[DEBUG] Processing part ${partIndex + 1}/${parts.length}: ${part}, candidateLines: ${candidateLines.length}`);
     // Parse part for tag name and optional attribute condition
     const attrMatch = part.match(/^(\w+)\[@(\w+)='([^']+)'\]$/);
     const tagName = attrMatch ? attrMatch[1] : part;
     const attrName = attrMatch ? attrMatch[2] : null;
     const attrValue = attrMatch ? attrMatch[3] : null;
 
-    const nextMatches: number[] = [];
+    matchedLines = []; // Reset for this iteration
 
-    // For each current match position, find the next part
-    for (const searchStart of currentMatches) {
-      for (let i = searchStart; i < document.lineCount; i++) {
-        const text = document.lineAt(i).text;
+    for (const lineNum of candidateLines) {
+      const text = document.lineAt(lineNum).text;
+      const trimmed = text.trim();
 
-        // Check if this line contains the opening tag
-        const tagPattern = new RegExp(`^\\s*<${tagName}[\\s>]`);
-        if (tagPattern.test(text)) {
-          // If attribute condition specified, check it
-          if (attrName && attrValue) {
-            const attrPattern = new RegExp(`${attrName}\\s*=\\s*["']${attrValue}["']`);
-            if (!attrPattern.test(text)) {
-              continue; // Attribute doesn't match, keep searching
-            }
-          }
-
-          // Found a match - if this is not the last part, we need to keep searching within this element
-          // If it is the last part, record this as a result
-          if (isLastPart) {
-            nextMatches.push(i);
-          } else {
-            // Continue searching from the next line for child elements
-            nextMatches.push(i + 1);
-            break; // Only take first match at this level, then recurse into it
+      // Check if this line has the opening tag we're looking for
+      const tagPattern = new RegExp(`^<${tagName}[\\s/>]`);
+      if (tagPattern.test(trimmed)) {
+        // Check attribute condition if specified
+        if (attrName && attrValue) {
+          const attrPattern = new RegExp(`${attrName}\\s*=\\s*["']${attrValue}["']`);
+          if (!attrPattern.test(text)) {
+            continue;
           }
         }
+
+        matchedLines.push(lineNum);
       }
     }
 
-    if (nextMatches.length === 0) {
+    console.log(`[DEBUG] Found ${matchedLines.length} matches for part "${part}"`);
+
+    if (matchedLines.length === 0) {
+      console.log(`[DEBUG] No matches found, returning empty array`);
       return []; // Path not found
     }
 
-    currentMatches = nextMatches;
-  }
-
-  // Build context strings for each match
-  return currentMatches.map(line => {
-    const text = document.lineAt(line).text;
-    let context = '';
-
-    // Extract any attributes from the line to provide context
-    const nameMatch = text.match(/Name\s*=\s*["']([^"']+)["']/);
-    const idMatch = text.match(/ID\s*=\s*["']([^"']+)["']/);
-    const codeMatch = text.match(/Code\s*=\s*["']([^"']+)["']/);
-
-    if (nameMatch) {
-      context = `Name="${nameMatch[1]}"`;
-    } else if (idMatch) {
-      context = `ID="${idMatch[1]}"`;
-    } else if (codeMatch) {
-      context = `Code="${codeMatch[1]}"`;
-    } else {
-      // No identifying attributes, use line number
-      context = `Line ${line + 1}`;
+    // If this is the last part, we're done - return the matches
+    if (isLastPart) {
+      console.log(`[DEBUG] Last part reached, returning ${matchedLines.length} matches`);
+      return matchedLines;
     }
 
-    return { line, context };
-  });
+    // For the next iteration, we need to find children of these elements
+    // Expand candidateLines to be all lines within the matched elements
+    candidateLines = [];
+
+    for (const matchLine of matchedLines) {
+      const text = document.lineAt(matchLine).text;
+      const isSelfClosing = text.includes('/>');
+
+      if (isSelfClosing) {
+        // Self-closing tags have no children
+        continue;
+      }
+
+      // Find the closing tag
+      const tagMatch = text.match(/<(\w+)/);
+      if (!tagMatch) {
+        continue;
+      }
+
+      const actualTagName = tagMatch[1];
+      const closeTag = `</${actualTagName}>`;
+      let depth = 1;
+      let closeLine = matchLine;
+
+      for (let i = matchLine + 1; i < document.lineCount; i++) {
+        const lineText = document.lineAt(i).text;
+
+        if (lineText.includes(`<${actualTagName}`) && !lineText.includes('/>')) {
+          depth++;
+        }
+        if (lineText.includes(closeTag)) {
+          depth--;
+          if (depth === 0) {
+            closeLine = i;
+            break;
+          }
+        }
+      }
+
+      // Add all lines between open and close (direct children area)
+      for (let i = matchLine + 1; i < closeLine; i++) {
+        candidateLines.push(i);
+      }
+    }
+  }
+
+  return matchedLines;
 }
 
 /**
@@ -773,7 +819,154 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
  */
 function findXPathTarget(document: vscode.TextDocument, xpath: string): number {
   const matches = findAllXPathTargets(document, xpath);
-  return matches.length > 0 ? matches[0].line : -1;
+  return matches.length > 0 ? matches[0] : -1;
+}
+
+/**
+ * Extracts an attribute value from XML using XPath
+ * Supports paths like "App/@Name" or "EntityDefs/EntityDef/@Name"
+ */
+function extractAttributeValue(document: vscode.TextDocument, xpath: string): string | undefined {
+  if (!xpath.includes('/@')) {
+    return undefined;
+  }
+
+  const parts = xpath.split('/@');
+  const elementPath = parts[0];
+  const attributeName = parts[1];
+
+  const targetLine = findXPathTarget(document, elementPath);
+  if (targetLine === -1) {
+    return undefined;
+  }
+
+  const text = document.lineAt(targetLine).text;
+  const attrPattern = new RegExp(`${attributeName}\\s*=\\s*["']([^"']+)["']`);
+  const match = text.match(attrPattern);
+
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Extracts text content from an XML element
+ */
+function extractTextContent(document: vscode.TextDocument, xpath: string): string | undefined {
+  const targetLine = findXPathTarget(document, xpath);
+  if (targetLine === -1) {
+    return undefined;
+  }
+
+  const text = document.lineAt(targetLine).text.trim();
+  const contentMatch = text.match(/>([^<]+)</);
+
+  return contentMatch ? contentMatch[1] : undefined;
+}
+
+/**
+ * Finds all elements matching an XPath and extracts their attribute values
+ * Returns array of {value, context} for selection UI
+ * Filters out elements that don't have the required attribute
+ * Uses the configured attribute name for extraction - no hardcoded attributes
+ */
+function extractSelectableValues(
+  document: vscode.TextDocument,
+  xpath: string,
+  attributeName: string
+): Array<{value: string, context: string}> {
+  const matchedLines = findAllXPathTargets(document, xpath);
+
+  return matchedLines
+    .map(lineNum => {
+      const text = document.lineAt(lineNum).text;
+      const attrPattern = new RegExp(`${attributeName}\\s*=\\s*["']([^"']+)["']`);
+      const attrMatch = text.match(attrPattern);
+
+      if (!attrMatch) {
+        return null; // Filter out elements without the attribute
+      }
+
+      const value = attrMatch[1];
+
+      return {
+        value: value,
+        context: `Line ${lineNum + 1}`
+      };
+    })
+    .filter((item): item is {value: string, context: string} => item !== null);
+}
+
+/**
+ * Shows a quick pick for selecting a value from XML
+ */
+async function showValueSelectionPick(
+  tokenName: string,
+  options: Array<{value: string, context: string}>
+): Promise<string | undefined> {
+  if (options.length === 0) {
+    return undefined;
+  }
+
+  if (options.length === 1) {
+    return options[0].value;
+  }
+
+  const items = options.map(opt => ({
+    label: opt.value,
+    description: opt.context,
+    detail: `Use "${opt.value}" as the value for ${tokenName}`,
+    value: opt.value
+  }));
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: `Select value for token "${tokenName}"`,
+    title: `Kahua: Select ${tokenName}`,
+    ignoreFocusOut: true
+  });
+
+  return selected?.value;
+}
+
+/**
+ * Reads token values from source XML document based on tokenReadPaths configuration
+ * Returns a map of token name to extracted value
+ */
+async function readTokenValuesFromXml(
+  document: vscode.TextDocument,
+  tokenReadPaths: Record<string, TokenReadPath>
+): Promise<Map<string, string>> {
+  const values = new Map<string, string>();
+
+  for (const [tokenName, readPath] of Object.entries(tokenReadPaths)) {
+    let value: string | undefined;
+
+    switch (readPath.type) {
+      case 'attribute':
+        value = extractAttributeValue(document, readPath.path);
+        break;
+
+      case 'text':
+        value = extractTextContent(document, readPath.path);
+        break;
+
+      case 'selection':
+        if (!readPath.attribute) {
+          console.log(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
+          continue;
+        }
+        console.log(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
+        const options = extractSelectableValues(document, readPath.path, readPath.attribute);
+        console.log(`[DEBUG] Found ${options.length} options:`, options);
+        value = await showValueSelectionPick(tokenName, options);
+        console.log(`[DEBUG] User selected: ${value}`);
+        break;
+    }
+
+    if (value) {
+      values.set(tokenName, value);
+    }
+  }
+
+  return values;
 }
 
 /**
@@ -872,8 +1065,8 @@ async function selectTargetsFromMultiple(
   }
 
   const items = targets.map((target, index) => ({
-    label: target.context || `Target ${index + 1}`,
-    description: `Line ${target.openTagLine + 1}`,
+    label: `Line ${target.openTagLine + 1}`,
+    description: target.context && target.context !== `Line ${target.openTagLine + 1}` ? target.context : undefined,
     detail: target.injectionPath,
     target: target,
     picked: false
@@ -1787,6 +1980,25 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
       Array.from(allTokenReferences)
     );
 
+    // Extract values from source XML if current file is XML
+    const extractedValues = new Map<string, string>();
+    const sourceFileUri = editor.document.uri;
+    const isSourceXmlFile = sourceFileUri.fsPath.toLowerCase().endsWith('.xml');
+
+    if (isSourceXmlFile) {
+      // Collect all tokenReadPaths from referenced token definitions
+      const referencedTokenDefs = tokenDefinitions.filter(def =>
+        allTokenReferences.has(def.id)
+      );
+
+      for (const tokenDef of referencedTokenDefs) {
+        if (tokenDef.tokenReadPaths) {
+          const values = await readTokenValuesFromXml(editor.document, tokenDef.tokenReadPaths);
+          values.forEach((value, key) => extractedValues.set(key, value));
+        }
+      }
+    }
+
     // Separate header and table token definitions
     const snippetLines: string[] = [];
     let tabStopIndex = 1;
@@ -1798,7 +2010,9 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
 
       for (let i = 0; i < headerTokens.length; i++) {
         const token = headerTokens[i];
-        const placeholder = token.defaultValue || token.name;
+        // Use extracted value if available, otherwise fall back to default
+        const extractedValue = extractedValues.get(token.name);
+        const placeholder = extractedValue || token.defaultValue || token.name;
 
         // Include comma in the tabstop for proper step-over behavior
         if (i < headerTokens.length - 1) {
@@ -1855,7 +2069,9 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
 
         for (let i = 0; i < tableTokens.length; i++) {
           const token = tableTokens[i];
-          const placeholder = token.defaultValue || token.name;
+          // Use extracted value if available, otherwise fall back to default
+          const extractedValue = extractedValues.get(token.name);
+          const placeholder = extractedValue || token.defaultValue || token.name;
 
           // Include comma in the tabstop for proper step-over behavior
           if (i < tableTokens.length - 1) {
@@ -1954,21 +2170,44 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       Array.from(allTokenReferences)
     );
 
+    // Extract values from source XML if current file is XML
+    const extractedValues = new Map<string, string>();
+    const sourceDocUri = currentEditor?.document.uri;
+    const isSourceDocXml = sourceDocUri && sourceDocUri.fsPath.toLowerCase().endsWith('.xml');
+
+    if (isSourceDocXml && currentEditor) {
+      // Collect all tokenReadPaths from referenced token definitions
+      const referencedTokenDefs = tokenDefinitions.filter(def =>
+        allTokenReferences.has(def.id)
+      );
+
+      for (const tokenDef of referencedTokenDefs) {
+        if (tokenDef.tokenReadPaths) {
+          const values = await readTokenValuesFromXml(currentEditor.document, tokenDef.tokenReadPaths);
+          values.forEach((value, key) => extractedValues.set(key, value));
+        }
+      }
+    }
+
     // Build template text showing all token definitions
     const templateLines: string[] = [];
     templateLines.push(`// Token Template for ${fragmentIds.join(', ')}:`);
 
     if (headerTokens.length > 0) {
-      const headerTokenDisplays = headerTokens.map(token =>
-        token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
-      );
+      const headerTokenDisplays = headerTokens.map(token => {
+        const extractedValue = extractedValues.get(token.name);
+        const displayValue = extractedValue || token.defaultValue;
+        return displayValue ? `${token.name}:${displayValue}` : token.name;
+      });
       templateLines.push(`// Header tokens: ${headerTokenDisplays.join(', ')}`);
     }
 
     if (tableTokens.length > 0) {
-      const tableTokenDisplays = tableTokens.map(token =>
-        token.defaultValue ? `${token.name}:${token.defaultValue}` : token.name
-      );
+      const tableTokenDisplays = tableTokens.map(token => {
+        const extractedValue = extractedValues.get(token.name);
+        const displayValue = extractedValue || token.defaultValue;
+        return displayValue ? `${token.name}:${displayValue}` : token.name;
+      });
       templateLines.push(`// Table tokens: ${tableTokenDisplays.join(', ')}`);
     }
 
