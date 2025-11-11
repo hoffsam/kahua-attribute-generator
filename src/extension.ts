@@ -2214,9 +2214,9 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     const currentFileUri = editor.document.uri;
     const isCurrentFileXml = currentFileUri.fsPath.toLowerCase().endsWith('.xml');
 
-    // Open snippet in new tab so user can fill it out
+    // Open empty document in new tab
     const newDocument = await vscode.workspace.openTextDocument({
-      content: snippetText,
+      content: '',
       language: 'plaintext'
     });
 
@@ -2224,6 +2224,10 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
       viewColumn: vscode.ViewColumn.Beside,
       preview: false
     });
+
+    // Insert as actual snippet with tab stops
+    const snippet = new vscode.SnippetString(snippetText);
+    await snippetEditor.insertSnippet(snippet);
 
     // If we came from an XML file, remember it for later
     if (isCurrentFileXml) {
@@ -2339,6 +2343,30 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     templateLines.push('//');
     templateLines.push('// Usage: First line contains header tokens, subsequent lines contain table tokens');
     templateLines.push('');
+
+    // Add pre-filled data line for header tokens if any were extracted
+    if (headerTokens.length > 0) {
+      const hasExtractedHeaderValues = headerTokens.some(token => extractedValues.has(token.name));
+      if (hasExtractedHeaderValues) {
+        const headerValues = headerTokens.map(token => {
+          const extractedValue = extractedValues.get(token.name);
+          return extractedValue || token.defaultValue || '';
+        });
+        templateLines.push(headerValues.join(','));
+      }
+    }
+
+    // Add pre-filled data line for table tokens if any were extracted
+    if (tableTokens.length > 0) {
+      const hasExtractedTableValues = tableTokens.some(token => extractedValues.has(token.name));
+      if (hasExtractedTableValues) {
+        const tableValues = tableTokens.map(token => {
+          const extractedValue = extractedValues.get(token.name);
+          return extractedValue || token.defaultValue || '';
+        });
+        templateLines.push(tableValues.join(','));
+      }
+    }
 
     const templateText = templateLines.join('\n');
 
