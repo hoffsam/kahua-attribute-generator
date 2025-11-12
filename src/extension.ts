@@ -490,9 +490,18 @@ async function insertXmlIntoFile(
         if (tokenDef.tokenReadPaths) {
           for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
             if (readPath.affectsInjection && readPath.injectionPathTemplate && affectingTokens.has(tokenName)) {
-              const tokenValue = affectingTokens.get(tokenName)!;
-              modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
-              console.log(`[DEBUG] Applied injection path template: ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+              // Only apply template if the original xpath matches the pattern that the template is for
+              // Extract the base path from the template (everything before the filter)
+              const templateBasePath = readPath.injectionPathTemplate.split('[')[0];
+
+              // Check if the original xpath starts with or contains the same base path structure
+              if (xpath.includes('EntityDef') || xpath === templateBasePath) {
+                const tokenValue = affectingTokens.get(tokenName)!;
+                modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
+                console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+              } else {
+                console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
+              }
             }
           }
         }
@@ -716,57 +725,61 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
     const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
     const displayAttribute = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
 
-    const allTargetLines = findAllXPathTargets(document, xpath);
+    const allTargets = findAllXPathTargets(document, xpath);
 
-    // Deduplicate line numbers
-    const uniqueLines = [...new Set(allTargetLines)];
-    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueLines.length} unique lines (from ${allTargetLines.length} total)`);
+    // Deduplicate by line number
+    const seenLines = new Set<number>();
+    const uniqueTargets = allTargets.filter(target => {
+      if (seenLines.has(target.line)) {
+        return false;
+      }
+      seenLines.add(target.line);
+      return true;
+    });
 
-    for (const targetLine of uniqueLines) {
-      const line = document.lineAt(targetLine);
+    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
+
+    for (const target of uniqueTargets) {
+      const line = document.lineAt(target.line);
       const text = line.text;
 
-      // Extract tag name from the line (support dots like HubDef.LogDef)
-      const tagMatch = text.match(/<([\w.]+)/);
-      if (tagMatch) {
-        const tagName = tagMatch[1];
-        const indentation = text.match(/^(\s*)</)?.[1] || '';
-        const isSelfClosing = text.includes('/>');
+      // Use tag name from XML parser instead of regex
+      const tagName = target.tagName;
+      const indentation = text.match(/^(\s*)</)?.[1] || '';
+      const isSelfClosing = text.includes('/>');
 
-        // Extract display attribute value for context
-        let context = `Line ${targetLine + 1}`;
-        const attrPattern = new RegExp(`${displayAttribute}\\s*=\\s*["']([^"']+)["']`);
-        const attrMatch = text.match(attrPattern);
-        if (attrMatch) {
-          context += ` (${displayAttribute}="${attrMatch[1]}")`;
-        }
+      // Extract display attribute value from parsed attributes
+      let context = `Line ${target.line + 1}`;
+      const displayValue = target.attributes[displayAttribute];
+      if (displayValue) {
+        context += ` (${displayAttribute}="${displayValue}")`;
+      }
 
-        if (isSelfClosing) {
-          sections.push({
-            tagName: sectionName,
-            openTagLine: targetLine,
-            closeTagLine: targetLine,
-            indentation,
-            isSelfClosing: true,
-            lastChildLine: targetLine,
-            context,
-            injectionPath: xpath
-          });
-        } else {
-          const closeTagLine = findClosingTag(document, tagName, targetLine);
-          const lastChildLine = findLastChildElement(document, targetLine, closeTagLine);
+      if (isSelfClosing) {
+        sections.push({
+          tagName: sectionName,
+          openTagLine: target.line,
+          closeTagLine: target.line,
+          indentation,
+          isSelfClosing: true,
+          lastChildLine: target.line,
+          context,
+          injectionPath: xpath
+        });
+      } else {
+        const closeTagLine = findClosingTag(document, tagName, target.line);
+        const lastChildLine = findLastChildElement(document, target.line, closeTagLine);
 
-          sections.push({
-            tagName: sectionName,
-            openTagLine: targetLine,
-            closeTagLine,
-            indentation,
-            isSelfClosing: false,
-            lastChildLine,
-            context,
-            injectionPath: xpath
-          });
-        }
+        sections.push({
+          tagName: sectionName,
+          openTagLine: target.line,
+          closeTagLine,
+          indentation,
+          isSelfClosing: false,
+          lastChildLine,
+          context,
+          injectionPath: xpath
+        });
       }
     }
   }
@@ -788,7 +801,22 @@ function parseXmlDocument(document: vscode.TextDocument): any {
   });
 
   const xmlText = document.getText();
-  return parser.parse(xmlText);
+  const parsed = parser.parse(xmlText);
+
+  // Debug: Log structure of parsed XML
+  console.log('[DEBUG] ========== Parsed XML Structure ==========');
+  console.log('[DEBUG] Root keys:', Object.keys(parsed));
+  if (Object.keys(parsed).length > 0) {
+    const rootKey = Object.keys(parsed)[0];
+    const rootElement = parsed[rootKey];
+    const childKeys = Object.keys(rootElement).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
+    console.log(`[DEBUG] Child keys under "${rootKey}":`, childKeys.slice(0, 20));
+    if (childKeys.length > 20) {
+      console.log(`[DEBUG] ... (${childKeys.length} total child keys)`);
+    }
+  }
+
+  return parsed;
 }
 
 /**
@@ -796,10 +824,12 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Returns elements with their identifying attributes
  */
 function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>}> {
-  console.log(`[DEBUG] findElementsByXPath called with xpath: ${xpath}`);
+  console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
+  console.log(`[DEBUG] XPath: ${xpath}`);
   console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
 
   let parts = xpath.split('/').filter(p => p);
+  console.log(`[DEBUG] XPath parts:`, parts);
 
   // Start from the actual document root (skip the wrapper object)
   // fast-xml-parser wraps everything in the root element
@@ -814,6 +844,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
       console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
       currentElements = [rootElement];
       parts = parts.slice(1); // Remove the matched root element from parts
+      console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
     } else {
       console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
       currentElements = [rootElement];
@@ -822,7 +853,12 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
     currentElements = [parsedXml];
   }
 
-  for (const part of parts) {
+  console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    console.log(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
+
     // Parse part for tag name and optional attribute condition
     // Support tag names with dots (e.g., HubDef.LogDef, LogDef.FieldDefs)
     const attrMatch = part.match(/^([\w.]+)\[@(\w+)='([^']+)'\]$/);
@@ -830,12 +866,19 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
     const filterAttrName = attrMatch ? attrMatch[2] : null;
     const filterAttrValue = attrMatch ? attrMatch[3] : null;
 
+    console.log(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
+
     const nextElements: any[] = [];
 
     for (const element of currentElements) {
       if (typeof element === 'object' && element !== null) {
+        // Debug: Log available keys
+        const availableKeys = Object.keys(element).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
+        console.log(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
+
         // Check if this element has the tag we're looking for
         if (element[tagName]) {
+          console.log(`[DEBUG] Found key "${tagName}" in element`);
           const candidates = Array.isArray(element[tagName]) ? element[tagName] : [element[tagName]];
 
           for (const candidate of candidates) {
@@ -849,17 +892,21 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
 
             nextElements.push(candidate);
           }
+        } else {
+          console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
         }
       }
     }
 
     if (nextElements.length === 0) {
-      console.log(`[DEBUG] No elements found for part: ${part}`);
+      console.log(`[DEBUG] ❌ No elements found for part: "${part}"`);
+      console.log(`[DEBUG] Was searching for: "${tagName}" in ${currentElements.length} element(s)`);
+      console.log(`[DEBUG] Full XPath that failed: ${xpath}`);
       return [];
     }
 
     currentElements = nextElements;
-    console.log(`[DEBUG] Found ${currentElements.length} elements for part: ${part}`);
+    console.log(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
   }
 
   // Extract tag name and attributes from matched elements
@@ -930,9 +977,9 @@ function findLineNumbersForElements(
 /**
  * Finds all target lines for an XPath-like expression in the XML document
  * Uses fast-xml-parser for accurate XML parsing
- * Returns array of line numbers only
+ * Returns array of objects with line numbers, tag names, and attributes
  */
-function findAllXPathTargets(document: vscode.TextDocument, xpath: string): number[] {
+function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>}> {
   console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
 
   try {
@@ -954,7 +1001,12 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): numb
     const lineNumbers = findLineNumbersForElements(document, tagName, elements);
     console.log(`[DEBUG] Mapped to ${lineNumbers.length} line numbers`);
 
-    return lineNumbers;
+    // Combine line numbers with element data
+    return lineNumbers.map((line, index) => ({
+      line,
+      tagName: elements[index]?.tagName || tagName,
+      attributes: elements[index]?.attributes || {}
+    }));
   } catch (error) {
     console.error(`[ERROR] Failed to parse XML or find elements:`, error);
     return [];
@@ -967,7 +1019,7 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): numb
  */
 function findXPathTarget(document: vscode.TextDocument, xpath: string): number {
   const matches = findAllXPathTargets(document, xpath);
-  return matches.length > 0 ? matches[0] : -1;
+  return matches.length > 0 ? matches[0].line : -1;
 }
 
 /**
