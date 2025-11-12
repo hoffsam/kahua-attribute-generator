@@ -38,12 +38,18 @@ interface TokenNameDefinition {
   tokenReadPaths?: Record<string, TokenReadPath>;
 }
 
+interface InjectionPathConfig {
+  path: string;
+  displayAttribute?: string;
+}
+
 interface FragmentDefinition {
   id: string;
   name: string;
   type?: 'grouped' | 'table'; // Default is 'grouped'
   tokenReferences: string[];
   fragments: Record<string, string | Record<string, string | Record<string, string>>>;
+  injectionPaths?: Record<string, string | InjectionPathConfig>;
 }
 
 interface FragmentSet {
@@ -81,6 +87,13 @@ type OutputTarget =
  * Value: URI of the source XML file
  */
 const sourceXmlFileMap = new Map<string, vscode.Uri>();
+
+/**
+ * Map to track selected token values that affect injection
+ * Key: URI of snippet/template document
+ * Value: Map of token name to selected value
+ */
+const injectionAffectingTokens = new Map<string, Map<string, string>>();
 
 /**
  * Represents a parsed section from generated XML output
@@ -432,7 +445,14 @@ async function showOutputTargetQuickPick(currentFileUri?: vscode.Uri): Promise<O
  * Inserts XML content into a file with smart section-aware insertion or cursor-based insertion
  * Returns injection results for reporting
  */
-async function insertXmlIntoFile(uri: vscode.Uri, content: string, strategy?: InsertionStrategy, fragmentDefinition?: any): Promise<InjectionResult[]> {
+async function insertXmlIntoFile(
+  uri: vscode.Uri,
+  content: string,
+  strategy?: InsertionStrategy,
+  fragmentDefinition?: any,
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
+): Promise<InjectionResult[]> {
   const document = await vscode.workspace.openTextDocument(uri);
   const editor = await vscode.window.showTextDocument(document, {
     preserveFocus: false,
@@ -453,8 +473,38 @@ async function insertXmlIntoFile(uri: vscode.Uri, content: string, strategy?: In
   }
 
   // Smart insertion - get injection paths from the fragment definition
-  const injectionPaths: Record<string, string> = fragmentDefinition?.injectionPaths || {};
+  let injectionPaths: Record<string, string | InjectionPathConfig> = fragmentDefinition?.injectionPaths || {};
   const results: InjectionResult[] = [];
+
+  // Apply injection path templates based on selected token values
+  if (affectingTokens && affectingTokens.size > 0 && tokenDefinitions) {
+    const modifiedPaths: Record<string, string | InjectionPathConfig> = {};
+
+    for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
+      const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
+      const displayAttribute = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
+      let modifiedXPath = xpath;
+
+      // Check each token definition for injection path templates
+      for (const tokenDef of tokenDefinitions) {
+        if (tokenDef.tokenReadPaths) {
+          for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+            if (readPath.affectsInjection && readPath.injectionPathTemplate && affectingTokens.has(tokenName)) {
+              const tokenValue = affectingTokens.get(tokenName)!;
+              modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
+              console.log(`[DEBUG] Applied injection path template: ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+            }
+          }
+        }
+      }
+
+      modifiedPaths[sectionName] = typeof pathConfig === 'string'
+        ? modifiedXPath
+        : { path: modifiedXPath, displayAttribute };
+    }
+
+    injectionPaths = modifiedPaths;
+  }
 
   const generatedSections = parseGeneratedXmlSections(content);
   const allTargetSections = parseTargetXmlStructure(document, injectionPaths);
@@ -658,10 +708,14 @@ function findLastChildElement(document: vscode.TextDocument, openLine: number, c
  * Parses target XML file to find section tags where content can be inserted using configured injection paths
  * Creates multiple target sections when there are multiple matches for a path
  */
-function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: Record<string, string>): XmlTargetSection[] {
+function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: Record<string, string | InjectionPathConfig>): XmlTargetSection[] {
   const sections: XmlTargetSection[] = [];
 
-  for (const [sectionName, xpath] of Object.entries(injectionPaths)) {
+  for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
+    // Normalize to always have path and displayAttribute
+    const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
+    const displayAttribute = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
+
     const allTargetLines = findAllXPathTargets(document, xpath);
 
     // Deduplicate line numbers
@@ -672,12 +726,20 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
       const line = document.lineAt(targetLine);
       const text = line.text;
 
-      // Extract tag name from the line
-      const tagMatch = text.match(/<(\w+)/);
+      // Extract tag name from the line (support dots like HubDef.LogDef)
+      const tagMatch = text.match(/<([\w.]+)/);
       if (tagMatch) {
         const tagName = tagMatch[1];
         const indentation = text.match(/^(\s*)</)?.[1] || '';
         const isSelfClosing = text.includes('/>');
+
+        // Extract display attribute value for context
+        let context = `Line ${targetLine + 1}`;
+        const attrPattern = new RegExp(`${displayAttribute}\\s*=\\s*["']([^"']+)["']`);
+        const attrMatch = text.match(attrPattern);
+        if (attrMatch) {
+          context += ` (${displayAttribute}="${attrMatch[1]}")`;
+        }
 
         if (isSelfClosing) {
           sections.push({
@@ -687,7 +749,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
             indentation,
             isSelfClosing: true,
             lastChildLine: targetLine,
-            context: `Line ${targetLine + 1}`,
+            context,
             injectionPath: xpath
           });
         } else {
@@ -701,7 +763,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
             indentation,
             isSelfClosing: false,
             lastChildLine,
-            context: `Line ${targetLine + 1}`,
+            context,
             injectionPath: xpath
           });
         }
@@ -762,7 +824,8 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
 
   for (const part of parts) {
     // Parse part for tag name and optional attribute condition
-    const attrMatch = part.match(/^(\w+)\[@(\w+)='([^']+)'\]$/);
+    // Support tag names with dots (e.g., HubDef.LogDef, LogDef.FieldDefs)
+    const attrMatch = part.match(/^([\w.]+)\[@(\w+)='([^']+)'\]$/);
     const tagName = attrMatch ? attrMatch[1] : part;
     const filterAttrName = attrMatch ? attrMatch[2] : null;
     const filterAttrValue = attrMatch ? attrMatch[3] : null;
@@ -801,7 +864,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
 
   // Extract tag name and attributes from matched elements
   const lastPart = parts[parts.length - 1];
-  const tagName = lastPart.match(/^(\w+)/)?.[1] || lastPart;
+  const tagName = lastPart.match(/^([\w.]+)/)?.[1] || lastPart;
 
   return currentElements.map(element => {
     const attributes: Record<string, any> = {};
@@ -1210,7 +1273,7 @@ async function selectTargetsFromMultiple(
 /**
  * Checks if a section name is configured in the injection paths
  */
-function isSectionConfigured(sectionName: string, injectionPaths: Record<string, string>): boolean {
+function isSectionConfigured(sectionName: string, injectionPaths: Record<string, string | InjectionPathConfig>): boolean {
   // Extract key words from section name
   const genWords = sectionName
     .toLowerCase()
@@ -2232,6 +2295,21 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     // If we came from an XML file, remember it for later
     if (isCurrentFileXml) {
       sourceXmlFileMap.set(newDocument.uri.toString(), currentFileUri);
+
+      // Also store token values that affect injection
+      const affectingTokens = new Map<string, string>();
+      for (const tokenDef of tokenDefinitions) {
+        if (tokenDef.tokenReadPaths) {
+          for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+            if (readPath.affectsInjection && extractedValues.has(tokenName)) {
+              affectingTokens.set(tokenName, extractedValues.get(tokenName)!);
+            }
+          }
+        }
+      }
+      if (affectingTokens.size > 0) {
+        injectionAffectingTokens.set(newDocument.uri.toString(), affectingTokens);
+      }
     }
 
     const rowText = numberOfRows === 0
@@ -2349,8 +2427,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       const hasExtractedHeaderValues = headerTokens.some(token => extractedValues.has(token.name));
       if (hasExtractedHeaderValues) {
         const headerValues = headerTokens.map(token => {
-          const extractedValue = extractedValues.get(token.name);
-          return extractedValue || token.defaultValue || '';
+          return extractedValues.has(token.name) ? extractedValues.get(token.name) : '';
         });
         templateLines.push(headerValues.join(','));
       }
@@ -2361,8 +2438,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       const hasExtractedTableValues = tableTokens.some(token => extractedValues.has(token.name));
       if (hasExtractedTableValues) {
         const tableValues = tableTokens.map(token => {
-          const extractedValue = extractedValues.get(token.name);
-          return extractedValue || token.defaultValue || '';
+          return extractedValues.has(token.name) ? extractedValues.get(token.name) : '';
         });
         templateLines.push(tableValues.join(','));
       }
@@ -2388,6 +2464,21 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     // If we came from an XML file, remember it for later
     if (isCurrentFileXml && currentFileUri) {
       sourceXmlFileMap.set(newDocument.uri.toString(), currentFileUri);
+
+      // Also store token values that affect injection
+      const affectingTokens = new Map<string, string>();
+      for (const tokenDef of tokenDefinitions) {
+        if (tokenDef.tokenReadPaths) {
+          for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+            if (readPath.affectsInjection && extractedValues.has(tokenName)) {
+              affectingTokens.set(tokenName, extractedValues.get(tokenName)!);
+            }
+          }
+        }
+      }
+      if (affectingTokens.size > 0) {
+        injectionAffectingTokens.set(newDocument.uri.toString(), affectingTokens);
+      }
     }
 
     vscode.window.showInformationMessage(`Kahua: Token template opened in new editor for ${fragmentIds.join(', ')}`);
@@ -2770,10 +2861,20 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
       return;
     }
 
+    // Check if the current document has injection-affecting tokens stored
+    const affectingTokens = currentFileUri ? injectionAffectingTokens.get(currentFileUri.toString()) : undefined;
+
     // Handle selected output target
     switch (target.type) {
       case 'currentFile':
-        const currentFileResults = await insertXmlIntoFile(target.uri, generatedXml, 'smart', selectedFragmentDefs[0]);
+        const currentFileResults = await insertXmlIntoFile(
+          target.uri,
+          generatedXml,
+          'smart',
+          selectedFragmentDefs[0],
+          affectingTokens,
+          tokenDefinitions
+        );
         await openInjectionReport(currentFileResults, target.uri);
         vscode.window.showInformationMessage(
           `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
@@ -2781,7 +2882,14 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         break;
 
       case 'selectFile':
-        const selectFileResults = await insertXmlIntoFile(target.uri, generatedXml, 'smart', selectedFragmentDefs[0]);
+        const selectFileResults = await insertXmlIntoFile(
+          target.uri,
+          generatedXml,
+          'smart',
+          selectedFragmentDefs[0],
+          affectingTokens,
+          tokenDefinitions
+        );
         const fileName = getWorkspaceRelativePath(target.uri);
         await openInjectionReport(selectFileResults, target.uri);
         vscode.window.showInformationMessage(

@@ -461,6 +461,10 @@
                 },
                 "description": "Array of token name definition IDs to use for this fragment set"
               },
+              "injectionPaths": {
+                "type": "object",
+                "description": "XPath-like paths for smart injection. Can be string (xpath only) or object with {path, displayAttribute}. Example: \"Attributes\": \"EntityDefs/EntityDef/Attributes\" or \"Attributes\": {\"path\": \"EntityDefs/EntityDef/Attributes\", \"displayAttribute\": \"Name\"}. The displayAttribute (default: 'Name') shows in selection UI when multiple injection targets exist."
+              },
               "fragments": {
                 "type": "object",
                 "description": "Fragment templates with token replacement"
