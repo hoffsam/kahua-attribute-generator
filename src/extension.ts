@@ -498,9 +498,9 @@ async function insertXmlIntoFile(
               if (xpath.includes('EntityDef') || xpath === templateBasePath) {
                 const tokenValue = affectingTokens.get(tokenName)!;
                 modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
-                console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+                //console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
               } else {
-                console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
+                //console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
               }
             }
           }
@@ -523,7 +523,7 @@ async function insertXmlIntoFile(
   const seenLines = new Set<number>();
   const targetSections = allTargetSections.filter(section => {
     if (seenLines.has(section.openTagLine)) {
-      console.log(`[DEBUG] Skipping duplicate target section at line ${section.openTagLine + 1}`);
+      //console.log(`[DEBUG] Skipping duplicate target section at line ${section.openTagLine + 1}`);
       return false;
     }
     seenLines.add(section.openTagLine);
@@ -737,7 +737,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
       return true;
     });
 
-    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
+    //console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
 
     for (const target of uniqueTargets) {
       const line = document.lineAt(target.line);
@@ -810,9 +810,9 @@ function parseXmlDocument(document: vscode.TextDocument): any {
     const rootKey = Object.keys(parsed)[0];
     const rootElement = parsed[rootKey];
     const childKeys = Object.keys(rootElement).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
-    console.log(`[DEBUG] Child keys under "${rootKey}":`, childKeys.slice(0, 20));
+    //console.log(`[DEBUG] Child keys under "${rootKey}":`, childKeys.slice(0, 20));
     if (childKeys.length > 20) {
-      console.log(`[DEBUG] ... (${childKeys.length} total child keys)`);
+      //console.log(`[DEBUG] ... (${childKeys.length} total child keys)`);
     }
   }
 
@@ -824,12 +824,12 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Returns elements with their identifying attributes
  */
 function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>}> {
-  console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
-  console.log(`[DEBUG] XPath: ${xpath}`);
-  console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
+  //console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
+  //console.log(`[DEBUG] XPath: ${xpath}`);
+  //console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
 
   let parts = xpath.split('/').filter(p => p);
-  console.log(`[DEBUG] XPath parts:`, parts);
+  //console.log(`[DEBUG] XPath parts:`, parts);
 
   // Start from the actual document root (skip the wrapper object)
   // fast-xml-parser wraps everything in the root element
@@ -841,23 +841,23 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
     // If the first part of xpath matches the root element, skip it
     const rootElement = parsedXml[rootKeys[0]];
     if (rootKeys[0] === parts[0]) {
-      console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
+      //console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
       currentElements = [rootElement];
       parts = parts.slice(1); // Remove the matched root element from parts
-      console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
+      //console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
     } else {
-      console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
+      //console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
       currentElements = [rootElement];
     }
   } else {
     currentElements = [parsedXml];
   }
 
-  console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
+  //console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    console.log(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
+    //console.log(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
 
     // Parse part for tag name and optional attribute condition
     // Support tag names with dots (e.g., HubDef.LogDef, LogDef.FieldDefs)
@@ -866,7 +866,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
     const filterAttrName = attrMatch ? attrMatch[2] : null;
     const filterAttrValue = attrMatch ? attrMatch[3] : null;
 
-    console.log(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
+    //console.log(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
 
     const nextElements: any[] = [];
 
@@ -874,11 +874,11 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
       if (typeof element === 'object' && element !== null) {
         // Debug: Log available keys
         const availableKeys = Object.keys(element).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
-        console.log(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
+        //console.log(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
 
         // Check if this element has the tag we're looking for
         if (element[tagName]) {
-          console.log(`[DEBUG] Found key "${tagName}" in element`);
+          //console.log(`[DEBUG] Found key "${tagName}" in element`);
           const candidates = Array.isArray(element[tagName]) ? element[tagName] : [element[tagName]];
 
           for (const candidate of candidates) {
@@ -893,20 +893,20 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
             nextElements.push(candidate);
           }
         } else {
-          console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
+          //console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
         }
       }
     }
 
     if (nextElements.length === 0) {
-      console.log(`[DEBUG] ❌ No elements found for part: "${part}"`);
-      console.log(`[DEBUG] Was searching for: "${tagName}" in ${currentElements.length} element(s)`);
-      console.log(`[DEBUG] Full XPath that failed: ${xpath}`);
+      //console.log(`[DEBUG] ❌ No elements found for part: "${part}"`);
+      //console.log(`[DEBUG] Was searching for: "${tagName}" in ${currentElements.length} element(s)`);
+      //console.log(`[DEBUG] Full XPath that failed: ${xpath}`);
       return [];
     }
 
     currentElements = nextElements;
-    console.log(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
+    //console.log(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
   }
 
   // Extract tag name and attributes from matched elements
@@ -980,7 +980,7 @@ function findLineNumbersForElements(
  * Returns array of objects with line numbers, tag names, and attributes
  */
 function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>}> {
-  console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
+  //console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
 
   try {
     // Parse XML document
@@ -988,7 +988,7 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
 
     // Find elements matching XPath
     const elements = findElementsByXPath(parsedXml, xpath);
-    console.log(`[DEBUG] Found ${elements.length} elements via XPath`);
+    //console.log(`[DEBUG] Found ${elements.length} elements via XPath`);
 
     if (elements.length === 0) {
       return [];
@@ -999,7 +999,7 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
 
     // Find line numbers for these elements
     const lineNumbers = findLineNumbersForElements(document, tagName, elements);
-    console.log(`[DEBUG] Mapped to ${lineNumbers.length} line numbers`);
+    //console.log(`[DEBUG] Mapped to ${lineNumbers.length} line numbers`);
 
     // Combine line numbers with element data
     return lineNumbers.map((line, index) => ({
@@ -1042,11 +1042,11 @@ function extractAttributeValue(document: vscode.TextDocument, xpath: string): st
     // Special case: if elementPath is the root element name, get attributes from root
     const rootKeys = Object.keys(parsedXml);
     if (rootKeys.length > 0 && rootKeys[0] === elementPath) {
-      console.log(`[DEBUG] Extracting attribute from root element: ${rootKeys[0]}`);
+      //console.log(`[DEBUG] Extracting attribute from root element: ${rootKeys[0]}`);
       const rootElement = parsedXml[rootKeys[0]];
       const attrKey = `@_${attributeName}`;
       const value = rootElement[attrKey];
-      console.log(`[DEBUG] Root element attribute ${attributeName} = ${value}`);
+      //console.log(`[DEBUG] Root element attribute ${attributeName} = ${value}`);
       return value;
     }
 
@@ -1095,7 +1095,7 @@ function extractSelectableValues(
     const parsedXml = parseXmlDocument(document);
     const elements = findElementsByXPath(parsedXml, xpath);
 
-    console.log(`[DEBUG] extractSelectableValues found ${elements.length} elements`);
+    //console.log(`[DEBUG] extractSelectableValues found ${elements.length} elements`);
 
     return elements
       .map(element => {
@@ -1172,14 +1172,14 @@ async function readTokenValuesFromXml(
 
       case 'selection':
         if (!readPath.attribute) {
-          console.log(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
+          //console.log(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
           continue;
         }
-        console.log(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
+        //console.log(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
         const options = extractSelectableValues(document, readPath.path, readPath.attribute);
-        console.log(`[DEBUG] Found ${options.length} options:`, options);
+        //console.log(`[DEBUG] Found ${options.length} options:`, options);
         value = await showValueSelectionPick(tokenName, options);
-        console.log(`[DEBUG] User selected: ${value}`);
+        //console.log(`[DEBUG] User selected: ${value}`);
         break;
     }
 
@@ -1194,7 +1194,7 @@ async function readTokenValuesFromXml(
 /**
  * Generates a report text from injection results
  */
-function generateInjectionReport(results: InjectionResult[], targetFileName: string): string {
+function generateInjectionReport(results: InjectionResult[], targetFileName: string, generationDetails?: string): string {
   const injected = results.filter(r => r.status === 'injected');
   const skipped = results.filter(r => r.status === 'skipped');
 
@@ -1242,6 +1242,13 @@ function generateInjectionReport(results: InjectionResult[], targetFileName: str
     report += `\n`;
   }
 
+  if (generationDetails) {
+    report += `Generation Details:\n`;
+    report += `${'-'.repeat(70)}\n`;
+    report += generationDetails;
+    report += `\n\n`;
+  }
+
   report += `${'='.repeat(70)}\n`;
   report += `End of Report\n`;
 
@@ -1251,13 +1258,13 @@ function generateInjectionReport(results: InjectionResult[], targetFileName: str
 /**
  * Opens a new editor tab with the injection report
  */
-async function openInjectionReport(results: InjectionResult[], targetFileUri: vscode.Uri): Promise<void> {
-  if (results.length === 0) {
+async function openInjectionReport(results: InjectionResult[], targetFileUri: vscode.Uri, generationDetails?: string): Promise<void> {
+  if (results.length === 0 && generationDetails == undefined) {
     return;
   }
 
   const targetFileName = getWorkspaceRelativePath(targetFileUri);
-  const reportText = generateInjectionReport(results, targetFileName);
+  const reportText = generateInjectionReport(results, targetFileName, generationDetails);
 
   const reportDocument = await vscode.workspace.openTextDocument({
     content: reportText,
@@ -2207,7 +2214,7 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     const sourceFileUri = editor.document.uri;
     const isSourceXmlFile = sourceFileUri.fsPath.toLowerCase().endsWith('.xml');
 
-    console.log(`[DEBUG] generateSnippetForFragments: isSourceXmlFile=${isSourceXmlFile}, file=${sourceFileUri.fsPath}`);
+    //console.log(`[DEBUG] generateSnippetForFragments: isSourceXmlFile=${isSourceXmlFile}, file=${sourceFileUri.fsPath}`);
 
     if (isSourceXmlFile) {
       // Collect all tokenReadPaths from referenced token definitions
@@ -2215,20 +2222,20 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
         allTokenReferences.has(def.id)
       );
 
-      console.log(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
+      //console.log(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
 
       for (const tokenDef of referencedTokenDefs) {
-        console.log(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
+        //console.log(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
         if (tokenDef.tokenReadPaths) {
-          console.log(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
+          //console.log(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
           const values = await readTokenValuesFromXml(editor.document, tokenDef.tokenReadPaths);
-          console.log(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
+          //console.log(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
           values.forEach((value, key) => extractedValues.set(key, value));
         }
       }
     }
 
-    console.log(`[DEBUG] Total extracted values: ${extractedValues.size}`);
+    //console.log(`[DEBUG] Total extracted values: ${extractedValues.size}`);
 
     // Separate header and table token definitions
     const snippetLines: string[] = [];
@@ -2425,7 +2432,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     const sourceDocUri = currentEditor?.document.uri;
     const isSourceDocXml = sourceDocUri && sourceDocUri.fsPath.toLowerCase().endsWith('.xml');
 
-    console.log(`[DEBUG] generateTemplateForFragments: isSourceDocXml=${isSourceDocXml}, file=${sourceDocUri?.fsPath}`);
+    //console.log(`[DEBUG] generateTemplateForFragments: isSourceDocXml=${isSourceDocXml}, file=${sourceDocUri?.fsPath}`);
 
     if (isSourceDocXml && currentEditor) {
       // Collect all tokenReadPaths from referenced token definitions
@@ -2433,20 +2440,20 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
         allTokenReferences.has(def.id)
       );
 
-      console.log(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
+      //console.log(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
 
       for (const tokenDef of referencedTokenDefs) {
-        console.log(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
+        //console.log(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
         if (tokenDef.tokenReadPaths) {
-          console.log(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
+          //console.log(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
           const values = await readTokenValuesFromXml(currentEditor.document, tokenDef.tokenReadPaths);
-          console.log(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
+          //console.log(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
           values.forEach((value, key) => extractedValues.set(key, value));
         }
       }
     }
 
-    console.log(`[DEBUG] Total extracted values: ${extractedValues.size}`);
+    //console.log(`[DEBUG] Total extracted values: ${extractedValues.size}`);
 
     // Build template text showing all token definitions
     const templateLines: string[] = [];
@@ -2927,7 +2934,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
           affectingTokens,
           tokenDefinitions
         );
-        await openInjectionReport(currentFileResults, target.uri);
+        await openInjectionReport(currentFileResults, target.uri, generatedXml);
         vscode.window.showInformationMessage(
           `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
         );
@@ -2943,7 +2950,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
           tokenDefinitions
         );
         const fileName = getWorkspaceRelativePath(target.uri);
-        await openInjectionReport(selectFileResults, target.uri);
+        await openInjectionReport(selectFileResults, target.uri, generatedXml);
         vscode.window.showInformationMessage(
           `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
         );
