@@ -1334,13 +1334,19 @@ async function selectTargetsFromMultiple(
     return targets;
   }
 
-  const items = targets.map((target, index) => ({
-    label: `Line ${target.openTagLine + 1}`,
-    description: target.context && target.context !== `Line ${target.openTagLine + 1}` ? target.context : undefined,
-    detail: target.injectionPath,
-    target: target,
-    picked: false
-  }));
+  const items = targets.map((target, index) => {
+    const lineInfo = `Line ${target.openTagLine + 1}`;
+    const label = target.hubDefName ? `${target.hubDefName} (${lineInfo})` : lineInfo;
+    const description = target.context && target.context !== lineInfo ? target.context : undefined;
+
+    return {
+      label,
+      description,
+      detail: target.injectionPath,
+      target: target,
+      picked: false
+    };
+  });
 
   items.push({
     label: '$(check-all) Select All',
