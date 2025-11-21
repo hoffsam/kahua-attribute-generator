@@ -1,11 +1,11 @@
+# Build artifacts
+out/test/**
+*.vsix
+
 # Source files
 src/**
 *.ts
 !out/**/*.d.ts
-
-# Test files
-out/test/**
-.vscode-test/**
 
 # Development files
 .vscode/**
@@ -17,9 +17,7 @@ tsconfig.json
 tslint.json
 .eslintrc.json
 .prettierrc
-
-# Build artifacts
-*.vsix
+Untitled-1.md
 
 # Git
 .git
@@ -43,3 +41,6 @@ CLAUDE.md
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.xml
+*.zip
+untitled-1.md

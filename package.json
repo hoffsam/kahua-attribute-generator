@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "3.0.5",
+  "version": "3.2.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -12,27 +12,30 @@
   ],
   "main": "./out/extension.js",
   "scripts": {
-    "prebuild": "npm version patch --no-git-tag-version",
-    "compile": "tsc -p .",
-    "watch": "tsc -watch -p .",
-    "package": "vsce package",
-    "build": "npm run compile && vsce package",
-    "build-clean": "rimraf out && npm run compile && vsce package",
+    "vscode:prepublish": "npm run esbuild-prod",
+    "esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "esbuild-prod": "npm run esbuild-base -- --minify --sourcemap=inline",
+    "esbuild-watch": "npm run esbuild-base -- --sourcemap=inline --watch",
+    "compile": "tsc -p . --noEmit",
+    "watch": "tsc -watch -p . --noEmit",
+    "package": "vsce package --no-dependencies",
+    "build": "npm run esbuild-prod && npm run package",
+    "pretest": "npm run compile-tests",
     "compile-tests": "tsc -p . --outDir out --module commonjs",
-    "test": "npm run compile-tests && node ./out/test/runTest.js",
-    "pretest": "npm run compile-tests"
+    "test": "npm run compile-tests && node ./out/test/runTest.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.19.122",
     "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.27.0",
     "glob": "^11.0.3",
     "mocha": "^10.8.2",
     "typescript": "^5.4.0"
   },
   "activationEvents": [
-    "*"
+    "onLanguage:xml"
   ],
   "contributes": {
     "menus": {
@@ -463,7 +466,7 @@
               },
               "injectionPaths": {
                 "type": "object",
-                "description": "XPath-like paths for smart injection. Can be string (xpath only) or object with {path, displayAttribute}. Example: \"Attributes\": \"EntityDefs/EntityDef/Attributes\" or \"Attributes\": {\"path\": \"EntityDefs/EntityDef/Attributes\", \"displayAttribute\": \"Name\"}. The displayAttribute (default: 'Name') shows in selection UI when multiple injection targets exist."
+                "description": "XPath-like paths for smart injection. Can be string (xpath only) or object with {path, displayAttribute}. The displayAttribute can be a string or array of strings (tries each in order until a value is found). Falls back to 'Name' if not specified, then to line number if no attributes have values. Examples: \"Attributes\": \"EntityDefs/EntityDef/Attributes\", \"Attributes\": {\"path\": \"EntityDefs/EntityDef/Attributes\", \"displayAttribute\": \"Name\"}, \"HubDefs\": {\"path\": \"App.HubDefs/HubDef\", \"displayAttribute\": [\"Label\", \"Name\"]}"
               },
               "fragments": {
                 "type": "object",

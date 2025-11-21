@@ -40,7 +40,7 @@ interface TokenNameDefinition {
 
 interface InjectionPathConfig {
   path: string;
-  displayAttribute?: string;
+  displayAttribute?: string | string[];
 }
 
 interface FragmentDefinition {
@@ -77,6 +77,7 @@ interface ParsedToken {
  */
 type OutputTarget =
   | { type: 'currentFile'; uri: vscode.Uri }
+  | { type: 'sourceFile'; uri: vscode.Uri }  // Associated XML file from snippet/template generation
   | { type: 'selectFile'; uri: vscode.Uri }
   | { type: 'newEditor' }
   | { type: 'clipboard' };
@@ -397,7 +398,7 @@ async function showOutputTargetQuickPick(currentFileUri?: vscode.Uri): Promise<O
 
   // Handle selection
   if (selected.label.includes('Source XML File') && targetXmlFile) {
-    return { type: 'currentFile', uri: targetXmlFile };
+    return { type: 'sourceFile', uri: targetXmlFile };
   } else if (selected.label.includes('Current File') && currentFileUri) {
     return { type: 'currentFile', uri: currentFileUri };
   } else if (selected.label.includes('Select XML File')) {
@@ -482,7 +483,7 @@ async function insertXmlIntoFile(
 
     for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
       const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
-      const displayAttribute = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
+      const displayAttribute = typeof pathConfig === 'string' ? undefined : pathConfig.displayAttribute;
       let modifiedXPath = xpath;
 
       // Check each token definition for injection path templates
@@ -498,9 +499,9 @@ async function insertXmlIntoFile(
               if (xpath.includes('EntityDef') || xpath === templateBasePath) {
                 const tokenValue = affectingTokens.get(tokenName)!;
                 modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
-                //console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+                console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
               } else {
-                //console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
+                console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
               }
             }
           }
@@ -509,7 +510,7 @@ async function insertXmlIntoFile(
 
       modifiedPaths[sectionName] = typeof pathConfig === 'string'
         ? modifiedXPath
-        : { path: modifiedXPath, displayAttribute };
+        : { path: modifiedXPath, ...(displayAttribute && { displayAttribute }) };
     }
 
     injectionPaths = modifiedPaths;
@@ -532,13 +533,23 @@ async function insertXmlIntoFile(
 
   const matches = matchSectionsToTargets(generatedSections, targetSections);
 
-  // Prompt user for strategy
-  const insertionStrategy = await showInsertionStrategyPick(
-    Array.from(matches.values()).some(m => m.length > 0)
-  );
+  // Determine insertion strategy
+  let insertionStrategy: InsertionStrategy;
 
-  if (!insertionStrategy) {
-    return []; // User cancelled
+  if (strategy === 'smart') {
+    // Strategy already determined to be smart (e.g., source file or selected file)
+    insertionStrategy = 'smart';
+  } else {
+    // Prompt user for strategy (e.g., current file where cursor position is an option)
+    const selectedStrategy = await showInsertionStrategyPick(
+      Array.from(matches.values()).some(m => m.length > 0)
+    );
+
+    if (!selectedStrategy) {
+      return []; // User cancelled
+    }
+
+    insertionStrategy = selectedStrategy;
   }
 
   if (insertionStrategy === 'cursor') {
@@ -721,9 +732,10 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
   const sections: XmlTargetSection[] = [];
 
   for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
-    // Normalize to always have path and displayAttribute
+    // Normalize to always have path and displayAttribute(s)
     const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
-    const displayAttribute = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
+    const displayAttrConfig = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
+    const displayAttributes = Array.isArray(displayAttrConfig) ? displayAttrConfig : [displayAttrConfig];
 
     const allTargets = findAllXPathTargets(document, xpath);
 
@@ -737,7 +749,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
       return true;
     });
 
-    //console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
+    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
 
     for (const target of uniqueTargets) {
       const line = document.lineAt(target.line);
@@ -748,11 +760,24 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
       const indentation = text.match(/^(\s*)</)?.[1] || '';
       const isSelfClosing = text.includes('/>');
 
-      // Extract display attribute value from parsed attributes
+      // Try each display attribute in order until we find one with a value
       let context = `Line ${target.line + 1}`;
-      const displayValue = target.attributes[displayAttribute];
-      if (displayValue) {
-        context += ` (${displayAttribute}="${displayValue}")`;
+      let foundAttribute = false;
+      for (const attr of displayAttributes) {
+        const displayValue = target.attributes[attr];
+        if (displayValue) {
+          context += ` (${attr}="${displayValue}")`;
+          foundAttribute = true;
+          break;
+        }
+      }
+
+      // If no configured attributes had values, try "Name" as a default fallback
+      if (!foundAttribute && !displayAttributes.includes('Name')) {
+        const nameValue = target.attributes['Name'];
+        if (nameValue) {
+          context += ` (Name="${nameValue}")`;
+        }
       }
 
       if (isSelfClosing) {
@@ -2926,10 +2951,11 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     // Handle selected output target
     switch (target.type) {
       case 'currentFile':
+        // For current file, let user choose between smart and cursor insertion
         const currentFileResults = await insertXmlIntoFile(
           target.uri,
           generatedXml,
-          'smart',
+          undefined, // Will prompt user for strategy
           selectedFragmentDefs[0],
           affectingTokens,
           tokenDefinitions
@@ -2940,11 +2966,29 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
         );
         break;
 
+      case 'sourceFile':
+        // For source XML file (from snippet/template), always use smart injection
+        const sourceFileResults = await insertXmlIntoFile(
+          target.uri,
+          generatedXml,
+          'smart', // Auto-use smart injection
+          selectedFragmentDefs[0],
+          affectingTokens,
+          tokenDefinitions
+        );
+        const sourceFileName = getWorkspaceRelativePath(target.uri);
+        await openInjectionReport(sourceFileResults, target.uri, generatedXml);
+        vscode.window.showInformationMessage(
+          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
+        );
+        break;
+
       case 'selectFile':
+        // For selected file, always use smart injection
         const selectFileResults = await insertXmlIntoFile(
           target.uri,
           generatedXml,
-          'smart',
+          'smart', // Auto-use smart injection
           selectedFragmentDefs[0],
           affectingTokens,
           tokenDefinitions
