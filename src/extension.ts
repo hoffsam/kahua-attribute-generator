@@ -111,6 +111,8 @@ interface XmlSection {
  */
 interface XmlTargetSection {
   tagName: string;              // e.g., "Attributes", "Labels"
+  xmlNodeName: string;          // The actual XML tag name, e.g., "Attribute", "Label"
+
   openTagLine: number;          // Line number of opening tag
   closeTagLine: number;         // Line number of closing tag
   indentation: string;          // Whitespace prefix for indentation
@@ -118,6 +120,8 @@ interface XmlTargetSection {
   lastChildLine: number;        // Line number of last child element
   context?: string;             // Context info for disambiguation (e.g., Name="Invoice")
   injectionPath?: string;       // The injection path that found this section
+  attributes?: Record<string, any>; // Attributes of the element
+  hubDefName?: string;          // Name of parent HubDef if in path
 }
 
 /**
@@ -779,17 +783,25 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
           context += ` (Name="${nameValue}")`;
         }
       }
+      
+      let finalXpath = xpath;
+      if (target.hubDefName) {
+        finalXpath = xpath.replace('/HubDef/', `/HubDef (${target.hubDefName})/`);
+      }
 
       if (isSelfClosing) {
         sections.push({
           tagName: sectionName,
+          xmlNodeName: tagName,
           openTagLine: target.line,
           closeTagLine: target.line,
           indentation,
           isSelfClosing: true,
           lastChildLine: target.line,
           context,
-          injectionPath: xpath
+          injectionPath: finalXpath,
+          attributes: target.attributes,
+          hubDefName: target.hubDefName
         });
       } else {
         const closeTagLine = findClosingTag(document, tagName, target.line);
@@ -797,13 +809,16 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
 
         sections.push({
           tagName: sectionName,
+          xmlNodeName: tagName,
           openTagLine: target.line,
           closeTagLine,
           indentation,
           isSelfClosing: false,
           lastChildLine,
           context,
-          injectionPath: xpath
+          injectionPath: finalXpath,
+          attributes: target.attributes,
+          hubDefName: target.hubDefName
         });
       }
     }
@@ -848,44 +863,43 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Traverse parsed XML object to find elements matching XPath
  * Returns elements with their identifying attributes
  */
-function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>}> {
+function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>, hubDefName?: string}> {
   //console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
   //console.log(`[DEBUG] XPath: ${xpath}`);
   //console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
 
+  type TraversalResult = {
+    element: any;
+    hubDefName?: string;
+  };
+  
   let parts = xpath.split('/').filter(p => p);
   //console.log(`[DEBUG] XPath parts:`, parts);
 
-  // Start from the actual document root (skip the wrapper object)
-  // fast-xml-parser wraps everything in the root element
-  let currentElements: any[] = [];
-
-  // Find the actual root element (usually the first key in parsedXml)
+  let currentElements: TraversalResult[] = [];
+  
   const rootKeys = Object.keys(parsedXml);
   if (rootKeys.length > 0) {
-    // If the first part of xpath matches the root element, skip it
     const rootElement = parsedXml[rootKeys[0]];
     if (rootKeys[0] === parts[0]) {
       //console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
-      currentElements = [rootElement];
-      parts = parts.slice(1); // Remove the matched root element from parts
+      currentElements = [{ element: rootElement }];
+      parts = parts.slice(1);
       //console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
     } else {
       //console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
-      currentElements = [rootElement];
+      currentElements = [{ element: rootElement }];
     }
   } else {
-    currentElements = [parsedXml];
+    currentElements = [{element: parsedXml}];
   }
 
   //console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
-
+  
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     //console.log(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
-
-    // Parse part for tag name and optional attribute condition
-    // Support tag names with dots (e.g., HubDef.LogDef, LogDef.FieldDefs)
+    
     const attrMatch = part.match(/^([\w.]+)\[@(\w+)='([^']+)'\]$/);
     const tagName = attrMatch ? attrMatch[1] : part;
     const filterAttrName = attrMatch ? attrMatch[2] : null;
@@ -893,21 +907,19 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
 
     //console.log(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
 
-    const nextElements: any[] = [];
+    const nextElements: TraversalResult[] = [];
 
-    for (const element of currentElements) {
+    for (const current of currentElements) {
+      const element = current.element;
       if (typeof element === 'object' && element !== null) {
-        // Debug: Log available keys
         const availableKeys = Object.keys(element).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
         //console.log(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
 
-        // Check if this element has the tag we're looking for
         if (element[tagName]) {
           //console.log(`[DEBUG] Found key "${tagName}" in element`);
           const candidates = Array.isArray(element[tagName]) ? element[tagName] : [element[tagName]];
 
           for (const candidate of candidates) {
-            // Apply attribute filter if specified
             if (filterAttrName && filterAttrValue) {
               const attrKey = `@_${filterAttrName}`;
               if (candidate[attrKey] !== filterAttrValue) {
@@ -915,7 +927,12 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
               }
             }
 
-            nextElements.push(candidate);
+            let newHubDefName = current.hubDefName;
+            if (tagName === 'HubDef') {
+              newHubDefName = candidate['@_Name'] !== undefined ? candidate['@_Name'] : current.hubDefName;
+            }
+            
+            nextElements.push({ element: candidate, hubDefName: newHubDefName });
           }
         } else {
           //console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
@@ -934,22 +951,20 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
     //console.log(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
   }
 
-  // Extract tag name and attributes from matched elements
   const lastPart = parts[parts.length - 1];
   const tagName = lastPart.match(/^([\w.]+)/)?.[1] || lastPart;
 
-  return currentElements.map(element => {
+  return currentElements.map(res => {
     const attributes: Record<string, any> = {};
 
-    // Extract all attributes (prefixed with @_)
-    for (const key in element) {
+    for (const key in res.element) {
       if (key.startsWith('@_')) {
         const attrName = key.substring(2);
-        attributes[attrName] = element[key];
+        attributes[attrName] = res.element[key];
       }
     }
 
-    return { tagName, attributes };
+    return { tagName, attributes, hubDefName: res.hubDefName };
   });
 }
 
@@ -1004,7 +1019,7 @@ function findLineNumbersForElements(
  * Uses fast-xml-parser for accurate XML parsing
  * Returns array of objects with line numbers, tag names, and attributes
  */
-function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>}> {
+function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>, hubDefName?: string}> {
   //console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
 
   try {
@@ -1030,7 +1045,8 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
     return lineNumbers.map((line, index) => ({
       line,
       tagName: elements[index]?.tagName || tagName,
-      attributes: elements[index]?.attributes || {}
+      attributes: elements[index]?.attributes || {},
+      hubDefName: elements[index]?.hubDefName
     }));
   } catch (error) {
     console.error(`[ERROR] Failed to parse XML or find elements:`, error);
