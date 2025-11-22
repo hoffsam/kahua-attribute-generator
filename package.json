@@ -555,7 +555,8 @@
                 }
               },
               "default": {
-                "Table": ["EntityDefName", "Name"]
+                "Table": ["EntityDefName", "Name"],
+                "ViewDef": ["DisplayName", "Name"]
               },
               "description": "Element-specific overrides for the order of attributes to check for an element's display name. Key is the element tag name, value is an array of attribute names in preferred order."
             }
