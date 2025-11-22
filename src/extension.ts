@@ -898,7 +898,11 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Returns elements with their identifying attributes
  */
 function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
-  const config = getKahuaConfig().get<ElementDisplayConfig>('kahua.elementDisplayAttributes', { defaultOrder: ["Name", "DisplayName", "Id"], exclusions: ["App"], overrides: {} });
+  let config = getKahuaConfig().get<ElementDisplayConfig>('kahua.elementDisplayAttributes');
+// Provide a fallback if configuration is not loaded correctly
+if (!config) {
+  config = { defaultOrder: ["Name", "DisplayName", "Id"], exclusions: ["App"], overrides: {} };
+}
 
   type TraversalResult = {
     element: any;
