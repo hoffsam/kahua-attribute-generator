@@ -121,7 +121,8 @@ interface XmlTargetSection {
   context?: string;             // Context info for disambiguation (e.g., Name="Invoice")
   injectionPath?: string;       // The injection path that found this section
   attributes?: Record<string, any>; // Attributes of the element
-  hubDefName?: string;          // Name of parent HubDef if in path
+  nameAttributeValue?: string;  // Value of the 'Name' attribute if present for this element
+  enrichedPath: string;         // The full XPath with element names included
 }
 
 /**
@@ -784,10 +785,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
         }
       }
       
-      let finalXpath = xpath;
-      if (target.hubDefName) {
-        finalXpath = xpath.replace('/HubDef/', `/HubDef (${target.hubDefName})/`);
-      }
+      let finalXpath = target.enrichedPath; // Use the pre-calculated enriched path
 
       if (isSelfClosing) {
         sections.push({
@@ -797,11 +795,12 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
           closeTagLine: target.line,
           indentation,
           isSelfClosing: true,
-          lastChildLine: target.line,
+          lastChildLine: target.line, // For self-closing, lastChildLine is the same as openTagLine
           context,
-          injectionPath: finalXpath,
+          injectionPath: target.enrichedPath,
           attributes: target.attributes,
-          hubDefName: target.hubDefName
+          nameAttributeValue: target.nameAttributeValue,
+          enrichedPath: target.enrichedPath
         });
       } else {
         const closeTagLine = findClosingTag(document, tagName, target.line);
@@ -814,11 +813,12 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
           closeTagLine,
           indentation,
           isSelfClosing: false,
-          lastChildLine,
+          lastChildLine: lastChildLine, // Use the locally calculated lastChildLine
           context,
-          injectionPath: finalXpath,
+          injectionPath: target.enrichedPath,
           attributes: target.attributes,
-          hubDefName: target.hubDefName
+          nameAttributeValue: target.nameAttributeValue,
+          enrichedPath: target.enrichedPath
         });
       }
     }
@@ -863,14 +863,15 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Traverse parsed XML object to find elements matching XPath
  * Returns elements with their identifying attributes
  */
-function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>, hubDefName?: string}> {
+function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
   //console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
   //console.log(`[DEBUG] XPath: ${xpath}`);
   //console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
 
   type TraversalResult = {
     element: any;
-    hubDefName?: string;
+    nameAttributeValue?: string; // Generic property for the 'Name' attribute of any element
+    currentEnrichedPath: string; // The XPath string accumulated so far with Name attributes
   };
   
   let parts = xpath.split('/').filter(p => p);
@@ -881,17 +882,21 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
   const rootKeys = Object.keys(parsedXml);
   if (rootKeys.length > 0) {
     const rootElement = parsedXml[rootKeys[0]];
+    // Also capture nameAttributeValue for the root element if it has one
+    const rootNameAttr = rootElement['@_Name'];
+    const rootEnrichedPathSegment = rootNameAttr ? `${rootKeys[0]} (${rootNameAttr})` : rootKeys[0];
+
     if (rootKeys[0] === parts[0]) {
       //console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
-      currentElements = [{ element: rootElement }];
+      currentElements = [{ element: rootElement, nameAttributeValue: rootNameAttr, currentEnrichedPath: `/${rootEnrichedPathSegment}` }];
       parts = parts.slice(1);
       //console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
     } else {
       //console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
-      currentElements = [{ element: rootElement }];
+      currentElements = [{ element: rootElement, nameAttributeValue: rootNameAttr, currentEnrichedPath: `/${rootEnrichedPathSegment}` }];
     }
   } else {
-    currentElements = [{element: parsedXml}];
+    currentElements = [{element: parsedXml, currentEnrichedPath: ''}];
   }
 
   //console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
@@ -927,12 +932,15 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
               }
             }
 
-            let newHubDefName = current.hubDefName;
-            if (tagName === 'HubDef') {
-              newHubDefName = candidate['@_Name'] !== undefined ? candidate['@_Name'] : current.hubDefName;
-            }
+            // Capture the 'Name' attribute value if it exists for the current candidate element
+            const nameAttrValue = candidate['@_Name'];
+            const enrichedPathSegment = nameAttrValue ? `${tagName} (${nameAttrValue})` : tagName;
             
-            nextElements.push({ element: candidate, hubDefName: newHubDefName });
+            nextElements.push({ 
+              element: candidate, 
+              nameAttributeValue: nameAttrValue, 
+              currentEnrichedPath: `${current.currentEnrichedPath}/${enrichedPathSegment}` 
+            });
           }
         } else {
           //console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
@@ -964,7 +972,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
       }
     }
 
-    return { tagName, attributes, hubDefName: res.hubDefName };
+    return { tagName, attributes, nameAttributeValue: res.nameAttributeValue, enrichedPath: res.currentEnrichedPath };
   });
 }
 
@@ -1019,7 +1027,7 @@ function findLineNumbersForElements(
  * Uses fast-xml-parser for accurate XML parsing
  * Returns array of objects with line numbers, tag names, and attributes
  */
-function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>, hubDefName?: string}> {
+function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
   //console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
 
   try {
@@ -1046,7 +1054,8 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
       line,
       tagName: elements[index]?.tagName || tagName,
       attributes: elements[index]?.attributes || {},
-      hubDefName: elements[index]?.hubDefName
+      nameAttributeValue: elements[index]?.nameAttributeValue,
+      enrichedPath: elements[index]?.enrichedPath || ''
     }));
   } catch (error) {
     console.error(`[ERROR] Failed to parse XML or find elements:`, error);
@@ -1336,7 +1345,7 @@ async function selectTargetsFromMultiple(
 
   const items = targets.map((target, index) => {
     const lineInfo = `Line ${target.openTagLine + 1}`;
-    const label = target.hubDefName ? `${target.hubDefName} (${lineInfo})` : lineInfo;
+    const label = target.nameAttributeValue ? `${target.nameAttributeValue} (${lineInfo})` : lineInfo;
     const description = target.context && target.context !== lineInfo ? target.context : undefined;
 
     return {
