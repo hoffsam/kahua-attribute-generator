@@ -172,6 +172,7 @@ function getElementDisplayName(
 
   // Find the first attribute with a value
   for (const attrName of attributeOrder) {
+    console.log(`[DEBUG] getElementDisplayName: Checking attr: ${attrName}, Value: ${attributes[attrName]}`);
     if (attributes[attrName]) {
       return { displayName: attributes[attrName], isExcluded: false };
     }
