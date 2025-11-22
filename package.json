@@ -525,6 +525,42 @@
             ]
           },
           "description": "Context menu options that combine multiple fragment definitions"
+        },
+        "kahua.elementDisplayAttributes": {
+          "type": "object",
+          "description": "Configuration for how element names are displayed in generated XPath paths and quick pick labels.",
+          "properties": {
+            "defaultOrder": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": ["Name", "DisplayName", "Id"],
+              "description": "Default order of attributes to check for an element's display name if no element-specific override is found."
+            },
+            "exclusions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": ["App"],
+              "description": "List of element tag names for which the name attribute should be excluded from display in the XPath path."
+            },
+            "overrides": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "default": {
+                "Table": ["EntityDefName", "Name"],
+                "ViewDef": ["DisplayName", "Name"]
+              },
+              "description": "Element-specific overrides for the order of attributes to check for an element's display name. Key is the element tag name, value is an array of attribute names in preferred order."
+            }
+          }
         }
       }
     }
