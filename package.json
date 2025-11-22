@@ -219,6 +219,93 @@
           "maximum": 100,
           "description": "Default number of table rows to generate in snippets. Set to 0 to disable and use current behavior (single row). When enabled, will prompt for row count if not specified."
         },
+        "kahua.documentTypes": {
+          "type": "array",
+          "default": [
+            {
+              "id": "extension",
+              "name": "Extension XML",
+              "priority": 200,
+              "rules": [
+                {
+                  "kind": "rootElement",
+                  "value": "App"
+                },
+                {
+                  "kind": "xpathNotExists",
+                  "xpath": "App/App.Supplements"
+                }
+              ]
+            },
+            {
+              "id": "supplement",
+              "name": "Supplement XML",
+              "priority": 100,
+              "rules": [
+                {
+                  "kind": "rootElement",
+                  "value": "App"
+                },
+                {
+                  "kind": "xpathExists",
+                  "xpath": "App/App.Supplements"
+                }
+              ]
+            }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this document type."
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name shown in quick picks or logs."
+              },
+              "priority": {
+                "type": "number",
+                "description": "Higher numbers run first. The first matching type wins."
+              },
+              "rules": {
+                "type": "array",
+                "description": "All rules must match for the document type to apply.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "rootElement",
+                        "xpathExists",
+                        "xpathNotExists"
+                      ],
+                      "description": "Rule logic: match root tag or check if an XPath-like path exists/does not exist."
+                    },
+                    "value": {
+                      "type": "string",
+                      "description": "Required when kind is 'rootElement'. The tag name to match."
+                    },
+                    "xpath": {
+                      "type": "string",
+                      "description": "Required when kind is 'xpathExists' or 'xpathNotExists'. Slash-delimited path such as 'App/App.Supplements'."
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "rules"
+            ]
+          },
+          "description": "Defines XML document types that Kahua understands. Detection is driven by ordered rules and the first matching type wins."
+        },
         "kahua.tokenNameDefinitions": {
           "type": "array",
           "default": [
@@ -339,6 +426,9 @@
             {
               "id": "attributes",
               "name": "Extension Attributes",
+              "applicableDocumentTypes": [
+                "extension"
+              ],
               "tokenReferences": [
                 "appname",
                 "attributes"
@@ -375,6 +465,9 @@
             {
               "id": "lookups",
               "name": "Lookup Lists",
+              "applicableDocumentTypes": [
+                "extension"
+              ],
               "tokenReferences": [
                 "lookupheader",
                 "lookups"
@@ -399,6 +492,9 @@
             {
               "id": "supplements",
               "name": "Supplement Attributes",
+              "applicableDocumentTypes": [
+                "supplement"
+              ],
               "tokenReferences": [
                 "appname",
                 "attributes"
@@ -456,6 +552,13 @@
               "name": {
                 "type": "string",
                 "description": "Display name for this fragment definition"
+              },
+              "applicableDocumentTypes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional list of document type IDs that can use this fragment. If omitted, the fragment can be used for any detected document type."
               },
               "tokenReferences": {
                 "type": "array",

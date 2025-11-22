@@ -48,6 +48,7 @@ interface FragmentDefinition {
   name: string;
   type?: 'grouped' | 'table'; // Default is 'grouped'
   tokenReferences: string[];
+  applicableDocumentTypes?: string[];
   fragments: Record<string, string | Record<string, string | Record<string, string>>>;
   injectionPaths?: Record<string, string | InjectionPathConfig>;
 }
@@ -62,6 +63,19 @@ interface FragmentSet {
 interface MenuOption {
   name: string;
   fragments: string[];
+}
+
+interface DocumentTypeRule {
+  kind: 'rootElement' | 'xpathExists' | 'xpathNotExists';
+  value?: string;
+  xpath?: string;
+}
+
+interface DocumentTypeDefinition {
+  id: string;
+  name: string;
+  priority?: number;
+  rules: DocumentTypeRule[];
 }
 
 /**
@@ -95,6 +109,14 @@ const sourceXmlFileMap = new Map<string, vscode.Uri>();
  * Value: Map of token name to selected value
  */
 const injectionAffectingTokens = new Map<string, Map<string, string>>();
+
+/**
+ * Cache of detected document types keyed by URI
+ */
+const documentTypeCache = new Map<string, string | null>();
+
+const DOCUMENT_TYPE_CONTEXT_KEY = 'kahua.documentType';
+const DOCUMENT_APPLICABLE_CONTEXT_KEY = 'kahua.hasApplicableDocument';
 
 /**
  * Represents a parsed section from generated XML output
@@ -183,6 +205,184 @@ function getElementDisplayName(
   return { displayName: undefined, isExcluded: false };
 }
 
+
+
+function getDocumentTypeDefinitions(resource?: vscode.Uri): DocumentTypeDefinition[] {
+  return getKahuaConfig(resource).get<DocumentTypeDefinition[]>('documentTypes') || [];
+}
+
+function parseXmlForDocumentTypeDetection(text: string): any | undefined {
+  try {
+    const parser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: '@_',
+      textNodeName: '#text',
+      ignoreDeclaration: true,
+      preserveOrder: false,
+      allowBooleanAttributes: true
+    });
+
+    return parser.parse(text);
+  } catch (error) {
+    console.warn('[KAHUA] Failed to parse XML for document type detection:', error);
+    return undefined;
+  }
+}
+
+function hasXmlPath(source: any, xpath: string): boolean {
+  if (!source || !xpath) {
+    return false;
+  }
+
+  const parts = xpath
+    .split('/')
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) {
+    return false;
+  }
+
+  let currentLevel: any[] = [source];
+
+  for (const part of parts) {
+    const nextLevel: any[] = [];
+
+    for (const candidate of currentLevel) {
+      if (candidate == null) {
+        continue;
+      }
+
+      const nodes = Array.isArray(candidate) ? candidate : [candidate];
+      for (const node of nodes) {
+        if (node != null && typeof node === 'object' && part in node) {
+          const value = node[part];
+          if (Array.isArray(value)) {
+            nextLevel.push(...value);
+          } else if (value != null) {
+            nextLevel.push(value);
+          }
+        }
+      }
+    }
+
+    if (nextLevel.length === 0) {
+      return false;
+    }
+
+    currentLevel = nextLevel;
+  }
+
+  return currentLevel.length > 0;
+}
+
+function evaluateDocumentTypeRule(
+  rule: DocumentTypeRule,
+  parsedXml: any,
+  rootElementName?: string
+): boolean {
+  switch (rule.kind) {
+    case 'rootElement':
+      if (!rule.value || !rootElementName) {
+        return false;
+      }
+      return rootElementName.toLowerCase() === rule.value.toLowerCase();
+    case 'xpathExists':
+      return !!(rule.xpath && hasXmlPath(parsedXml, rule.xpath));
+    case 'xpathNotExists':
+      return !!(rule.xpath) && !hasXmlPath(parsedXml, rule.xpath);
+    default:
+      return false;
+  }
+}
+
+function detectDocumentTypeId(document: vscode.TextDocument): string | undefined {
+  if (document.languageId !== 'xml') {
+    return undefined;
+  }
+
+  const definitions = getDocumentTypeDefinitions(document.uri);
+  if (!definitions.length) {
+    return undefined;
+  }
+
+  const parsedXml = parseXmlForDocumentTypeDetection(document.getText());
+  if (!parsedXml) {
+    return undefined;
+  }
+
+  const rootKeys = Object.keys(parsedXml);
+  const rootName = rootKeys.length > 0 ? rootKeys[0] : undefined;
+
+  const sortedDefinitions = [...definitions].sort(
+    (a, b) => (b.priority ?? 0) - (a.priority ?? 0)
+  );
+
+  for (const definition of sortedDefinitions) {
+    if (!definition.rules || definition.rules.length === 0) {
+      continue;
+    }
+
+    const matches = definition.rules.every(rule =>
+      evaluateDocumentTypeRule(rule, parsedXml, rootName)
+    );
+
+    if (matches) {
+      return definition.id;
+    }
+  }
+
+  return undefined;
+}
+
+function cacheDocumentType(document: vscode.TextDocument, typeId: string | undefined): string | undefined {
+  const key = document.uri.toString();
+  documentTypeCache.set(key, typeId ?? null);
+  return typeId;
+}
+
+function getOrDetectDocumentType(document: vscode.TextDocument): string | undefined {
+  const key = document.uri.toString();
+  if (documentTypeCache.has(key)) {
+    return documentTypeCache.get(key) ?? undefined;
+  }
+
+  const detected = detectDocumentTypeId(document);
+  cacheDocumentType(document, detected);
+  return detected;
+}
+
+async function refreshDocumentTypeForDocument(document: vscode.TextDocument): Promise<string | undefined> {
+  const detected = detectDocumentTypeId(document);
+  cacheDocumentType(document, detected);
+  if (document === vscode.window.activeTextEditor?.document) {
+    await setDocumentTypeContext(detected);
+  }
+  return detected;
+}
+
+async function setDocumentTypeContext(typeId?: string): Promise<void> {
+  await vscode.commands.executeCommand(
+    'setContext',
+    DOCUMENT_APPLICABLE_CONTEXT_KEY,
+    Boolean(typeId)
+  );
+  await vscode.commands.executeCommand(
+    'setContext',
+    DOCUMENT_TYPE_CONTEXT_KEY,
+    typeId ?? ''
+  );
+}
+
+async function updateDocumentTypeContext(document?: vscode.TextDocument): Promise<void> {
+  if (!document || document.languageId !== 'xml') {
+    await setDocumentTypeContext(undefined);
+    return;
+  }
+
+  const typeId = getOrDetectDocumentType(document);
+  await setDocumentTypeContext(typeId);
+}
 
 /**
  * Converts a token value to PascalCase by removing spaces and special characters
@@ -2010,11 +2210,38 @@ function processFragmentTemplates(
 export function activate(context: vscode.ExtensionContext) {
   // Set up context menu visibility
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
+  vscode.commands.executeCommand('setContext', DOCUMENT_APPLICABLE_CONTEXT_KEY, false);
+  vscode.commands.executeCommand('setContext', DOCUMENT_TYPE_CONTEXT_KEY, '');
+  void updateDocumentTypeContext(vscode.window.activeTextEditor?.document);
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      void updateDocumentTypeContext(editor?.document);
+    })
+  );
 
   // Clean up source XML file map when documents are closed
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument(document => {
       sourceXmlFileMap.delete(document.uri.toString());
+      documentTypeCache.delete(document.uri.toString());
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(document => {
+      if (document.languageId === 'xml') {
+        void refreshDocumentTypeForDocument(document);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration('kahua.documentTypes')) {
+        documentTypeCache.clear();
+        void updateDocumentTypeContext(vscode.window.activeTextEditor?.document);
+      }
     })
   );
 
