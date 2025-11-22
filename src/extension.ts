@@ -150,6 +150,36 @@ function getKahuaConfig(resource?: vscode.Uri) {
   return vscode.workspace.getConfiguration('kahua', resource);
 }
 
+interface ElementDisplayConfig {
+  defaultOrder: string[];
+  exclusions: string[];
+  overrides: Record<string, string[]>;
+}
+
+function getElementDisplayName(
+  tagName: string,
+  attributes: Record<string, any>,
+  config: ElementDisplayConfig
+): { displayName?: string; isExcluded: boolean } {
+  // Check if the element is in the exclusion list
+  if (config.exclusions.includes(tagName)) {
+    return { displayName: undefined, isExcluded: true };
+  }
+
+  // Determine which attribute order to use (override or default)
+  const attributeOrder = config.overrides[tagName] || config.defaultOrder;
+
+  // Find the first attribute with a value
+  for (const attrName of attributeOrder) {
+    if (attributes[attrName]) {
+      return { displayName: attributes[attrName], isExcluded: false };
+    }
+  }
+
+  return { displayName: undefined, isExcluded: false };
+}
+
+
 /**
  * Converts a token value to PascalCase by removing spaces and special characters
  * and capitalizing the first letter of each word
@@ -864,9 +894,7 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Returns elements with their identifying attributes
  */
 function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
-  //console.log(`[DEBUG] ========== findElementsByXPath called ==========`);
-  //console.log(`[DEBUG] XPath: ${xpath}`);
-  //console.log(`[DEBUG] parsedXml root keys:`, Object.keys(parsedXml));
+  const config = getKahuaConfig().get<ElementDisplayConfig>('kahua.elementDisplayAttributes', { defaultOrder: ["Name", "DisplayName", "Id"], exclusions: ["App"], overrides: {} });
 
   type TraversalResult = {
     element: any;
@@ -882,11 +910,17 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
   const rootKeys = Object.keys(parsedXml);
   if (rootKeys.length > 0) {
     const rootElement = parsedXml[rootKeys[0]];
-    // Also capture nameAttributeValue for the root element if it has one
-    const rootNameAttr = rootElement['@_Name'];
-    const rootEnrichedPathSegment = rootNameAttr ? `${rootKeys[0]} (${rootNameAttr})` : rootKeys[0];
+    const rootTagName = rootKeys[0];
+    const rootAttributes = Object.keys(rootElement).filter(k => k.startsWith('@_')).reduce((acc, key) => {
+      acc[key.substring(2)] = rootElement[key];
+      return acc;
+    }, {} as Record<string, any>);
+    
+    const { displayName: rootNameAttr, isExcluded: rootIsExcluded } = getElementDisplayName(rootTagName, rootAttributes, config);
 
-    if (rootKeys[0] === parts[0]) {
+    const rootEnrichedPathSegment = rootIsExcluded || !rootNameAttr ? rootTagName : `${rootTagName} (${rootNameAttr})`;
+
+    if (rootTagName === parts[0]) { // Use rootTagName instead of rootKeys[0] for consistency
       //console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
       currentElements = [{ element: rootElement, nameAttributeValue: rootNameAttr, currentEnrichedPath: `/${rootEnrichedPathSegment}` }];
       parts = parts.slice(1);
@@ -932,9 +966,15 @@ function findElementsByXPath(parsedXml: any, xpath: string): Array<{tagName: str
               }
             }
 
-            // Capture the 'Name' attribute value if it exists for the current candidate element
-            const nameAttrValue = candidate['@_Name'];
-            const enrichedPathSegment = nameAttrValue ? `${tagName} (${nameAttrValue})` : tagName;
+            const attributesForCandidate = Object.keys(candidate).filter(k => k.startsWith('@_')).reduce((acc, key) => {
+              acc[key.substring(2)] = candidate[key];
+              return acc;
+            }, {} as Record<string, any>);
+            
+            const { displayName, isExcluded } = getElementDisplayName(tagName, attributesForCandidate, config);
+            const nameAttrValue = displayName; // Use the determined displayName
+            
+            const enrichedPathSegment = isExcluded || !nameAttrValue ? tagName : `${tagName} (${nameAttrValue})`;
             
             nextElements.push({ 
               element: candidate, 
@@ -1345,7 +1385,12 @@ async function selectTargetsFromMultiple(
 
   const items = targets.map((target, index) => {
     const lineInfo = `Line ${target.openTagLine + 1}`;
-    const label = target.nameAttributeValue ? `${target.nameAttributeValue} (${lineInfo})` : lineInfo;
+    let label = lineInfo;
+    if (target.xmlNodeName === 'HubDef' && target.nameAttributeValue) {
+      label = `HubDef: ${target.nameAttributeValue} (${lineInfo})`;
+    } else if (target.nameAttributeValue) {
+      label = `${target.nameAttributeValue} (${lineInfo})`;
+    }
     const description = target.context && target.context !== lineInfo ? target.context : undefined;
 
     return {
