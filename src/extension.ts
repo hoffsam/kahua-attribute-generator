@@ -169,12 +169,14 @@ function getElementDisplayName(
 
   // Determine which attribute order to use (override or default)
   const attributeOrder = config.overrides[tagName] || config.defaultOrder;
+  console.log(`[DEBUG] getElementDisplayName: Resolved attributeOrder for ${tagName}:`, attributeOrder);
 
-  // Find the first attribute with a value
+  // Find the first attribute with a non-empty value
   for (const attrName of attributeOrder) {
-    console.log(`[DEBUG] getElementDisplayName: Checking attr: ${attrName}, Value: ${attributes[attrName]}`);
-    if (attributes[attrName]) {
-      return { displayName: attributes[attrName], isExcluded: false };
+    const attrValue = attributes[attrName];
+    console.log(`[DEBUG] getElementDisplayName: Checking attr: ${attrName}, Value: ${attrValue}`);
+    if (attrValue !== undefined && attrValue !== null && attrValue !== "") {
+      return { displayName: String(attrValue), isExcluded: false };
     }
   }
 
