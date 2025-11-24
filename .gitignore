@@ -10,3 +10,10 @@ CLAUDE.md
 CLAUDE.md
 kahua-attribute-generator-3.1.0.zip
 AGENTS.md
+PERFORMANCE_IMPROVEMENTS_SUMMARY.md
+.gitignore
+cleanup-debug.md
+_tmp_detect.js
+_tmp_tokens.py
+PERFORMANCE_ANALYSIS.md
+temp_script.py

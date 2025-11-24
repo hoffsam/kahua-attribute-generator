@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as os from 'os';
 import { runTests } from '@vscode/test-electron';
 
 async function main() {
@@ -11,8 +12,30 @@ async function main() {
 		// Passed to --extensionTestsPath
 		const extensionTestsPath = path.resolve(__dirname, './suite/index');
 
-		// Download VS Code, unzip it and run the integration test
-		await runTests({ extensionDevelopmentPath, extensionTestsPath });
+		// Use temp directory to avoid OneDrive path issues
+		const tempDir = os.tmpdir();
+		const userDataDir = path.join(tempDir, 'vscode-test-user-' + Date.now());
+		const extensionsDir = path.join(tempDir, 'vscode-test-extensions-' + Date.now());
+
+		console.log('Test directories:');
+		console.log('  Extension path:', extensionDevelopmentPath);
+		console.log('  Tests path:', extensionTestsPath);
+		console.log('  User data:', userDataDir);
+		console.log('  Extensions:', extensionsDir);
+
+		await runTests({
+			extensionDevelopmentPath,
+			extensionTestsPath,
+			launchArgs: [
+				'--user-data-dir', userDataDir, 
+				'--extensions-dir', extensionsDir,
+				'--disable-workspace-trust',
+				'--skip-welcome',
+				'--skip-release-notes',
+				'--no-sandbox',
+				'--disable-updates'
+			]
+		});
 	} catch (err) {
 		console.error('Failed to run tests', err);
 		process.exit(1);
