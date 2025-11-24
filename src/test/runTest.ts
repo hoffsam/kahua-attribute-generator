@@ -29,6 +29,7 @@ async function main() {
 			launchArgs: [
 				'--user-data-dir', userDataDir, 
 				'--extensions-dir', extensionsDir,
+				'--extensionDevelopmentPath', `"${extensionDevelopmentPath}"`,
 				'--disable-workspace-trust',
 				'--skip-welcome',
 				'--skip-release-notes',

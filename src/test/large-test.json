@@ -1,0 +1,7 @@
+{
+    "sets": [
+        {
+            "source": "Name\tDescription\tType\tLength\nlookup 1\tlookup 1\tLookup\t\nlookup 2\tlookup 2\tLookup\t\nlookup 3\tlookup 3\tLookup\t\nlookup 4\tlookup 4\tLookup\t\nlookup 5\tlookup 5\tLookup\t\nlookup 6\tlookup 6\tLookup\t\nlookup 7\tlookup 7\tLookup\t\nlookup 8\tlookup 8\tLookup\t\nlookup 9\tlookup 9\tLookup\t\nlookup 10\tlookup 10\tLookup\t\ntext 1\ttext 1\tText\t10\ntext 2\ttext 2\tText\t20\ntext 3\ttext 3\tText\t30\ntext 4\ttext 4\tText\t40\ntext 5\ttext 5\tText\t50\ntext 6\ttext 6\tText\t60\ntext 7\ttext 7\tText\t70\ntext 8\ttext 8\tText\t80\ntext 9\ttext 9\tText\t90\ntext 10\ttext 10\tText\t100\nnumber 1\tnumber 1\tNumber\t\nnumber 2\tnumber 2\tNumber\t\nnumber 3\tnumber 3\tNumber\t\nnumber 4\tnumber 4\tNumber\t\nnumber 5\tnumber 5\tNumber\t\nnumber 6\tnumber 6\tNumber\t\nnumber 7\tnumber 7\tNumber\t\nnumber 8\tnumber 8\tNumber\t\nnumber 9\tnumber 9\tNumber\t\nnumber 10\tnumber 10\tNumber\t\ndate 1\tdate 1\tDate\t\ndate 2\tdate 2\tDate\t\ndate 3\tdate 3\tDate\t\ndate 4\tdate 4\tDate\t\ndate 5\tdate 5\tDate\t\ndate 6\tdate 6\tDate\t\ndate 7\tdate 7\tDate\t\ndate 8\tdate 8\tDate\t\ndate 9\tdate 9\tDate\t\ndate 10\tdate 10\tDate\t\nfile 1\tfile 1\tFile\t\nfile 2\tfile 2\tFile\t\nfile 3\tfile 3\tFile\t\nfile 4\tfile 4\tFile\t\nfile 5\tfile 5\tFile\t\nfile 6\tfile 6\tFile\t\nfile 7\tfile 7\tFile\t\nfile 8\tfile 8\tFile\t\nfile 9\tfile 9\tFile\t\nfile 10\tfile 10\tFile\t\n"
+        }
+    ]
+}

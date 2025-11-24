@@ -7,13 +7,13 @@ suite('Simple Unit Tests', () => {
 		assert.notStrictEqual('hello', 'world');
 	});
 
-	it('should handle arrays', () => {
+	test('should handle arrays', () => {
 		const arr = [1, 2, 3];
 		assert.strictEqual(arr.length, 3);
 		assert.ok(arr.includes(2));
 	});
 
-	it('should handle objects', () => {
+	test('should handle objects', () => {
 		const obj = { name: 'test', value: 42 };
 		assert.strictEqual(obj.name, 'test');
 		assert.strictEqual(obj.value, 42);

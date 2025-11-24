@@ -23,7 +23,7 @@
     "pretest": "npm run compile-tests",
     "compile-tests": "tsc -p . --outDir out --module commonjs",
     "test": "npm run compile-tests && npx mocha out/test/suite/simple.test.js",
-    "test:unit": "npm run compile-tests && npx mocha out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
+    "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
     "test:integration": "npm run compile-tests && node ./out/test/runTest.js"
   },
   "devDependencies": {

@@ -10,35 +10,35 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(toPascalCase('test case'), 'TestCase');
 			});
 
-			it('should handle special characters', () => {
+			test('should handle special characters', () => {
 				assert.strictEqual(toPascalCase('hello-world_test'), 'HelloWorldTest');
 				assert.strictEqual(toPascalCase('test.case!example'), 'TestCaseExample');
 			});
 
-			it('should handle empty strings gracefully', () => {
+			test('should handle empty strings gracefully', () => {
 				assert.strictEqual(toPascalCase(''), '');
 				assert.strictEqual(toPascalCase(null as any), null);
 				assert.strictEqual(toPascalCase(undefined as any), undefined);
 			});
 
-			it('should handle numbers correctly', () => {
+			test('should handle numbers correctly', () => {
 				assert.strictEqual(toPascalCase('test123case'), 'Test123Case');
 				assert.strictEqual(toPascalCase('123test'), '123Test');
 			});
 		});
 
-		describe('toTitleCase', () => {
-			it('should convert strings to TitleCase', () => {
+		suite('toTitleCase', () => {
+			test('should convert strings to TitleCase', () => {
 				assert.strictEqual(toTitleCase('hello world'), 'Hello World');
 				assert.strictEqual(toTitleCase('the quick brown fox'), 'The Quick Brown Fox');
 			});
 
-			it('should handle articles correctly', () => {
+			test('should handle articles correctly', () => {
 				assert.strictEqual(toTitleCase('a tale of two cities'), 'A Tale of Two Cities');
 				assert.strictEqual(toTitleCase('the lord of the rings'), 'The Lord of the Rings');
 			});
 
-			it('should handle empty strings gracefully', () => {
+			test('should handle empty strings gracefully', () => {
 				assert.strictEqual(toTitleCase(''), '');
 				assert.strictEqual(toTitleCase(null as any), null);
 				assert.strictEqual(toTitleCase(undefined as any), undefined);
@@ -46,9 +46,9 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 		});
 	});
 
-	describe('Token Parsing Functions', () => {
-		describe('parseTokenDefinition', () => {
-			it('should parse simple token definitions', () => {
+	suite('Token Parsing Functions', () => {
+		suite('parseTokenDefinition', () => {
+			test('should parse simple token definitions', () => {
 				const result = parseTokenDefinition('name,type,label');
 				assert.strictEqual(result.length, 3);
 				assert.strictEqual(result[0].name, 'name');
@@ -57,7 +57,7 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(result[2].name, 'label');
 			});
 
-			it('should handle token definitions with default values', () => {
+			test('should handle token definitions with default values', () => {
 				const result = parseTokenDefinition('name,type:TextBox,label:Default Label');
 				assert.strictEqual(result.length, 3);
 				assert.strictEqual(result[0].name, 'name');
@@ -68,12 +68,12 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(result[2].defaultValue, 'Default Label');
 			});
 
-			it('should handle empty strings gracefully', () => {
+			test('should handle empty strings gracefully', () => {
 				const result = parseTokenDefinition('');
 				assert.strictEqual(result.length, 0);
 			});
 
-			it('should handle whitespace correctly', () => {
+			test('should handle whitespace correctly', () => {
 				const result = parseTokenDefinition(' name , type : TextBox , label ');
 				assert.strictEqual(result.length, 3);
 				assert.strictEqual(result[0].name, 'name');
@@ -84,79 +84,79 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 		});
 	});
 
-	describe('Template Rendering Functions', () => {
-		it('should render templates with token replacement', () => {
+	suite('Template Rendering Functions', () => {
+		test('should render templates with token replacement', () => {
 			// Test renderTemplate function
 			assert.ok(true, 'Placeholder test');
 		});
 
-		it('should handle missing tokens gracefully', () => {
+		test('should handle missing tokens gracefully', () => {
 			assert.ok(true, 'Placeholder test');
 		});
 
-		it('should apply transformations correctly', () => {
+		test('should apply transformations correctly', () => {
 			assert.ok(true, 'Placeholder test');
 		});
 	});
 
-	describe('XML Processing Functions', () => {
-		it('should parse simple XML correctly', () => {
+	suite('XML Processing Functions', () => {
+		test('should parse simple XML correctly', () => {
 			// Test XML parsing without VS Code document interface
 			assert.ok(true, 'Placeholder test');
 		});
 
-		it('should handle malformed XML gracefully', () => {
+		test('should handle malformed XML gracefully', () => {
 			assert.ok(true, 'Placeholder test');
 		});
 
-		it('should extract element attributes correctly', () => {
-			assert.ok(true, 'Placeholder test');
-		});
-	});
-
-	describe('Configuration Processing', () => {
-		it('should validate fragment definitions', () => {
-			assert.ok(true, 'Placeholder test');
-		});
-
-		it('should validate token definitions', () => {
-			assert.ok(true, 'Placeholder test');
-		});
-
-		it('should handle missing configuration gracefully', () => {
+		test('should extract element attributes correctly', () => {
 			assert.ok(true, 'Placeholder test');
 		});
 	});
 
-	describe('Performance Optimizations', () => {
-		describe('simpleHash', () => {
-			it('should generate consistent hashes', () => {
+	suite('Configuration Processing', () => {
+		test('should validate fragment definitions', () => {
+			assert.ok(true, 'Placeholder test');
+		});
+
+		test('should validate token definitions', () => {
+			assert.ok(true, 'Placeholder test');
+		});
+
+		test('should handle missing configuration gracefully', () => {
+			assert.ok(true, 'Placeholder test');
+		});
+	});
+
+	suite('Performance Optimizations', () => {
+		suite('simpleHash', () => {
+			test('should generate consistent hashes', () => {
 				const text = 'test content';
 				const hash1 = simpleHash(text);
 				const hash2 = simpleHash(text);
 				assert.strictEqual(hash1, hash2);
 			});
 
-			it('should generate different hashes for different content', () => {
+			test('should generate different hashes for different content', () => {
 				const hash1 = simpleHash('content1');
 				const hash2 = simpleHash('content2');
 				assert.notStrictEqual(hash1, hash2);
 			});
 
-			it('should handle empty strings', () => {
+			test('should handle empty strings', () => {
 				const hash = simpleHash('');
 				assert.strictEqual(typeof hash, 'string');
 				assert.strictEqual(hash, '0');
 			});
 
-			it('should return string hashes', () => {
+			test('should return string hashes', () => {
 				const hash = simpleHash('test');
 				assert.strictEqual(typeof hash, 'string');
 			});
 		});
 
-		describe('transformation caching', () => {
-			it('should cache toPascalCase results', () => {
+		suite('transformation caching', () => {
+			test('should cache toPascalCase results', () => {
 				// Clear any existing cache by using a unique test string
 				const testString = 'unique test string ' + Date.now();
 				
@@ -169,7 +169,7 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(result1, result2);
 			});
 
-			it('should cache toTitleCase results', () => {
+			test('should cache toTitleCase results', () => {
 				// Similar test for TitleCase
 				const testString = 'unique title test ' + Date.now();
 				

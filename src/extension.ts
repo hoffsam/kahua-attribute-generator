@@ -121,9 +121,11 @@ const SOURCE_METADATA_SCAN_LINES = 20;
 const documentTypeOverrides = new Map<string, string>();
 
 /**
- * Map to remember entity selections per document/template
+ * Map to remember token selections per document/template
+ * Key: Document/template URI
+ * Value: Map of token name to selected value
  */
-const selectedEntityByDocument = new Map<string, string>();
+const selectedTokenValuesByDocument = new Map<string, Map<string, string>>();
 
 /**
  * Tracks template documents (generated token templates)
@@ -218,6 +220,12 @@ interface InjectionResult {
   sectionName: string;
   status: 'injected' | 'skipped';
   reason?: 'not-configured' | 'not-found';
+}
+
+interface GeneratedFragmentResult {
+  generatedXml: string;
+  fragmentDefinition: FragmentDefinition;
+  tokenDefinitions: TokenNameDefinition[];
 }
 
 /* ----------------------------- config helpers ----------------------------- */
@@ -720,7 +728,7 @@ function unmarkTemplateDocument(document: vscode.TextDocument): void {
   const key = document.uri.toString();
   templateDocumentUris.delete(key);
   documentTypeOverrides.delete(key);
-  selectedEntityByDocument.delete(key);
+  selectedTokenValuesByDocument.delete(key);
   injectionAffectingTokens.delete(key);
 }
 
@@ -768,7 +776,7 @@ function unmarkSnippetDocument(document: vscode.TextDocument): void {
   const key = document.uri.toString();
   snippetDocumentUris.delete(key);
   documentTypeOverrides.delete(key);
-  selectedEntityByDocument.delete(key);
+  selectedTokenValuesByDocument.delete(key);
   injectionAffectingTokens.delete(key);
 }
 
@@ -792,16 +800,35 @@ function getDefaultFragmentsForDocumentType(documentType: string): string[] {
   }
 }
 
-function getStoredEntityForDocument(document: vscode.TextDocument): string | undefined {
+function rememberTokenSelectionForUri(uri: vscode.Uri, tokenName: string, value: string): void {
+  const key = uri.toString();
+  let selections = selectedTokenValuesByDocument.get(key);
+  if (!selections) {
+    selections = new Map<string, string>();
+    selectedTokenValuesByDocument.set(key, selections);
+  }
+  selections.set(tokenName, value);
+}
+
+function rememberTokenSelectionForDocument(document: vscode.TextDocument, tokenName: string, value: string): void {
+  rememberTokenSelectionForUri(document.uri, tokenName, value);
+
+  const sourceUri = getRememberedSourceXmlUri(document);
+  if (sourceUri) {
+    rememberTokenSelectionForUri(sourceUri, tokenName, value);
+  }
+}
+
+function getStoredTokenSelection(document: vscode.TextDocument, tokenName: string): string | undefined {
   const key = document.uri.toString();
-  const direct = selectedEntityByDocument.get(key);
+  const direct = selectedTokenValuesByDocument.get(key)?.get(tokenName);
   if (direct) {
     return direct;
   }
 
   const sourceUri = getRememberedSourceXmlUri(document);
   if (sourceUri) {
-    const sourceValue = selectedEntityByDocument.get(sourceUri.toString());
+    const sourceValue = selectedTokenValuesByDocument.get(sourceUri.toString())?.get(tokenName);
     if (sourceValue) {
       return sourceValue;
     }
@@ -810,10 +837,14 @@ function getStoredEntityForDocument(document: vscode.TextDocument): string | und
   return undefined;
 }
 
-function rememberEntitySelectionForUri(uri: vscode.Uri, entity: string): void {
-  const key = uri.toString();
-  selectedEntityByDocument.set(key, entity);
+function getStoredEntityForDocument(document: vscode.TextDocument): string | undefined {
+  return getStoredTokenSelection(document, 'entity');
+}
 
+function rememberEntitySelectionForUri(uri: vscode.Uri, entity: string): void {
+  rememberTokenSelectionForUri(uri, 'entity', entity);
+
+  const key = uri.toString();
   let affectingTokens = injectionAffectingTokens.get(key);
   if (!affectingTokens) {
     affectingTokens = new Map();
@@ -1218,32 +1249,21 @@ async function showOutputTargetQuickPick(currentDocument?: vscode.TextDocument):
     });
   }
 
-  // Option 2: Select XML file from workspace
-  const xmlFiles = await findXmlFilesInWorkspace();
-  if (xmlFiles.length > 0) {
-    items.push({
-      label: `$(search) Select XML File...`,
-      description: `${xmlFiles.length} XML file(s) found in workspace`,
-      detail: 'Choose a specific XML file to insert into',
-      alwaysShow: true
-    });
-  }
-
-  // Option 3: Browse for file
+  // Option 2: Browse for file (use dialog instead of workspace scan)
   items.push({
     label: `$(folder-opened) Browse for File...`,
     detail: 'Browse for any XML file on your system',
     alwaysShow: true
   });
 
-  // Option 4: New editor tab
+  // Option 3: New editor tab
   items.push({
     label: `$(new-file) New Editor Tab`,
     detail: 'Open generated XML in a new editor window',
     alwaysShow: true
   });
 
-  // Option 5: Clipboard
+  // Option 4: Clipboard
   items.push({
     label: `$(clippy) Clipboard`,
     detail: 'Copy generated XML to clipboard',
@@ -1264,23 +1284,6 @@ async function showOutputTargetQuickPick(currentDocument?: vscode.TextDocument):
     return { type: 'sourceFile', uri: targetXmlFile };
   } else if (selected.label.includes('Current File') && currentFileUri) {
     return { type: 'currentFile', uri: currentFileUri };
-  } else if (selected.label.includes('Select XML File')) {
-    const fileItems = xmlFiles.map(uri => ({
-      label: getWorkspaceRelativePath(uri),
-      description: uri.fsPath,
-      uri
-    }));
-
-    const selectedFile = await vscode.window.showQuickPick(fileItems, {
-      placeHolder: 'Select an XML file',
-      title: 'Kahua: Choose XML File'
-    });
-
-    if (!selectedFile) {
-      return undefined;
-    }
-
-    return { type: 'selectFile', uri: selectedFile.uri };
   } else if (selected.label.includes('Browse for File')) {
     const browseResult = await vscode.window.showOpenDialog({
       canSelectMany: false,
@@ -1318,6 +1321,7 @@ async function insertXmlIntoFile(
   tokenDefinitions?: TokenNameDefinition[]
 ): Promise<InjectionResult[]> {
   const document = await vscode.workspace.openTextDocument(uri);
+  debugLog(`[KAHUA] insertXmlIntoFile: target=${uri.fsPath} strategy=${strategy ?? 'prompt'}`);
   const editor = await vscode.window.showTextDocument(document, {
     preserveFocus: false,
     preview: false
@@ -1326,9 +1330,13 @@ async function insertXmlIntoFile(
   if (!strategy || strategy === 'cursor') {
     // Simple insertion at cursor position
     const position = editor.selection.active;
-    await editor.edit(editBuilder => {
+    const success = await editor.edit(editBuilder => {
       editBuilder.insert(position, '\n' + content + '\n');
     });
+
+    if (!success) {
+      throw new Error(`Kahua: Failed to insert content into ${uri.fsPath}. Please ensure the file is writable and try again.`);
+    }
 
     const lines = content.split('\n').length;
     const newPosition = position.translate(lines + 2, 0);
@@ -1379,8 +1387,12 @@ async function insertXmlIntoFile(
     injectionPaths = modifiedPaths;
   }
 
+  debugLog(`[KAHUA] insertXmlIntoFile: starting section mapping (strategy=${strategy ?? 'prompt'})`);
   const generatedSections = parseGeneratedXmlSections(content);
+  debugLog(`[KAHUA] insertXmlIntoFile: parsed ${generatedSections.length} generated sections`);
+  const parseStart = Date.now();
   const allTargetSections = parseTargetXmlStructure(document, injectionPaths);
+  debugLog(`[KAHUA] insertXmlIntoFile: parseTargetXmlStructure completed in ${Date.now() - parseStart}ms with ${allTargetSections.length} sections`);
 
   // Deduplicate target sections that point to the same line
   // (happens when multiple section names map to the same xpath)
@@ -1444,7 +1456,7 @@ async function insertXmlIntoFile(
   }
 
   // Perform smart insertion
-  await editor.edit(editBuilder => {
+  const success = await editor.edit(editBuilder => {
     for (const [sectionName, targets] of selectedTargets.entries()) {
       const genSection = generatedSections.find(s => s.name === sectionName);
       if (!genSection) {
@@ -1494,6 +1506,10 @@ async function insertXmlIntoFile(
       }
     }
   });
+
+  if (!success) {
+    throw new Error(`Kahua: Failed to update ${uri.fsPath}. Please verify the file is writable and retry.`);
+  }
 
   return results;
 }
@@ -2401,11 +2417,22 @@ async function readTokenValuesFromXml(
           console.log(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
           continue;
         }
+
+        const storedSelection = getStoredTokenSelection(document, tokenName);
+        if (storedSelection) {
+          console.log(`[DEBUG] Using stored selection for ${tokenName}: ${storedSelection}`);
+          value = storedSelection;
+          break;
+        }
+
         console.log(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
         const options = extractSelectableValues(document, readPath.path, readPath.attribute);
         debugLog(`[DEBUG] Found ${options.length} options:`, options);
         value = await showValueSelectionPick(tokenName, options);
         debugLog(`[DEBUG] User selected: ${value}`);
+        if (value) {
+          rememberTokenSelectionForDocument(document, tokenName, value);
+        }
         break;
     }
 
@@ -3195,7 +3222,7 @@ export function activate(context: vscode.ExtensionContext) {
         unmarkSnippetDocument(document);
       } else {
         documentTypeOverrides.delete(key);
-        selectedEntityByDocument.delete(key);
+        selectedTokenValuesByDocument.delete(key);
         injectionAffectingTokens.delete(key);
       }
     })
@@ -4154,514 +4181,406 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     return;
   }
 
-  // Performance: Use progress indicator for long-running operations
-  return vscode.window.withProgress({
+  const generationResult = await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
     title: "Generating XML fragments...",
     cancellable: false
   }, async (progress) => {
-    return handleSelectionInternal(fragmentIds, editor, progress);
+    const result = await handleSelectionInternal(fragmentIds, editor, progress);
+    return result;
   });
+
+  if (!generationResult) {
+    return;
+  }
+
+  await finalizeGeneratedFragments(editor, fragmentIds, generationResult);
 }
 
 /**
  * Internal implementation of selection handling with progress reporting
  */
-async function handleSelectionInternal(
-  fragmentIds: string[], 
-  editor: vscode.TextEditor, 
-  progress: vscode.Progress<{message?: string; increment?: number}>
-): Promise<void> {
-  try {
-    progress.report({ message: "Loading configuration...", increment: 10 });
-    const documentType = requireDocumentType(editor.document);
-    let documentText: string;
-    try {
-      documentText = editor.document.getText();
-    } catch (readError) {
-      throw new Error('Unable to read the current editor content. Please save or reopen the document and try again.');
-    }
+function getTokenValues(
+    headerTokens: ParsedToken[],
+    tableTokens: ParsedToken[],
+    headerLine: string | undefined,
+    dataLine: string
+): { cleanTokenValues: Record<string, string>, rawTokenValues: Record<string, string> } {
+    const rawTokenValues: Record<string, string> = {};
+    const cleanTokenValues: Record<string, string> = {};
 
-    if (!documentText || documentText.trim() === '') {
-      throw new Error('Current document is empty. Fill the template with token values before running the generator.');
-    }
-
-    const config = getKahuaConfig(currentResource());
-    const xmlIndentSize = config.get<number>('xmlIndentSize') || 2;
-    const applyFormatting = config.get<boolean>('formatXmlOutput') === true;
-    const suppressWarnings = config.get<boolean>('suppressInvalidConditionWarnings') || false;
-
-    // Get configuration arrays
-    const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
-    const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
-
-    if (tokenDefinitions.length === 0) {
-      throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
-    }
-
-    if (fragmentDefinitions.length === 0) {
-      throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
-    }
-
-    progress.report({ message: "Validating fragments...", increment: 20 });
-
-    // Validate fragment ids are known
-    const unknown = fragmentIds.filter(id => !fragmentDefinitions.some(d => d.id === id));
-    if (unknown.length) {
-      throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
-    }
-
-    // Find the fragment definitions we need to process
-    const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
-    if (selectedFragmentDefsRaw.length === 0) {
-      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
-    }
-    const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
-
-    // Collect all unique token references from selected fragments
-    const allTokenReferences = new Set<string>();
-    selectedFragmentDefs.forEach(def => {
-      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
-    });
-
-    // Merge token definitions based on references
-    const { headerTokens, tableTokens, tokenDefaults } = mergeTokenDefinitions(
-      tokenDefinitions,
-      Array.from(allTokenReferences)
-    );
-
-    // Split entire document into groups (ignoring comments and blank lines)
-    const groups = splitIntoGroups(documentText);
-    if (groups.length === 0) {
-      throw new Error('Current document contains no valid token data. Remove comments/whitespace-only lines or add token rows.');
-    }
-
-    // Process each group
-    const allWarnings: string[] = [];
-    const outputSections: string[] = [];
-
-    for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
-      const group = groups[groupIndex];
-
-      // Process header tokens (first line if any header tokens exist)
-      const headerTokenValues: Record<string, string> = {};
-      const headerRawValues: Record<string, string> = {};
-      let dataLines = group;
-
-      if (headerTokens.length > 0 && group.length > 0) {
-        const headerLine = group[0];
+    if (headerLine) {
         const headerParts = headerLine.split(',');
-
         for (let i = 0; i < headerTokens.length; i++) {
-          const token = headerTokens[i];
-          const rawPart = headerParts[i] || '';
-          const trimmedPart = rawPart.trim();
-
-          headerRawValues[token.name] = rawPart || token.defaultValue;
-          headerTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
-        }
-
-        // Skip the header line for table processing
-        dataLines = group.slice(1);
-      }
-
-      // Process table data for this group
-      const groupTokenData: Array<{ clean: Record<string, string>; raw: Record<string, string> }> = [];
-      const structuredFragments: {
-        [fragmentName: string]: {
-          [group: string]: { header?: string; body: string[]; footer?: string }
-        }
-      } = {};
-
-      const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
-      
-      // Collect conditional fragments across all rows before processing
-      const conditionalFragmentsByRow: Array<{
-        tokenValues: { clean: Record<string, string>; raw: Record<string, string> };
-        fragmentsByDef: Map<string, {
-          processedFragmentSets: Record<string, Record<string, string>>;
-          conditionalFragmentSets: Record<string, Record<string, string>>;
-          warnings: string[]
-        }>;
-      }> = [];
-      
-      // If we have no data lines but have table tokens, that's an error
-      if (tableTokens.length > 0 && dataLines.length === 0) {
-        throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
-      }
-
-      // Performance: Pre-compute fragment templates to avoid repeated processing
-      progress.report({ message: `Processing group ${groupIndex + 1} rows...`, increment: 30 });
-      
-      const precomputedFragments = new Map<string, {
-        processedFragmentSets: Record<string, Record<string, string>>;
-        conditionalFragmentSets: Record<string, Record<string, string>>;
-      }>();
-      
-      // Pre-process fragment definitions once (instead of per row)
-      for (const fragmentDef of selectedFragmentDefs) {
-        const { processedFragmentSets, conditionalFragmentSets } = processFragmentTemplates(
-          fragmentDef.fragments,
-          {}, // Empty values for template extraction
-          {},
-          suppressWarnings
-        );
-        precomputedFragments.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets });
-      }
-
-      // Performance: Process all rows in batches to avoid blocking UI
-      const BATCH_SIZE = 50;
-      const totalRows = dataLines.length;
-      
-      for (let batchStart = 0; batchStart < totalRows; batchStart += BATCH_SIZE) {
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, totalRows);
-        const batch = dataLines.slice(batchStart, batchEnd);
-        
-        // Progress reporting
-        const batchProgress = Math.floor((batchEnd / totalRows) * 40);
-        progress.report({ 
-          message: `Processing rows ${batchStart + 1}-${batchEnd} of ${totalRows}...`, 
-          increment: batchProgress / Math.ceil(totalRows / BATCH_SIZE)
-        });
-        
-        // Process batch of rows
-        for (let lineIndex = 0; lineIndex < batch.length; lineIndex++) {
-          const line = batch[lineIndex];
-          const rawParts = line.split(',');
-
-          // Build token values for this line (combine header and table tokens)
-          const rawTokenValues: Record<string, string> = { ...headerRawValues };
-          const cleanTokenValues: Record<string, string> = { ...headerTokenValues };
-
-          // Add table tokens
-          for (let i = 0; i < tableTokens.length; i++) {
-            const token = tableTokens[i];
-            const rawPart = rawParts[i] || '';
+            const token = headerTokens[i];
+            const rawPart = headerParts[i] || '';
             const trimmedPart = rawPart.trim();
-
             rawTokenValues[token.name] = rawPart || token.defaultValue;
             cleanTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
-          }
+        }
+    }
 
-          // Store token data for the table
-          groupTokenData.push({ clean: { ...cleanTokenValues }, raw: { ...rawTokenValues } });
+    const dataParts = dataLine.split(',');
+    for (let i = 0; i < tableTokens.length; i++) {
+        const token = tableTokens[i];
+        const rawPart = dataParts[i] || '';
+        const trimmedPart = rawPart.trim();
+        rawTokenValues[token.name] = rawPart || token.defaultValue;
+        cleanTokenValues[token.name] = toPascalCase(trimmedPart || token.defaultValue);
+    }
 
-          // Performance: Use precomputed fragments and apply token values
-          const fragmentsByDef = new Map<string, {
-            processedFragmentSets: Record<string, Record<string, string>>;
-            conditionalFragmentSets: Record<string, Record<string, string>>;
-            warnings: string[]
-          }>();
+    return { cleanTokenValues, rawTokenValues };
+}
 
-          for (const fragmentDef of selectedFragmentDefs) {
-            const precomputed = precomputedFragments.get(fragmentDef.id)!;
-            const warnings: string[] = [];
-
-            // Apply token values to precomputed templates
-            const processedFragmentSets: Record<string, Record<string, string>> = {};
-            const conditionalFragmentSets: Record<string, Record<string, string>> = {};
-
-            // Copy and process fragment sets
-            for (const [setName, fragments] of Object.entries(precomputed.processedFragmentSets)) {
-              processedFragmentSets[setName] = { ...fragments };
-            }
-
-            // Process conditional fragments efficiently
-            for (const [setName, conditionalFragments] of Object.entries(precomputed.conditionalFragmentSets)) {
-              for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
-                // Evaluate the conditional key for this specific row
-                const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1');
-                let processedKey = strippedKey;
-
-                // Replace {$token} patterns with values for this row (optimized)
-                for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
-                  const pattern = `{$${tokenName}`;
-                  if (processedKey.includes(pattern)) {
-                    const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
-                    let match;
-
-                    while ((match = tokenPattern.exec(processedKey)) !== null) {
-                      const fullMatch = match[0];
-                      const transformation = match[1] || 'default';
-                      const rawValue = rawTokenValues[tokenName] || '';
-                      const transformedValue = applyTokenTransformation(rawValue, transformation);
-
-                      processedKey = processedKey.replace(fullMatch, transformedValue);
-                      tokenPattern.lastIndex = 0;
-                    }
-                  }
-                }
-
-                // Evaluate the conditional expression
-                const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
-                warnings.push(...conditionalWarnings);
-
-                // If the condition evaluated to something (not empty/false), include this row
-                if (result.trim()) {
-                  debugLog(`[KAHUA] Row evaluation: ${setName}.${conditionalKey} -> "${result.trim()}"`);
-                  if (!processedFragmentSets[setName]) {
-                    processedFragmentSets[setName] = {};
-                  }
-                  processedFragmentSets[setName][result.trim()] = template;
-                }
-              }
-            }
-
-            fragmentsByDef.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets, warnings });
-          }
-          
-          conditionalFragmentsByRow.push({
-            tokenValues: { clean: cleanTokenValues, raw: rawTokenValues },
-            fragmentsByDef
-          });
+async function handleSelectionInternal(
+    fragmentIds: string[],
+    editor: vscode.TextEditor,
+    progress: vscode.Progress<{ message?: string; increment?: number }>
+): Promise<GeneratedFragmentResult | undefined> {
+    try {
+        progress.report({ message: "Loading configuration...", increment: 10 });
+        const documentType = requireDocumentType(editor.document);
+        let documentText: string;
+        try {
+            documentText = editor.document.getText();
+        } catch (readError) {
+            throw new Error('Unable to read the current editor content. Please save or reopen the document and try again.');
         }
 
-        // Performance: Yield control to allow UI updates
-        if (batchEnd < totalRows) {
-          await new Promise(resolve => setTimeout(resolve, 0));
+        if (!documentText || documentText.trim() === '') {
+            throw new Error('Current document is empty. Fill the template with token values before running the generator.');
         }
-      }
 
-      // Second pass: process fragment sets, only including conditional fragments that evaluated to true for at least one row
-      for (const fragmentDef of selectedFragmentDefs) {
-        const fragmentType = fragmentDef.type || 'grouped'; // Default to 'grouped'
+        const config = getKahuaConfig(currentResource());
+        const xmlIndentSize = config.get<number>('xmlIndentSize') || 2;
+        const applyFormatting = config.get<boolean>('formatXmlOutput') === true;
+        const suppressWarnings = config.get<boolean>('suppressInvalidConditionWarnings') || false;
 
-        // Collect all fragment sets and their keys that appear in any row for this fragment definition
-        const fragmentSetsByName = new Map<string, Map<string, Array<{ rowIndex: number; template: string; tokenValues: { clean: Record<string, string>; raw: Record<string, string> }; warnings: string[] }>>>();
+        const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
+        const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
 
-        conditionalFragmentsByRow.forEach((rowData, rowIndex) => {
-          const rowFragmentData = rowData.fragmentsByDef.get(fragmentDef.id);
-          if (rowFragmentData) {
-            allWarnings.push(...rowFragmentData.warnings);
+        if (tokenDefinitions.length === 0) {
+            throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
+        }
 
-            // Process each fragment set for this row
-            for (const [setName, fragmentSet] of Object.entries(rowFragmentData.processedFragmentSets)) {
-              if (!fragmentSetsByName.has(setName)) {
-                fragmentSetsByName.set(setName, new Map());
-              }
+        if (fragmentDefinitions.length === 0) {
+            throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
+        }
 
-              const fragmentRowsByKey = fragmentSetsByName.get(setName)!;
+        progress.report({ message: "Validating fragments...", increment: 20 });
 
-              for (const [key, template] of Object.entries(fragmentSet)) {
-                if (!fragmentRowsByKey.has(key)) {
-                  fragmentRowsByKey.set(key, []);
+        const unknown = fragmentIds.filter(id => !fragmentDefinitions.some(d => d.id === id));
+        if (unknown.length) {
+            throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
+        }
+
+        const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
+        if (selectedFragmentDefsRaw.length === 0) {
+            throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
+        }
+        const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+
+        const allTokenReferences = new Set<string>();
+        selectedFragmentDefs.forEach(def => {
+            def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
+        });
+
+        const { headerTokens, tableTokens, tokenDefaults } = mergeTokenDefinitions(
+            tokenDefinitions,
+            Array.from(allTokenReferences)
+        );
+
+        const groups = splitIntoGroups(documentText);
+        if (groups.length === 0) {
+            throw new Error('Current document contains no valid token data. Remove comments/whitespace-only lines or add token rows.');
+        }
+
+        const allWarnings: string[] = [];
+        const outputSections: string[] = [];
+
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+            const group = groups[groupIndex];
+            const headerLine = headerTokens.length > 0 && group.length > 0 ? group[0] : undefined;
+            const dataLines = headerLine ? group.slice(1) : group;
+
+            if (tableTokens.length > 0 && dataLines.length === 0) {
+                throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
+            }
+
+            const groupTokenData: Array<{ clean: Record<string, string>; raw: Record<string, string> }> = [];
+            const structuredFragments: {
+                [fragmentName: string]: {
+                    [group: string]: { header?: string; body: string[]; footer?: string }
                 }
+            } = {};
 
-                fragmentRowsByKey.get(key)!.push({
-                  rowIndex,
-                  template,
-                  tokenValues: rowData.tokenValues,
-                  warnings: rowFragmentData.warnings
+            const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
+
+            progress.report({ message: `Processing group ${groupIndex + 1} rows...`, increment: 30 });
+
+            const precomputedFragments = new Map<string, {
+                processedFragmentSets: Record<string, Record<string, string>>;
+                conditionalFragmentSets: Record<string, Record<string, string>>;
+            }>();
+
+            for (const fragmentDef of selectedFragmentDefs) {
+                const { processedFragmentSets, conditionalFragmentSets } = processFragmentTemplates(
+                    fragmentDef.fragments,
+                    {},
+                    {},
+                    suppressWarnings
+                );
+                precomputedFragments.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets });
+            }
+
+            const BATCH_SIZE = 50;
+            const totalRows = dataLines.length;
+
+            for (let batchStart = 0; batchStart < totalRows; batchStart += BATCH_SIZE) {
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, totalRows);
+                const batch = dataLines.slice(batchStart, batchEnd);
+
+                const batchProgress = Math.floor((batchEnd / totalRows) * 40);
+                progress.report({
+                    message: `Processing rows ${batchStart + 1}-${batchEnd} of ${totalRows}...`,
+                    increment: batchProgress / Math.ceil(totalRows / BATCH_SIZE)
                 });
-              }
-            }
-          }
-        });
 
-        // Process each fragment set
-        for (const [setName, fragmentRowsByKey] of fragmentSetsByName.entries()) {
-          const setDisplayName = setName === 'default' ? fragmentDef.name : `${fragmentDef.name} - ${setName}`;
+                for (let lineIndex = 0; lineIndex < batch.length; lineIndex++) {
+                    const line = batch[lineIndex];
+                    const { cleanTokenValues, rawTokenValues } = getTokenValues(headerTokens, tableTokens, headerLine, line);
 
-          if (fragmentType === 'table') {
-            // Table type uses header/body/footer structure
-            if (!(setDisplayName in structuredFragments)) {
-              structuredFragments[setDisplayName] = { 'default': { body: [] } };
-            }
+                    groupTokenData.push({ clean: { ...cleanTokenValues }, raw: { ...rawTokenValues } });
 
-            const groupKey = 'default';
-            if (!structuredFragments[setDisplayName][groupKey]) {
-              structuredFragments[setDisplayName][groupKey] = { body: [] };
-            }
+                    for (const fragmentDef of selectedFragmentDefs) {
+                        const precomputed = precomputedFragments.get(fragmentDef.id)!;
+                        const warnings: string[] = [];
 
-            // Process header (only once per group per set)
-            const headerRows = fragmentRowsByKey.get('header');
-            if (headerRows && headerRows.length > 0 && !structuredFragments[setDisplayName][groupKey].header) {
-              const firstHeaderRow = headerRows[0];
-              const rendered = renderTemplate(firstHeaderRow.template, firstHeaderRow.tokenValues.clean, firstHeaderRow.tokenValues.raw, suppressWarnings);
-              structuredFragments[setDisplayName][groupKey].header = rendered.result;
-              allWarnings.push(...rendered.warnings);
-            }
+                        const processedFragmentSets: Record<string, Record<string, string>> = {};
 
-            // Process body - only include rows where conditional evaluated to true
-            const bodyRows = fragmentRowsByKey.get('body');
-            if (bodyRows) {
-              for (const rowData of bodyRows) {
-                const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
-                allWarnings.push(...rendered.warnings);
-              }
-            }
+                        for (const [setName, fragments] of Object.entries(precomputed.processedFragmentSets)) {
+                            processedFragmentSets[setName] = { ...fragments };
+                        }
 
-            // Process nested body fragments
-            for (const [key, rows] of fragmentRowsByKey.entries()) {
-              if (key.startsWith('body - ')) {
-                for (const rowData of rows) {
-                  const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                  structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
-                  allWarnings.push(...rendered.warnings);
+                        for (const [setName, conditionalFragments] of Object.entries(precomputed.conditionalFragmentSets)) {
+                            for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
+                                const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1');
+                                let processedKey = strippedKey;
+
+                                for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
+                                    const pattern = `{$${tokenName}`;
+                                    if (processedKey.includes(pattern)) {
+                                        const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
+                                        let match;
+
+                                        while ((match = tokenPattern.exec(processedKey)) !== null) {
+                                            const fullMatch = match[0];
+                                            const transformation = match[1] || 'default';
+                                            const rawValue = rawTokenValues[tokenName] || '';
+                                            const transformedValue = applyTokenTransformation(rawValue, transformation);
+
+                                            processedKey = processedKey.replace(fullMatch, transformedValue);
+                                            tokenPattern.lastIndex = 0;
+                                        }
+                                    }
+                                }
+
+                                const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
+                                warnings.push(...conditionalWarnings);
+
+                                if (result.trim()) {
+                                    debugLog(`[KAHUA] Row evaluation: ${setName}.${conditionalKey} -> "${result.trim()}"`);
+                                    if (!processedFragmentSets[setName]) {
+                                        processedFragmentSets[setName] = {};
+                                    }
+                                    processedFragmentSets[setName][result.trim()] = template;
+                                }
+                            }
+                        }
+
+                        const fragmentType = fragmentDef.type || 'grouped';
+                        const setDisplayName = fragmentDef.name;
+
+                        if (fragmentType === 'table') {
+                            if (!structuredFragments[setDisplayName]) {
+                                structuredFragments[setDisplayName] = { 'default': { body: [] } };
+                            }
+                            const groupKey = 'default';
+
+                            const headerTemplate = processedFragmentSets[setDisplayName]?.header;
+                            if (headerTemplate && !structuredFragments[setDisplayName][groupKey].header) {
+                                const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                structuredFragments[setDisplayName][groupKey].header = rendered.result;
+                                allWarnings.push(...rendered.warnings);
+                            }
+
+                            const bodyTemplate = processedFragmentSets[setDisplayName]?.body;
+                            if (bodyTemplate) {
+                                const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
+                                allWarnings.push(...rendered.warnings);
+                            }
+
+                            const footerTemplate = processedFragmentSets[setDisplayName]?.footer;
+                            if (footerTemplate && !structuredFragments[setDisplayName][groupKey].footer) {
+                                const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                structuredFragments[setDisplayName][groupKey].footer = rendered.result;
+                                allWarnings.push(...rendered.warnings);
+                            }
+                        } else {
+                            if (!groupedFragments[setDisplayName]) {
+                                groupedFragments[setDisplayName] = {};
+                            }
+                            for (const [key, template] of Object.entries(processedFragmentSets[setDisplayName] || {})) {
+                                if (!groupedFragments[setDisplayName][key]) {
+                                    groupedFragments[setDisplayName][key] = [];
+                                }
+                                const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                groupedFragments[setDisplayName][key].push(rendered.result);
+                                allWarnings.push(...rendered.warnings);
+                            }
+                        }
+                    }
                 }
-              }
-            }
 
-            // Process footer (only once per group per set)
-            const footerRows = fragmentRowsByKey.get('footer');
-            if (footerRows && footerRows.length > 0) {
-              const lastFooterRow = footerRows[footerRows.length - 1];
-              const rendered = renderTemplate(lastFooterRow.template, lastFooterRow.tokenValues.clean, lastFooterRow.tokenValues.raw, suppressWarnings);
-              structuredFragments[setDisplayName][groupKey].footer = rendered.result;
-              allWarnings.push(...rendered.warnings);
-            }
-          } else {
-            // Grouped type - only create section if at least one row evaluated to true
-            if (!(setDisplayName in groupedFragments)) {
-              groupedFragments[setDisplayName] = {};
-            }
-
-            for (const [key, rows] of fragmentRowsByKey.entries()) {
-              if (rows.length > 0) { // Only create section if at least one row evaluated to true
-                if (!groupedFragments[setDisplayName][key]) {
-                  groupedFragments[setDisplayName][key] = [];
+                if (batchEnd < totalRows) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
                 }
-
-                for (const rowData of rows) {
-                  const rendered = renderTemplate(rowData.template, rowData.tokenValues.clean, rowData.tokenValues.raw, suppressWarnings);
-                  allWarnings.push(...rendered.warnings);
-                  groupedFragments[setDisplayName][key].push(rendered.result);
-                }
-              }
             }
-          }
+
+            const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
+            const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
+
+            const groupOutputSections: string[] = [tokenTable];
+
+            groupOutputSections.push(
+                formatFragmentCollection({
+                    table: structuredFragments,
+                    grouped: groupedFragments,
+                    applyFormatting,
+                    indentSize: xmlIndentSize
+                })
+            );
+
+            outputSections.push(groupOutputSections.join('\n\n'));
         }
-      }
 
-      // Create token table for this group
-      const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
-      const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
+        if (allWarnings.length > 0 && !suppressWarnings) {
+            vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
+        }
 
-      // Build output for this group
-      const groupOutputSections: string[] = [tokenTable];
+        let generatedXml = outputSections.join('\n\n');
 
-      // Add structured fragments (table type) — supports multiple groups
-      groupOutputSections.push(
-        formatFragmentCollection({
-          table: structuredFragments,
-          grouped: groupedFragments,
-          applyFormatting,
-          indentSize: xmlIndentSize
-        })
+        if (applyFormatting) {
+            generatedXml = formatXml(generatedXml, xmlIndentSize);
+        }
+
+        return {
+            generatedXml,
+            fragmentDefinition: selectedFragmentDefs[0],
+            tokenDefinitions
+        };
+
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error occurred';
+        vscode.window.showErrorMessage(`Kahua Attribute Generator: ${message}`);
+        return undefined;
+    }
+}
+
+async function finalizeGeneratedFragments(
+  editor: vscode.TextEditor,
+  fragmentIds: string[],
+  generation: GeneratedFragmentResult
+): Promise<void> {
+  const currentDocument = editor.document;
+  const currentFileUri = currentDocument.uri;
+  const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
+
+  const target = rememberedSourceUri
+    ? { type: 'sourceFile', uri: rememberedSourceUri }
+    : await showOutputTargetQuickPick(currentDocument);
+
+  if (!target) {
+    vscode.window.showInformationMessage('Kahua: Generation cancelled');
+    return;
+  }
+
+  const affectingTokens = injectionAffectingTokens.get(currentFileUri.toString());
+
+  switch (target.type) {
+    case 'currentFile': {
+      const currentFileResults = await insertXmlIntoFile(
+        target.uri,
+        generation.generatedXml,
+        undefined,
+        generation.fragmentDefinition,
+        affectingTokens,
+        generation.tokenDefinitions
       );
-
-      outputSections.push(groupOutputSections.join('\n\n'));
+      await openInjectionReport(currentFileResults, target.uri, generation.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
+      );
+      break;
     }
 
-    // Show warnings if any and not suppressed
-    if (allWarnings.length > 0 && !suppressWarnings) {
-      vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
+    case 'sourceFile': {
+      const sourceFileResults = await insertXmlIntoFile(
+        target.uri,
+        generation.generatedXml,
+        'smart',
+        generation.fragmentDefinition,
+        affectingTokens,
+        generation.tokenDefinitions
+      );
+      const sourceFileName = getWorkspaceRelativePath(target.uri);
+      await openInjectionReport(sourceFileResults, target.uri, generation.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
+      );
+      break;
     }
 
-    let generatedXml = outputSections.join('\n\n');
-
-    // Apply XML formatting if explicitly enabled
-    if (applyFormatting) {
-      generatedXml = formatXml(generatedXml, xmlIndentSize);
+    case 'selectFile': {
+      const selectFileResults = await insertXmlIntoFile(
+        target.uri,
+        generation.generatedXml,
+        'smart',
+        generation.fragmentDefinition,
+        affectingTokens,
+        generation.tokenDefinitions
+      );
+      const fileName = getWorkspaceRelativePath(target.uri);
+      await openInjectionReport(selectFileResults, target.uri, generation.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
+      );
+      break;
     }
 
-    // Auto-select the original source XML file when this document was generated from one
-    const currentFileUri = editor?.document?.uri;
-    const rememberedSourceUri = editor?.document
-      ? getRememberedSourceXmlUri(editor.document)
-      : undefined;
-
-    // Show quick pick to select output target (unless we already know the source file)
-    const target = rememberedSourceUri
-      ? { type: 'sourceFile', uri: rememberedSourceUri }
-      : await showOutputTargetQuickPick(editor.document!);
-
-    if (!target) {
-      vscode.window.showInformationMessage('Kahua: Generation cancelled');
-      return;
+    case 'newEditor': {
+      const newDocument = await vscode.workspace.openTextDocument({
+        content: generation.generatedXml,
+        language: 'xml'
+      });
+      await vscode.window.showTextDocument(newDocument, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preview: false
+      });
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
+      );
+      break;
     }
 
-    // Check if the current document has injection-affecting tokens stored
-    const affectingTokens = currentFileUri ? injectionAffectingTokens.get(currentFileUri.toString()) : undefined;
-
-    // Handle selected output target
-    switch (target.type) {
-      case 'currentFile':
-        // For current file, let user choose between smart and cursor insertion
-        const currentFileResults = await insertXmlIntoFile(
-          target.uri,
-          generatedXml,
-          undefined, // Will prompt user for strategy
-          selectedFragmentDefs[0],
-          affectingTokens,
-          tokenDefinitions
-        );
-        await openInjectionReport(currentFileResults, target.uri, generatedXml);
-        vscode.window.showInformationMessage(
-          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
-        );
-        break;
-
-      case 'sourceFile':
-        // For source XML file (from snippet/template), always use smart injection
-        const sourceFileResults = await insertXmlIntoFile(
-          target.uri,
-          generatedXml,
-          'smart', // Auto-use smart injection
-          selectedFragmentDefs[0],
-          affectingTokens,
-          tokenDefinitions
-        );
-        const sourceFileName = getWorkspaceRelativePath(target.uri);
-        await openInjectionReport(sourceFileResults, target.uri, generatedXml);
-        vscode.window.showInformationMessage(
-          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
-        );
-        break;
-
-      case 'selectFile':
-        // For selected file, always use smart injection
-        const selectFileResults = await insertXmlIntoFile(
-          target.uri,
-          generatedXml,
-          'smart', // Auto-use smart injection
-          selectedFragmentDefs[0],
-          affectingTokens,
-          tokenDefinitions
-        );
-        const fileName = getWorkspaceRelativePath(target.uri);
-        await openInjectionReport(selectFileResults, target.uri, generatedXml);
-        vscode.window.showInformationMessage(
-          `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
-        );
-        break;
-
-      case 'newEditor':
-        const newDocument = await vscode.workspace.openTextDocument({
-          content: generatedXml,
-          language: 'xml'
-        });
-        await vscode.window.showTextDocument(newDocument, {
-          viewColumn: vscode.ViewColumn.Beside,
-          preview: false
-        });
-        vscode.window.showInformationMessage(
-          `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
-        );
-        break;
-
-      case 'clipboard':
-        await vscode.env.clipboard.writeText(generatedXml);
-        vscode.window.showInformationMessage(
-          `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
-        );
-        break;
+    case 'clipboard': {
+      await vscode.env.clipboard.writeText(generation.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
+      );
+      break;
     }
-
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error occurred';
-    vscode.window.showErrorMessage(`Kahua Attribute Generator: ${message}`);
   }
 }
 
