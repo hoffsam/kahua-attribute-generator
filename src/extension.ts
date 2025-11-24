@@ -91,11 +91,15 @@ interface ParsedToken {
  * Output target options for generated XML
  */
 type OutputTarget =
-  | { type: 'currentFile'; uri: vscode.Uri }
+  | { type: 'currentFile'; uri: vscode.Uri; insertionStrategy?: InsertionStrategy }
   | { type: 'sourceFile'; uri: vscode.Uri }  // Associated XML file from snippet/template generation
-  | { type: 'selectFile'; uri: vscode.Uri }
+  | { type: 'selectFile'; uri: vscode.Uri; insertionStrategy?: InsertionStrategy }
   | { type: 'newEditor' }
   | { type: 'clipboard' };
+
+interface GenerationOptions {
+  forcedTarget?: OutputTarget;
+}
 
 /**
  * Map to track which XML file a snippet/template document came from
@@ -3281,6 +3285,22 @@ export function activate(context: vscode.ExtensionContext) {
   // Register custom generation commands (read kahua-scoped config with resource)
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.generateIntoDocument', () => handleSimplifiedGeneration()),
+    vscode.commands.registerCommand('kahua.generateIntoNewEditor', () => handleSimplifiedGeneration({ forcedTarget: { type: 'newEditor' } })),
+    vscode.commands.registerCommand('kahua.generateAtCursor', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showErrorMessage('No active editor found.');
+        return;
+      }
+      const sourceUri = getRememberedSourceXmlUri(editor.document);
+      if (!sourceUri) {
+        vscode.window.showErrorMessage('Kahua: Cannot determine the source XML for this template/snippet.');
+        return;
+      }
+      await handleSimplifiedGeneration({
+        forcedTarget: { type: 'currentFile', uri: sourceUri, insertionStrategy: 'cursor' }
+      });
+    }),
     vscode.commands.registerCommand('kahua.selectEntityAndGenerate', () => handleEntitySelectionCommand()),
     vscode.commands.registerCommand('kahua.generateEntities', () => handleTemplateBasedGeneration()),
     vscode.commands.registerCommand('kahua.generateCustom', async () => {
@@ -3571,7 +3591,7 @@ async function selectCustomFragments(
   );
 }
 
-async function handleSimplifiedGeneration(): Promise<void> {
+async function handleSimplifiedGeneration(options?: GenerationOptions): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showErrorMessage('No active editor found.');
@@ -3593,7 +3613,7 @@ async function handleSimplifiedGeneration(): Promise<void> {
       throw new Error(`No simplified fragments configured for document type "${documentType}".`);
     }
 
-    await handleSelection(defaultFragments);
+    await handleSelection(defaultFragments, options);
   } catch (error) {
     vscode.window.showErrorMessage(
       error instanceof Error ? error.message : `Kahua: ${error}`
@@ -4173,7 +4193,7 @@ export function deactivate() {
  *
  * @param fragmentIds Array of fragment definition IDs to process
  */
-async function handleSelection(fragmentIds: string[]): Promise<void> {
+async function handleSelection(fragmentIds: string[], options?: GenerationOptions): Promise<void> {
   const editor = vscode.window.activeTextEditor;
 
   if (!editor) {
@@ -4194,7 +4214,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     return;
   }
 
-  await finalizeGeneratedFragments(editor, fragmentIds, generationResult);
+  await finalizeGeneratedFragments(editor, fragmentIds, generationResult, options?.forcedTarget);
 }
 
 /**
@@ -4491,15 +4511,15 @@ async function handleSelectionInternal(
 async function finalizeGeneratedFragments(
   editor: vscode.TextEditor,
   fragmentIds: string[],
-  generation: GeneratedFragmentResult
+  generation: GeneratedFragmentResult,
+  forcedTarget?: OutputTarget
 ): Promise<void> {
   const currentDocument = editor.document;
   const currentFileUri = currentDocument.uri;
   const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
 
-  const target = rememberedSourceUri
-    ? { type: 'sourceFile', uri: rememberedSourceUri }
-    : await showOutputTargetQuickPick(currentDocument);
+  const target: OutputTarget | undefined = forcedTarget
+    ?? (rememberedSourceUri ? { type: 'sourceFile', uri: rememberedSourceUri } : await showOutputTargetQuickPick(currentDocument));
 
   if (!target) {
     vscode.window.showInformationMessage('Kahua: Generation cancelled');
@@ -4513,7 +4533,7 @@ async function finalizeGeneratedFragments(
       const currentFileResults = await insertXmlIntoFile(
         target.uri,
         generation.generatedXml,
-        undefined,
+        target.insertionStrategy,
         generation.fragmentDefinition,
         affectingTokens,
         generation.tokenDefinitions
@@ -4546,7 +4566,7 @@ async function finalizeGeneratedFragments(
       const selectFileResults = await insertXmlIntoFile(
         target.uri,
         generation.generatedXml,
-        'smart',
+        target.insertionStrategy ?? 'smart',
         generation.fragmentDefinition,
         affectingTokens,
         generation.tokenDefinitions

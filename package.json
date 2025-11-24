@@ -58,6 +58,22 @@
           "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
         },
         {
+          "command": "kahua.generateIntoNewEditor",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateAtCursor",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateIntoNewEditor",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateAtCursor",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
           "command": "kahua.selectEntityAndGenerate",
           "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
         },
@@ -118,6 +134,26 @@
           "command": "kahua.generateIntoDocument",
           "group": "simplified@1",
           "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
+        },
+        {
+          "command": "kahua.generateIntoNewEditor",
+          "group": "simplified@1.5",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateAtCursor",
+          "group": "simplified@1.6",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateIntoNewEditor",
+          "group": "simplified@1.5",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
+        },
+        {
+          "command": "kahua.generateAtCursor",
+          "group": "simplified@1.6",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         },
         {
           "command": "kahua.selectEntityAndGenerate",
@@ -219,6 +255,22 @@
       {
         "command": "kahua.generateIntoDocument",
         "title": "Kahua: Generate into Document"
+      },
+      {
+        "command": "kahua.generateIntoNewEditor",
+        "title": "Kahua: Generate into New Editor"
+      },
+      {
+        "command": "kahua.generateAtCursor",
+        "title": "Kahua: Generate at Cursor"
+      },
+      {
+        "command": "kahua.generateIntoNewEditor",
+        "title": "Kahua: Generate into New Editor"
+      },
+      {
+        "command": "kahua.generateAtCursor",
+        "title": "Kahua: Generate at Cursor"
       },
       {
         "command": "kahua.selectEntityAndGenerate",
