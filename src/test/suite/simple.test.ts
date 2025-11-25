@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { suite, test } from 'mocha';
 
 suite('Simple Unit Tests', () => {
 	test('should run basic assertions', () => {

@@ -55,11 +55,11 @@
       "commandPalette": [
         {
           "command": "kahua.generateAttributesExtension",
-          "when": "kahua.documentType == 'extension' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "when": "kahua.documentType == 'extension'"
         },
         {
           "command": "kahua.generateAttributesSupplement",
-          "when": "kahua.documentType == 'supplement' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "when": "kahua.documentType == 'supplement'"
         },
         {
           "command": "kahua.generateSnippetAttributes",
@@ -71,7 +71,7 @@
         },
         {
           "command": "kahua.generateLookups",
-          "when": "kahua.documentType == 'extension' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "when": "kahua.documentType == 'extension'"
         },
         {
           "command": "kahua.generateSnippetLookups",
@@ -83,7 +83,7 @@
         },
         {
           "command": "kahua.generateCustom",
-          "when": "kahua.hasApplicableDocument && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "when": "kahua.hasApplicableDocument"
         },
         {
           "command": "kahua.generateSnippetCustom",
@@ -103,54 +103,34 @@
       ],
       "kahua.submenu": [
         {
-          "command": "kahua.generateAttributesExtension",
-          "group": "attributes@1",
-          "when": "kahua.documentType == 'extension' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "command": "kahua.showTemplateForGeneration",
+          "group": "kahua@1",
+          "when": "config.kahua.showTemplatesInMenu && kahua.hasApplicableDocument && kahua.canGenerateTemplates"
         },
         {
-          "command": "kahua.generateAttributesSupplement",
-          "group": "attributes@2",
-          "when": "kahua.documentType == 'supplement' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "command": "kahua.showSnippetForGeneration",
+          "group": "kahua@2", 
+          "when": "config.kahua.showSnippetsInMenu && kahua.hasApplicableDocument && kahua.canGenerateSnippets"
         },
         {
-          "command": "kahua.generateSnippetAttributes",
-          "when": "config.kahua.showSnippetsInMenu && kahua.canGenerateSnippets && kahua.documentType == 'extension'",
-          "group": "attributes@3"
+          "command": "kahua.generateIntoNewEditor",
+          "group": "kahua@3",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         },
         {
-          "command": "kahua.generateTemplateAttributes",
-          "when": "config.kahua.showTemplatesInMenu && kahua.canGenerateTemplates && kahua.documentType == 'extension'",
-          "group": "attributes@4"
+          "command": "kahua.generateAtCursor",
+          "group": "kahua@4",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         },
         {
-          "command": "kahua.generateLookups",
-          "group": "lookups@1",
-          "when": "kahua.documentType == 'extension' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
+          "command": "kahua.injectIntoSourceFile",
+          "group": "kahua@5",
+          "when": "(kahua.isTemplateDocument || kahua.isSnippetDocument) && kahua.hasSourceFile"
         },
         {
-          "command": "kahua.generateSnippetLookups",
-          "when": "config.kahua.showSnippetsInMenu && kahua.canGenerateSnippets && kahua.documentType == 'extension'",
-          "group": "lookups@2"
-        },
-        {
-          "command": "kahua.generateTemplateLookups",
-          "when": "config.kahua.showTemplatesInMenu && kahua.canGenerateTemplates && kahua.documentType == 'extension'",
-          "group": "lookups@3"
-        },
-        {
-          "command": "kahua.generateCustom",
-          "group": "custom@1",
-          "when": "kahua.hasApplicableDocument && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
-        },
-        {
-          "command": "kahua.generateSnippetCustom",
-          "when": "config.kahua.showSnippetsInMenu && kahua.hasApplicableDocument && kahua.canGenerateSnippets",
-          "group": "custom@2"
-        },
-        {
-          "command": "kahua.generateTemplateCustom",
-          "when": "config.kahua.showTemplatesInMenu && kahua.hasApplicableDocument && kahua.canGenerateTemplates",
-          "group": "custom@3"
+          "command": "kahua.injectIntoFile",
+          "group": "kahua@6",
+          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         }
       ]
     },
@@ -162,44 +142,28 @@
     ],
     "commands": [
       {
-        "command": "kahua.generateAttributesExtension",
-        "title": "Kahua: Generate Attributes for Extension"
+        "command": "kahua.showTemplateForGeneration",
+        "title": "Kahua: Show Template for Generation"
       },
       {
-        "command": "kahua.generateAttributesSupplement",
-        "title": "Kahua: Generate Attributes for Supplement"
+        "command": "kahua.showSnippetForGeneration",
+        "title": "Kahua: Show Snippet for Generation"
       },
       {
-        "command": "kahua.generateSnippetAttributes",
-        "title": "Kahua: Generate Snippet for Attributes"
+        "command": "kahua.generateIntoNewEditor",
+        "title": "Kahua: Generate into New Editor"
       },
       {
-        "command": "kahua.generateTemplateAttributes",
-        "title": "Kahua: Generate Template for Attributes"
+        "command": "kahua.generateAtCursor",
+        "title": "Kahua: Generate at Cursor"
       },
       {
-        "command": "kahua.generateLookups",
-        "title": "Kahua: Generate Lookup Lists"
+        "command": "kahua.injectIntoSourceFile",
+        "title": "Kahua: Inject into Source File"
       },
       {
-        "command": "kahua.generateSnippetLookups",
-        "title": "Kahua: Generate Snippet for Lookup Lists"
-      },
-      {
-        "command": "kahua.generateTemplateLookups",
-        "title": "Kahua: Generate Template for Lookup Lists"
-      },
-      {
-        "command": "kahua.generateCustom",
-        "title": "Kahua: Generate from Custom"
-      },
-      {
-        "command": "kahua.generateSnippetCustom",
-        "title": "Kahua: Generate Snippet for Custom"
-      },
-      {
-        "command": "kahua.generateTemplateCustom",
-        "title": "Kahua: Generate Template for Custom"
+        "command": "kahua.injectIntoFile",
+        "title": "Kahua: Inject into File"
       }
     ],
     "keybindings": [],
@@ -227,6 +191,7 @@
         "kahua.suppressInvalidConditionWarnings": {
           "type": "boolean",
           "default": false,
+          "scope": "resource",
           "description": "Suppress error notifications when conditional expressions reference tokens that don't exist or have no value."
         },
         "kahua.showSnippetsInMenu": {
@@ -340,6 +305,7 @@
         },
         "kahua.tokenNameDefinitions": {
           "type": "array",
+          "scope": "resource",
           "default": [
             {
               "id": "appname",
@@ -452,6 +418,7 @@
         },
         "kahua.fragmentDefinitions": {
           "type": "array",
+          "scope": "resource",
           "default": [
             {
               "id": "attributes",
@@ -716,6 +683,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "fast-xml-parser": "^5.3.2"
+    "@xmldom/xmldom": "^0.8.10",
+    "saxes": "^6.0.0"
   }
 }
