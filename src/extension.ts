@@ -156,6 +156,11 @@ interface XmlCacheEntry {
 const xmlParseCache = new Map<string, XmlCacheEntry>();
 const XML_CACHE_MAX_SIZE = 50;
 const XML_CACHE_MAX_AGE = 5 * 60 * 1000; // 5 minutes
+const parsedXmlContextCache = new WeakMap<vscode.TextDocument, ParsedXmlContext>();
+const templateCache = new Map<string, CompiledTemplate>();
+const DEFAULT_STATUS_TEXT = '$(rocket) Kahua Generate';
+const STATUS_RESET_DELAY_MS = 5000;
+let statusResetTimer: ReturnType<typeof setTimeout> | undefined;
 
 const DOCUMENT_TYPE_CONTEXT_KEY = 'kahua.documentType';
 const DOCUMENT_APPLICABLE_CONTEXT_KEY = 'kahua.hasApplicableDocument';
@@ -174,6 +179,29 @@ const debugWarn = DEBUG_MODE ? console.warn : () => {};
 const debugError = DEBUG_MODE ? console.error : () => {};
 
 let generateStatusBarItem: vscode.StatusBarItem | undefined;
+
+function setGenerationStatus(message: string, autoReset: boolean = true): void {
+  if (!generateStatusBarItem) {
+    return;
+  }
+  generateStatusBarItem.text = `$(rocket) ${message}`;
+  generateStatusBarItem.show();
+  if (statusResetTimer) {
+    clearTimeout(statusResetTimer);
+    statusResetTimer = undefined;
+  }
+  if (autoReset) {
+    statusResetTimer = setTimeout(() => resetGenerationStatus(), STATUS_RESET_DELAY_MS);
+  }
+}
+
+function resetGenerationStatus(): void {
+  if (!generateStatusBarItem) {
+    return;
+  }
+  generateStatusBarItem.text = DEFAULT_STATUS_TEXT;
+  statusResetTimer = undefined;
+}
 
 /**
  * Represents a parsed section from generated XML output
@@ -210,6 +238,37 @@ interface XPathMatchedElement {
   nameAttributeValue?: string;
   enrichedPath: string;
   pathNodes: Array<{ tagName: string; attributes: Record<string, any> }>;
+}
+
+interface ParsedXmlContext {
+  document: vscode.TextDocument;
+  version: number;
+  contentHash: string;
+  parsed: any;
+  xpathElementCache: Map<string, XPathMatchedElement[]>;
+  xpathTargetCache: Map<string, Array<{line: number; tagName: string; attributes: Record<string, any>; nameAttributeValue?: string; enrichedPath: string}>>;
+  lineResolutionCache: Map<string, number>;
+}
+
+interface ConditionalFragmentEntry {
+  rawKey: string;
+  compiledKey: CompiledTemplate;
+  template: string;
+}
+
+type CompiledTemplatePart =
+  | { type: 'text'; value: string }
+  | { type: 'token'; tokenName: string; transform: string }
+  | { type: 'interpolation'; tokenName: string; transform: string }
+  | {
+      type: 'conditional';
+      condition: string;
+      trueTemplate: CompiledTemplate;
+      falseTemplate: CompiledTemplate;
+    };
+
+interface CompiledTemplate {
+  parts: CompiledTemplatePart[];
 }
 
 /**
@@ -327,6 +386,48 @@ function cleanupXmlCache(): void {
       xmlParseCache.delete(key);
     }
   }
+}
+
+function getParsedXmlFromCache(document: vscode.TextDocument, content: string, contentHash: string): any {
+  const cacheKey = `${document.uri.toString()}_${contentHash}`;
+  const cached = xmlParseCache.get(cacheKey);
+  if (cached && cached.contentHash === contentHash) {
+    cached.timestamp = Date.now();
+    return cached.parsed;
+  }
+
+  const parsed = parseXmlDocumentInternal(content);
+  cleanupXmlCache();
+  xmlParseCache.set(cacheKey, {
+    parsed,
+    contentHash,
+    timestamp: Date.now()
+  });
+
+  return parsed;
+}
+
+function getParsedXmlContext(document: vscode.TextDocument): ParsedXmlContext {
+  const existing = parsedXmlContextCache.get(document);
+  if (existing && existing.version === document.version) {
+    return existing;
+  }
+
+  const content = document.getText();
+  const contentHash = simpleHash(content);
+  const parsed = getParsedXmlFromCache(document, content, contentHash);
+  const context: ParsedXmlContext = {
+    document,
+    version: document.version,
+    contentHash,
+    parsed,
+    xpathElementCache: new Map(),
+    xpathTargetCache: new Map(),
+    lineResolutionCache: new Map()
+  };
+
+  parsedXmlContextCache.set(document, context);
+  return context;
 }
 
 function parseXmlForDocumentTypeDetection(text: string): any | undefined {
@@ -546,7 +647,7 @@ async function setDocumentTypeContext(typeId?: string): Promise<void> {
 
 async function updateDocumentTypeContext(document?: vscode.TextDocument): Promise<void> {
   if (!document) {
-    console.log('[KAHUA] updateDocumentTypeContext: No active document');
+    debugLog('[KAHUA] updateDocumentTypeContext: No active document');
     await setDocumentTypeContext(undefined);
     await setTemplateDocumentContext(undefined);
     await setSnippetDocumentContext(undefined);
@@ -564,19 +665,19 @@ async function updateDocumentTypeContext(document?: vscode.TextDocument): Promis
 
   const override = documentTypeOverrides.get(document.uri.toString());
   if (override) {
-    console.log(`[KAHUA] updateDocumentTypeContext: Using override ${override} for ${document.uri.fsPath}`);
+    debugLog(`[KAHUA] updateDocumentTypeContext: Using override ${override} for ${document.uri.fsPath}`);
     await setDocumentTypeContext(override);
     return;
   }
 
   if (document.languageId !== 'xml') {
-    console.log(`[KAHUA] updateDocumentTypeContext: Document ${document.uri.fsPath} is not XML`);
+    debugLog(`[KAHUA] updateDocumentTypeContext: Document ${document.uri.fsPath} is not XML`);
     await setDocumentTypeContext(undefined);
     return;
   }
 
   const typeId = getOrDetectDocumentType(document);
-  console.log(`[KAHUA] updateDocumentTypeContext: Detected type ${typeId} for ${document.uri.fsPath}`);
+  debugLog(`[KAHUA] updateDocumentTypeContext: Detected type ${typeId} for ${document.uri.fsPath}`);
   await setDocumentTypeContext(typeId);
 }
 
@@ -1325,6 +1426,7 @@ async function insertXmlIntoFile(
   tokenDefinitions?: TokenNameDefinition[]
 ): Promise<InjectionResult[]> {
   const document = await vscode.workspace.openTextDocument(uri);
+  const xmlContext = getParsedXmlContext(document);
   debugLog(`[KAHUA] insertXmlIntoFile: target=${uri.fsPath} strategy=${strategy ?? 'prompt'}`);
   const editor = await vscode.window.showTextDocument(document, {
     preserveFocus: false,
@@ -1374,9 +1476,9 @@ async function insertXmlIntoFile(
               if (xpath.includes('EntityDef') || xpath === templateBasePath) {
                 const tokenValue = affectingTokens.get(tokenName)!;
                 modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
-                console.log(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+                debugLog(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
               } else {
-                console.log(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
+                debugLog(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
               }
             }
           }
@@ -1395,7 +1497,7 @@ async function insertXmlIntoFile(
   const generatedSections = parseGeneratedXmlSections(content);
   debugLog(`[KAHUA] insertXmlIntoFile: parsed ${generatedSections.length} generated sections`);
   const parseStart = Date.now();
-  const allTargetSections = parseTargetXmlStructure(document, injectionPaths);
+  const allTargetSections = parseTargetXmlStructure(document, injectionPaths, xmlContext);
   debugLog(`[KAHUA] insertXmlIntoFile: parseTargetXmlStructure completed in ${Date.now() - parseStart}ms with ${allTargetSections.length} sections`);
 
   // Deduplicate target sections that point to the same line
@@ -1403,7 +1505,7 @@ async function insertXmlIntoFile(
   const seenLines = new Set<number>();
   const targetSections = allTargetSections.filter(section => {
     if (seenLines.has(section.openTagLine)) {
-      console.log(`[DEBUG] Skipping duplicate target section at line ${section.openTagLine + 1}`);
+      debugLog(`[DEBUG] Skipping duplicate target section at line ${section.openTagLine + 1}`);
       return false;
     }
     seenLines.add(section.openTagLine);
@@ -1629,7 +1731,12 @@ function findLastChildElement(document: vscode.TextDocument, openLine: number, c
  * Parses target XML file to find section tags where content can be inserted using configured injection paths
  * Creates multiple target sections when there are multiple matches for a path
  */
-function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: Record<string, string | InjectionPathConfig>): XmlTargetSection[] {
+function parseTargetXmlStructure(
+  document: vscode.TextDocument,
+  injectionPaths: Record<string, string | InjectionPathConfig>,
+  xmlContext?: ParsedXmlContext
+): XmlTargetSection[] {
+  const context = xmlContext ?? getParsedXmlContext(document);
   const sections: XmlTargetSection[] = [];
 
   for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
@@ -1638,7 +1745,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
     const displayAttrConfig = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
     const displayAttributes = Array.isArray(displayAttrConfig) ? displayAttrConfig : [displayAttrConfig];
 
-    const allTargets = findAllXPathTargets(document, xpath);
+    const allTargets = findAllXPathTargets(context, xpath);
 
     // Deduplicate by line number
     const seenLines = new Set<number>();
@@ -1650,7 +1757,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
       return true;
     });
 
-    console.log(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
+    debugLog(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
 
     for (const target of uniqueTargets) {
       const line = document.lineAt(target.line);
@@ -1727,27 +1834,7 @@ function parseTargetXmlStructure(document: vscode.TextDocument, injectionPaths: 
  * Performance: Get cached parsed XML document or parse and cache
  */
 function getCachedParsedXml(document: vscode.TextDocument): any {
-  const content = document.getText();
-  const contentHash = simpleHash(content);
-  const cacheKey = `${document.uri.toString()}_${contentHash}`;
-  
-  const cached = xmlParseCache.get(cacheKey);
-  if (cached && cached.contentHash === contentHash) {
-    cached.timestamp = Date.now(); // Update access time
-    return cached.parsed;
-  }
-  
-  // Parse and cache
-  const parsed = parseXmlDocumentInternal(content);
-  
-  cleanupXmlCache();
-  xmlParseCache.set(cacheKey, {
-    parsed,
-    contentHash,
-    timestamp: Date.now()
-  });
-  
-  return parsed;
+  return getParsedXmlContext(document).parsed;
 }
 
 /**
@@ -1768,15 +1855,15 @@ function parseXmlDocumentInternal(xmlContent: string): any {
 
   // Debug: Log structure of parsed XML (only in development)
   if (process.env.NODE_ENV === 'development') {
-    console.log('[DEBUG] ========== Parsed XML Structure ==========');
-    console.log('[DEBUG] Root keys:', Object.keys(parsed));
+    debugLog('[DEBUG] ========== Parsed XML Structure ==========');
+    debugLog('[DEBUG] Root keys:', Object.keys(parsed));
     if (Object.keys(parsed).length > 0) {
       const rootKey = Object.keys(parsed)[0];
       const rootElement = parsed[rootKey];
       const childKeys = Object.keys(rootElement).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
-      console.log(`[DEBUG] Child keys under "${rootKey}":`, childKeys.slice(0, 20));
+      debugLog(`[DEBUG] Child keys under "${rootKey}":`, childKeys.slice(0, 20));
       if (childKeys.length > 20) {
-        console.log(`[DEBUG] ... (${childKeys.length} total child keys)`);
+        debugLog(`[DEBUG] ... (${childKeys.length} total child keys)`);
       }
     }
   }
@@ -1796,7 +1883,13 @@ function parseXmlDocument(document: vscode.TextDocument): any {
  * Traverse parsed XML object to find elements matching XPath
  * Returns elements with their identifying attributes
  */
-function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement[] {
+function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPathMatchedElement[] {
+  const cached = xmlContext.xpathElementCache.get(xpath);
+  if (cached) {
+    return cached;
+  }
+
+  const parsedXml = xmlContext.parsed;
   let config = getKahuaConfig().get<ElementDisplayConfig>('elementDisplayAttributes');
   // Provide a fallback if configuration is not loaded correctly or missing properties
   if (!config) {
@@ -1826,7 +1919,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
   };
   
   let parts = xpath.split('/').filter(p => p);
-  console.log(`[DEBUG] XPath parts:`, parts);
+  debugLog(`[DEBUG] XPath parts:`, parts);
 
   let currentElements: TraversalResult[] = [];
   
@@ -1846,7 +1939,7 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
     const rootPathNodes = [{ tagName: rootTagName, attributes: rootAttributes }];
 
     if (rootTagName === parts[0]) { // Use rootTagName instead of rootKeys[0] for consistency
-      console.log(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
+      debugLog(`[DEBUG] Root element ${rootKeys[0]} matches first part of xpath, starting from inside it`);
       currentElements = [{
         element: rootElement,
         nameAttributeValue: rootNameAttr,
@@ -1854,9 +1947,9 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
         pathNodes: rootPathNodes.slice()
       }];
       parts = parts.slice(1);
-      console.log(`[DEBUG] Remaining parts after skipping root:`, parts);
+      debugLog(`[DEBUG] Remaining parts after skipping root:`, parts);
     } else {
-      console.log(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
+      debugLog(`[DEBUG] Root element is ${rootKeys[0]}, searching within it`);
       currentElements = [{
         element: rootElement,
         nameAttributeValue: rootNameAttr,
@@ -1868,18 +1961,18 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
     currentElements = [{ element: parsedXml, currentEnrichedPath: '', pathNodes: [] }];
   }
 
-  console.log(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
+  debugLog(`[DEBUG] Starting traversal with ${currentElements.length} element(s) and ${parts.length} part(s) to process`);
   
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    console.log(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
+    debugLog(`[DEBUG] --- Processing part ${i+1}/${parts.length}: "${part}" ---`);
     
     const attrMatch = part.match(/^([\w.]+)\[@(\w+)='([^']+)'\]$/);
     const tagName = attrMatch ? attrMatch[1] : part;
     const filterAttrName = attrMatch ? attrMatch[2] : null;
     const filterAttrValue = attrMatch ? attrMatch[3] : null;
 
-    console.log(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
+    debugLog(`[DEBUG] Tag name: "${tagName}"${filterAttrName ? `, Filter: ${filterAttrName}='${filterAttrValue}'` : ''}`);
 
     const nextElements: TraversalResult[] = [];
 
@@ -1887,10 +1980,10 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
       const element = current.element;
       if (typeof element === 'object' && element !== null) {
         const availableKeys = Object.keys(element).filter(k => !k.startsWith('@_') && !k.startsWith('#'));
-        console.log(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
+        debugLog(`[DEBUG] Available keys in current element:`, availableKeys.slice(0, 10), availableKeys.length > 10 ? `... (${availableKeys.length} total)` : '');
 
         if (element[tagName]) {
-          console.log(`[DEBUG] Found key "${tagName}" in element`);
+          debugLog(`[DEBUG] Found key "${tagName}" in element`);
           const candidates = Array.isArray(element[tagName]) ? element[tagName] : [element[tagName]];
 
           for (const candidate of candidates) {
@@ -1921,26 +2014,26 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
             });
           }
         } else {
-          console.log(`[DEBUG] Key "${tagName}" NOT found in element`);
+          debugLog(`[DEBUG] Key "${tagName}" NOT found in element`);
         }
       }
     }
 
     if (nextElements.length === 0) {
-      console.log(`[DEBUG] ❌ No elements found for part: "${part}"`);
-      console.log(`[DEBUG] Was searching for: "${tagName}" in ${currentElements.length} element(s)`);
-      console.log(`[DEBUG] Full XPath that failed: ${xpath}`);
+      debugLog(`[DEBUG] ❌ No elements found for part: "${part}"`);
+      debugLog(`[DEBUG] Was searching for: "${tagName}" in ${currentElements.length} element(s)`);
+      debugLog(`[DEBUG] Full XPath that failed: ${xpath}`);
       return [];
     }
 
     currentElements = nextElements;
-    console.log(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
+    debugLog(`[DEBUG] ✅ Found ${currentElements.length} element(s) after processing "${part}"`);
   }
 
   const lastPart = parts[parts.length - 1];
   const tagName = lastPart.match(/^([\w.]+)/)?.[1] || lastPart;
 
-  return currentElements.map(res => {
+  const results = currentElements.map(res => {
     const attributes: Record<string, any> = {};
 
     for (const key in res.element) {
@@ -1958,6 +2051,9 @@ function findElementsByXPath(parsedXml: any, xpath: string): XPathMatchedElement
       pathNodes: res.pathNodes
     };
   });
+
+  xmlContext.xpathElementCache.set(xpath, results);
+  return results;
 }
 
 
@@ -2014,17 +2110,36 @@ function collectFullTag(document: vscode.TextDocument, startOffset: number): { t
     };
 }
 
+function getPathNodesCacheKey(pathNodes: Array<{ tagName: string; attributes: Record<string, any> }>): string {
+  return pathNodes.map(node => {
+    const attrs = node.attributes
+      ? Object.keys(node.attributes)
+          .sort()
+          .map(attr => `${attr}=${String(node.attributes[attr])}`)
+          .join('|')
+      : '';
+    return `${node.tagName}[${attrs}]`;
+  }).join('/');
+}
+
 /**
  * Finds the line number corresponding to a matched XPath element by walking ancestor nodes
  */
 function findLineNumberForPath(
-  document: vscode.TextDocument,
+  xmlContext: ParsedXmlContext,
   pathNodes: Array<{ tagName: string; attributes: Record<string, any> }>
 ): number {
   if (!pathNodes.length) {
     return -1;
   }
 
+  const cacheKey = getPathNodesCacheKey(pathNodes);
+  const cached = xmlContext.lineResolutionCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const document = xmlContext.document;
   let searchStart = 0;
   let searchEnd = document.lineCount - 1;
 
@@ -2034,6 +2149,7 @@ function findLineNumberForPath(
     const lineIndex = findLineForNodeInRange(document, node.tagName, node.attributes, searchStart, searchEnd);
     if (lineIndex === -1) {
       debugLog(`[KAHUA]   Not found between lines ${searchStart + 1}-${searchEnd + 1}`);
+      xmlContext.lineResolutionCache.set(cacheKey, -1);
       return -1;
     }
 
@@ -2042,16 +2158,19 @@ function findLineNumberForPath(
     const closeLine = isSelfClosing ? lineIndex : findClosingTag(document, node.tagName, lineIndex);
 
     if (depth === pathNodes.length - 1) {
+      xmlContext.lineResolutionCache.set(cacheKey, lineIndex);
       return lineIndex;
     }
 
     searchStart = lineIndex + 1;
     searchEnd = closeLine - 1;
     if (searchStart > searchEnd) {
+      xmlContext.lineResolutionCache.set(cacheKey, -1);
       return -1;
     }
   }
 
+  xmlContext.lineResolutionCache.set(cacheKey, -1);
   return -1;
 }
 
@@ -2219,27 +2338,36 @@ function escapeRegExp(value: string): string {
  * Uses fast-xml-parser for accurate XML parsing
  * Returns array of objects with line numbers, tag names, and attributes
  */
-function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Array<{line: number, tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
-  console.log(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
+function findAllXPathTargets(
+  xmlContext: ParsedXmlContext,
+  xpath: string
+): Array<{line: number, tagName: string, attributes: Record<string, any>, nameAttributeValue?: string, enrichedPath: string}> {
+  const cached = xmlContext.xpathTargetCache.get(xpath);
+  if (cached) {
+    return cached;
+  }
+
+  debugLog(`[DEBUG] findAllXPathTargets called with xpath: ${xpath}`);
 
   try {
     // Parse XML document
-    const parsedXml = parseXmlDocument(document);
+    const parsedXml = xmlContext.parsed;
 
     // Find elements matching XPath
-    const elements = findElementsByXPath(parsedXml, xpath);
-    console.log(`[DEBUG] Found ${elements.length} elements via XPath`);
+    const elements = findElementsByXPath(xmlContext, xpath);
+    debugLog(`[DEBUG] Found ${elements.length} elements via XPath`);
 
     if (elements.length === 0) {
+      xmlContext.xpathTargetCache.set(xpath, []);
       return [];
     }
 
     const resolvedTargets: Array<{line: number; tagName: string; attributes: Record<string, any>; nameAttributeValue?: string; enrichedPath: string}> = [];
 
     for (const element of elements) {
-      const line = findLineNumberForPath(document, element.pathNodes);
+      const line = findLineNumberForPath(xmlContext, element.pathNodes);
       if (line === -1) {
-        console.warn(`[DEBUG] Unable to locate line for element ${element.tagName} at path ${element.enrichedPath}`);
+        debugWarn(`[DEBUG] Unable to locate line for element ${element.tagName} at path ${element.enrichedPath}`);
         continue;
       }
       resolvedTargets.push({
@@ -2251,10 +2379,11 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
       });
     }
 
-    console.log(`[DEBUG] Mapped to ${resolvedTargets.length} line numbers`);
+    debugLog(`[DEBUG] Mapped to ${resolvedTargets.length} line numbers`);
+    xmlContext.xpathTargetCache.set(xpath, resolvedTargets);
     return resolvedTargets;
   } catch (error) {
-    console.error(`[ERROR] Failed to parse XML or find elements:`, error);
+    debugWarn(`[ERROR] Failed to parse XML or find elements: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 }
@@ -2263,8 +2392,8 @@ function findAllXPathTargets(document: vscode.TextDocument, xpath: string): Arra
  * Finds the target line for an XPath-like expression in the XML document (first match only)
  * Supports: TagName, Parent/Child, Parent/Child[@Attr='value']
  */
-function findXPathTarget(document: vscode.TextDocument, xpath: string): number {
-  const matches = findAllXPathTargets(document, xpath);
+function findXPathTarget(xmlContext: ParsedXmlContext, xpath: string): number {
+  const matches = findAllXPathTargets(xmlContext, xpath);
   return matches.length > 0 ? matches[0].line : -1;
 }
 
@@ -2273,7 +2402,11 @@ function findXPathTarget(document: vscode.TextDocument, xpath: string): number {
  * Uses fast-xml-parser for accurate parsing
  * Supports paths like "App/@Name" or "EntityDefs/EntityDef/@Name"
  */
-function extractAttributeValue(document: vscode.TextDocument, xpath: string): string | undefined {
+function extractAttributeValue(
+  document: vscode.TextDocument,
+  xpath: string,
+  xmlContext?: ParsedXmlContext
+): string | undefined {
   if (!xpath.includes('/@')) {
     return undefined;
   }
@@ -2283,20 +2416,21 @@ function extractAttributeValue(document: vscode.TextDocument, xpath: string): st
   const attributeName = parts[1];
 
   try {
-    const parsedXml = parseXmlDocument(document);
+    const context = xmlContext ?? getParsedXmlContext(document);
+    const parsedXml = context.parsed;
 
     // Special case: if elementPath is the root element name, get attributes from root
     const rootKeys = Object.keys(parsedXml);
     if (rootKeys.length > 0 && rootKeys[0] === elementPath) {
-      console.log(`[DEBUG] Extracting attribute from root element: ${rootKeys[0]}`);
+      debugLog(`[DEBUG] Extracting attribute from root element: ${rootKeys[0]}`);
       const rootElement = parsedXml[rootKeys[0]];
       const attrKey = `@_${attributeName}`;
       const value = rootElement[attrKey];
-      console.log(`[DEBUG] Root element attribute ${attributeName} = ${value}`);
+      debugLog(`[DEBUG] Root element attribute ${attributeName} = ${value}`);
       return value;
     }
 
-    const elements = findElementsByXPath(parsedXml, elementPath);
+    const elements = findElementsByXPath(context, elementPath);
 
     if (elements.length === 0) {
       return undefined;
@@ -2305,7 +2439,7 @@ function extractAttributeValue(document: vscode.TextDocument, xpath: string): st
     // Return attribute from first matching element
     return elements[0].attributes[attributeName];
   } catch (error) {
-    console.error(`[ERROR] Failed to extract attribute value:`, error);
+    debugWarn(`[ERROR] Failed to extract attribute value: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   }
 }
@@ -2313,8 +2447,13 @@ function extractAttributeValue(document: vscode.TextDocument, xpath: string): st
 /**
  * Extracts text content from an XML element
  */
-function extractTextContent(document: vscode.TextDocument, xpath: string): string | undefined {
-  const targetLine = findXPathTarget(document, xpath);
+function extractTextContent(
+  document: vscode.TextDocument,
+  xpath: string,
+  xmlContext?: ParsedXmlContext
+): string | undefined {
+  const context = xmlContext ?? getParsedXmlContext(document);
+  const targetLine = findXPathTarget(context, xpath);
   if (targetLine === -1) {
     return undefined;
   }
@@ -2335,11 +2474,12 @@ function extractTextContent(document: vscode.TextDocument, xpath: string): strin
 function extractSelectableValues(
   document: vscode.TextDocument,
   xpath: string,
-  attributeName: string
+  attributeName: string,
+  xmlContext?: ParsedXmlContext
 ): Array<{value: string, context: string}> {
   try {
-    const parsedXml = parseXmlDocument(document);
-    const elements = findElementsByXPath(parsedXml, xpath);
+    const context = xmlContext ?? getParsedXmlContext(document);
+    const elements = findElementsByXPath(context, xpath);
 
     debugLog(`[DEBUG] extractSelectableValues found ${elements.length} elements`);
 
@@ -2358,7 +2498,7 @@ function extractSelectableValues(
       })
       .filter((item): item is {value: string, context: string} => item !== null);
   } catch (error) {
-    console.error(`[ERROR] Failed to extract selectable values:`, error);
+    debugWarn(`[ERROR] Failed to extract selectable values: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 }
@@ -2403,34 +2543,35 @@ async function readTokenValuesFromXml(
   tokenReadPaths: Record<string, TokenReadPath>
 ): Promise<Map<string, string>> {
   const values = new Map<string, string>();
+  const xmlContext = getParsedXmlContext(document);
 
   for (const [tokenName, readPath] of Object.entries(tokenReadPaths)) {
     let value: string | undefined;
 
     switch (readPath.type) {
       case 'attribute':
-        value = extractAttributeValue(document, readPath.path);
+        value = extractAttributeValue(document, readPath.path, xmlContext);
         break;
 
       case 'text':
-        value = extractTextContent(document, readPath.path);
+        value = extractTextContent(document, readPath.path, xmlContext);
         break;
 
       case 'selection':
         if (!readPath.attribute) {
-          console.log(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
+          debugLog(`[DEBUG] Skipping ${tokenName}: no attribute configured`);
           continue;
         }
 
         const storedSelection = getStoredTokenSelection(document, tokenName);
         if (storedSelection) {
-          console.log(`[DEBUG] Using stored selection for ${tokenName}: ${storedSelection}`);
+          debugLog(`[DEBUG] Using stored selection for ${tokenName}: ${storedSelection}`);
           value = storedSelection;
           break;
         }
 
-        console.log(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
-        const options = extractSelectableValues(document, readPath.path, readPath.attribute);
+        debugLog(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
+        const options = extractSelectableValues(document, readPath.path, readPath.attribute, xmlContext);
         debugLog(`[DEBUG] Found ${options.length} options:`, options);
         value = await showValueSelectionPick(tokenName, options);
         debugLog(`[DEBUG] User selected: ${value}`);
@@ -3066,12 +3207,12 @@ function processFragmentTemplates(
   suppressWarnings: boolean
 ): {
   processedFragmentSets: Record<string, Record<string, string>>; // setName -> { fragmentKey -> template }
-  conditionalFragmentSets: Record<string, Record<string, string>>; // setName -> { conditionalKey -> template }
+  conditionalFragmentSets: Record<string, ConditionalFragmentEntry[]>; // setName -> conditional entries
   warnings: string[]
 } {
-  console.log('[KAHUA] processFragmentTemplates called with keys:', Object.keys(fragmentTemplates));
+  debugLog('[KAHUA] processFragmentTemplates called with keys:', Object.keys(fragmentTemplates));
   const processedFragmentSets: Record<string, Record<string, string>> = {};
-  const conditionalFragmentSets: Record<string, Record<string, string>> = {};
+  const conditionalFragmentSets: Record<string, ConditionalFragmentEntry[]> = {};
   const allWarnings: string[] = [];
 
   // Check if this is the new nested structure (fragment sets) or legacy flat/single-level nested structure
@@ -3081,9 +3222,9 @@ function processFragmentTemplates(
     // New structure: fragments contain sets like { setA: { header: "...", body: "..." }, setB: { ... } }
     for (const [setName, setTemplate] of Object.entries(fragmentTemplates)) {
       if (isFragmentSet(setTemplate)) {
-        console.log('[KAHUA] Processing fragment set:', setName);
+        debugLog('[KAHUA] Processing fragment set:', setName);
         processedFragmentSets[setName] = {};
-        conditionalFragmentSets[setName] = {};
+        conditionalFragmentSets[setName] = [];
 
         for (const [fragmentKey, template] of Object.entries(setTemplate)) {
           if (typeof template === 'string') {
@@ -3091,8 +3232,12 @@ function processFragmentTemplates(
             const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
             if (isConditional) {
-              console.log('[KAHUA] Found conditional in fragment set:', setName, fragmentKey);
-              conditionalFragmentSets[setName][fragmentKey] = template;
+              debugLog('[KAHUA] Found conditional in fragment set:', setName, fragmentKey);
+              conditionalFragmentSets[setName].push({
+                rawKey: strippedKey,
+                compiledKey: getCompiledTemplate(strippedKey),
+                template
+              });
             } else {
               processedFragmentSets[setName][fragmentKey] = template;
             }
@@ -3100,10 +3245,10 @@ function processFragmentTemplates(
         }
       } else {
         // Mixed structure - treat non-fragment-set entries as legacy single set
-        console.log('[KAHUA] Mixed structure detected, processing legacy entry:', setName);
+        debugLog('[KAHUA] Mixed structure detected, processing legacy entry:', setName);
         if (!processedFragmentSets['default']) {
           processedFragmentSets['default'] = {};
-          conditionalFragmentSets['default'] = {};
+          conditionalFragmentSets['default'] = [];
         }
 
         if (typeof setTemplate === 'object') {
@@ -3112,7 +3257,11 @@ function processFragmentTemplates(
             const isConditional = strippedSubKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
             if (isConditional) {
-              conditionalFragmentSets['default'][subKey] = subTemplate as string;
+              conditionalFragmentSets['default'].push({
+                rawKey: strippedSubKey,
+                compiledKey: getCompiledTemplate(strippedSubKey),
+                template: subTemplate as string
+              });
             } else {
               processedFragmentSets['default'][subKey] = subTemplate as string;
             }
@@ -3122,7 +3271,11 @@ function processFragmentTemplates(
           const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
           if (isConditional) {
-            conditionalFragmentSets['default'][setName] = setTemplate;
+            conditionalFragmentSets['default'].push({
+              rawKey: strippedKey,
+              compiledKey: getCompiledTemplate(strippedKey),
+              template: setTemplate
+            });
           } else {
             processedFragmentSets['default'][setName] = setTemplate;
           }
@@ -3131,9 +3284,9 @@ function processFragmentTemplates(
     }
   } else {
     // Legacy structure: treat as single default set
-    console.log('[KAHUA] Legacy structure detected, processing as default set');
+    debugLog('[KAHUA] Legacy structure detected, processing as default set');
     processedFragmentSets['default'] = {};
-    conditionalFragmentSets['default'] = {};
+    conditionalFragmentSets['default'] = [];
 
     for (const [key, template] of Object.entries(fragmentTemplates)) {
       if (typeof template === 'object') {
@@ -3143,8 +3296,12 @@ function processFragmentTemplates(
           const isConditional = strippedSubKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
           if (isConditional) {
-            console.log('[KAHUA] Found conditional in nested structure:', subKey);
-            conditionalFragmentSets['default'][subKey] = subTemplate as string;
+            debugLog('[KAHUA] Found conditional in nested structure:', subKey);
+            conditionalFragmentSets['default'].push({
+              rawKey: strippedSubKey,
+              compiledKey: getCompiledTemplate(strippedSubKey),
+              template: subTemplate as string
+            });
           } else {
             processedFragmentSets['default'][subKey] = subTemplate as string;
           }
@@ -3155,8 +3312,12 @@ function processFragmentTemplates(
         const isConditional = strippedKey.match(FRAGMENT_CONDITIONAL_PATTERN);
 
         if (isConditional) {
-          console.log('[KAHUA] Found conditional in flat structure:', key);
-          conditionalFragmentSets['default'][key] = template;
+          debugLog('[KAHUA] Found conditional in flat structure:', key);
+          conditionalFragmentSets['default'].push({
+            rawKey: strippedKey,
+            compiledKey: getCompiledTemplate(strippedKey),
+            template
+          });
         } else {
           processedFragmentSets['default'][key] = template;
         }
@@ -3171,7 +3332,7 @@ function processFragmentTemplates(
  * This function is called when your extension is activated.
  */
 export function activate(context: vscode.ExtensionContext) {
-  console.log('[KAHUA] activate() called');
+  debugLog('[KAHUA] activate() called');
   // Set up context menu visibility
   vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
   vscode.commands.executeCommand('setContext', DOCUMENT_APPLICABLE_CONTEXT_KEY, false);
@@ -3184,7 +3345,7 @@ export function activate(context: vscode.ExtensionContext) {
   vscode.commands.executeCommand('setContext', TEMPLATE_KIND_CONTEXT_KEY, '');
   vscode.commands.executeCommand('setContext', SNIPPET_KIND_CONTEXT_KEY, '');
   generateStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  generateStatusBarItem.text = '$(rocket) Kahua Generate';
+  generateStatusBarItem.text = DEFAULT_STATUS_TEXT;
   generateStatusBarItem.command = 'kahua.generateEntities';
   generateStatusBarItem.tooltip = 'Kahua: Generate Entities';
   generateStatusBarItem.hide();
@@ -3513,6 +3674,208 @@ function createFormattedTokenTable(
   return `<!-- Group ${groupNumber} Token Configuration and Values Table -->\n${header}\n${separator}\n${rows.join('\n')}`;
 }
 
+function getCompiledTemplate(template: string): CompiledTemplate {
+  const cached = templateCache.get(template);
+  if (cached) {
+    return cached;
+  }
+  const compiled = compileTemplate(template);
+  templateCache.set(template, compiled);
+  return compiled;
+}
+
+function compileTemplate(template: string): CompiledTemplate {
+  const parts: CompiledTemplatePart[] = [];
+  let index = 0;
+  const length = template.length;
+
+  while (index < length) {
+    if (template.startsWith('{$', index)) {
+      const end = template.indexOf('}', index);
+      if (end === -1) {
+        parts.push({ type: 'text', value: template.slice(index) });
+        break;
+      }
+      const content = template.slice(index + 2, end);
+      const [tokenNameRaw, transformRaw] = content.split('|');
+      const tokenName = tokenNameRaw.trim();
+      if (tokenName) {
+        parts.push({
+          type: 'token',
+          tokenName,
+          transform: (transformRaw?.trim() || 'default')
+        });
+      } else {
+        parts.push({ type: 'text', value: template.slice(index, end + 1) });
+      }
+      index = end + 1;
+      continue;
+    }
+
+    if (template.startsWith('$(', index)) {
+      const end = template.indexOf(')', index);
+      if (end === -1) {
+        parts.push({ type: 'text', value: template.slice(index) });
+        break;
+      }
+      const content = template.slice(index + 2, end);
+      const [tokenNameRaw, transformRaw] = content.split('|');
+      const tokenName = tokenNameRaw.trim();
+      if (tokenName) {
+        parts.push({
+          type: 'interpolation',
+          tokenName,
+          transform: (transformRaw?.trim() || 'default')
+        });
+      } else {
+        parts.push({ type: 'text', value: template.slice(index, end + 1) });
+      }
+      index = end + 1;
+      continue;
+    }
+
+    if (template[index] === '{') {
+      const closing = findMatchingBrace(template, index);
+      if (closing !== -1) {
+        const inner = template.slice(index + 1, closing);
+        const ternary = findTernaryOperator(inner);
+        if (ternary) {
+          const trueValue = stripWrappingQuotes(ternary.trueValue);
+          const falseValue = stripWrappingQuotes(ternary.falseValue);
+          parts.push({
+            type: 'conditional',
+            condition: ternary.condition,
+            trueTemplate: compileTemplate(trueValue),
+            falseTemplate: compileTemplate(falseValue)
+          });
+          index = closing + 1;
+          continue;
+        }
+      }
+    }
+
+    const nextSpecial = findNextSpecialIndex(template, index);
+    const textValue = template.slice(index, nextSpecial);
+    if (textValue) {
+      parts.push({ type: 'text', value: textValue });
+    }
+    index = nextSpecial;
+  }
+
+  return { parts };
+}
+
+function findNextSpecialIndex(text: string, start: number): number {
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{' || (ch === '$' && i + 1 < text.length && text[i + 1] === '(')) {
+      return i;
+    }
+  }
+  return text.length;
+}
+
+function findMatchingBrace(text: string, startIndex: number): number {
+  let depth = 0;
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+    if (text.startsWith('{$', i)) {
+      const tokenEnd = text.indexOf('}', i);
+      if (tokenEnd === -1) {
+        return -1;
+      }
+      i = tokenEnd;
+      continue;
+    }
+
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+function stripWrappingQuotes(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' || first === "'") && first === last) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function resolveConditionalExpression(
+  expression: string,
+  rawTokenValues: Record<string, string>
+): string {
+  return expression.replace(/\{\$(\w+)(?:\|([^}]+))?\}/g, (_match, tokenName: string, transform?: string) => {
+    const rawValue = rawTokenValues[tokenName] || '';
+    return applyTokenTransformation(rawValue, transform?.trim() || 'default');
+  });
+}
+
+function renderCompiledTemplate(
+  compiled: CompiledTemplate,
+  cleanTokenValues: Record<string, string>,
+  rawTokenValues: Record<string, string>,
+  suppressWarnings: boolean
+): { result: string; warnings: string[] } {
+  const resultParts: string[] = [];
+  const warnings: string[] = [];
+
+  for (const part of compiled.parts) {
+    switch (part.type) {
+      case 'text':
+        resultParts.push(part.value);
+        break;
+
+      case 'token': {
+        const rawValue = rawTokenValues[part.tokenName] || '';
+        const transformed = applyTokenTransformation(rawValue, part.transform);
+        resultParts.push(transformed);
+        break;
+      }
+
+      case 'interpolation': {
+        const rawValue = rawTokenValues[part.tokenName] || '';
+        const transformed = applyTokenTransformation(rawValue, part.transform);
+        resultParts.push(transformed);
+        break;
+      }
+
+      case 'conditional': {
+        const resolvedCondition = resolveConditionalExpression(part.condition, rawTokenValues);
+        let branch: CompiledTemplate | undefined;
+        try {
+          const conditionResult = evaluateExpression(resolvedCondition);
+          branch = conditionResult ? part.trueTemplate : part.falseTemplate;
+        } catch (error) {
+          if (!suppressWarnings) {
+            warnings.push(`Error evaluating conditional "${part.condition}": ${error}`);
+          }
+          branch = part.falseTemplate;
+        }
+
+        if (branch && branch.parts.length > 0) {
+          const renderedBranch = renderCompiledTemplate(branch, cleanTokenValues, rawTokenValues, suppressWarnings);
+          resultParts.push(renderedBranch.result);
+          warnings.push(...renderedBranch.warnings);
+        }
+        break;
+      }
+    }
+  }
+
+  return { result: resultParts.join(''), warnings };
+}
+
 /**
  * Renders a template with token replacement and conditional processing
  */
@@ -3522,40 +3885,8 @@ function renderTemplate(
   rawTokenValues: Record<string, string>,
   suppressWarnings: boolean
 ): { result: string; warnings: string[] } {
-  const warnings: string[] = [];
-
-  // Phase 1: Handle {$token} transformation-controlled token replacement FIRST
-  let rendered = template;
-  for (const [tokenName, _cleanValue] of Object.entries(cleanTokenValues)) {
-    const rawValue = rawTokenValues[tokenName] || '';
-
-    // Find all token references with transformations in the rendered template
-    const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
-    let match;
-
-    while ((match = tokenPattern.exec(rendered)) !== null) {
-      const fullMatch = match[0];
-      const transformation = match[1] || 'default'; // Use 'default' if no transformation specified
-      const transformedValue = applyTokenTransformation(rawValue, transformation);
-
-      rendered = rendered.replace(fullMatch, transformedValue);
-      // Reset the regex to continue searching from the beginning since we modified the string
-      tokenPattern.lastIndex = 0;
-    }
-  }
-
-  // Phase 2: Process conditional expressions (AFTER token replacement)
-  const { result: conditionalProcessed, warnings: conditionalWarnings } = processConditionalTemplate(
-    rendered,
-    cleanTokenValues,
-    suppressWarnings
-  );
-  warnings.push(...conditionalWarnings);
-
-  // Phase 3: Process PowerShell-style string interpolations $(token)
-  rendered = processStringInterpolation(conditionalProcessed, cleanTokenValues, rawTokenValues);
-
-  return { result: rendered, warnings };
+  const compiled = getCompiledTemplate(template);
+  return renderCompiledTemplate(compiled, cleanTokenValues, rawTokenValues, suppressWarnings);
 }
 
 /**
@@ -3723,6 +4054,8 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     }
     const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
 
+    setGenerationStatus('Preparing fragment generation…', false);
+
     // Collect all unique token references from selected fragments
     const allTokenReferences = new Set<string>();
     selectedFragmentDefs.forEach(def => {
@@ -3741,7 +4074,7 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
     const sourceFileUri = editor.document.uri;
     const isSourceXmlFile = sourceFileUri.fsPath.toLowerCase().endsWith('.xml');
 
-    console.log(`[DEBUG] generateSnippetForFragments: isSourceXmlFile=${isSourceXmlFile}, file=${sourceFileUri.fsPath}`);
+    debugLog(`[DEBUG] generateSnippetForFragments: isSourceXmlFile=${isSourceXmlFile}, file=${sourceFileUri.fsPath}`);
 
     if (isSourceXmlFile) {
       // Collect all tokenReadPaths from referenced token definitions
@@ -3749,20 +4082,20 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
         allTokenReferences.has(def.id)
       );
 
-      console.log(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
+      debugLog(`[DEBUG] Found ${referencedTokenDefs.length} referenced token definitions`);
 
       for (const tokenDef of referencedTokenDefs) {
-        console.log(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
+        debugLog(`[DEBUG] Checking tokenDef: ${tokenDef.id}, hasReadPaths=${!!tokenDef.tokenReadPaths}`);
         if (tokenDef.tokenReadPaths) {
-          console.log(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
+          debugLog(`[DEBUG] Calling readTokenValuesFromXml for ${tokenDef.id}`);
           const values = await readTokenValuesFromXml(editor.document, tokenDef.tokenReadPaths);
-          console.log(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
+          debugLog(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
           values.forEach((value, key) => extractedValues.set(key, value));
         }
       }
     }
 
-    console.log(`[DEBUG] Total extracted values: ${extractedValues.size}`);
+    debugLog(`[DEBUG] Total extracted values: ${extractedValues.size}`);
 
     // Separate header and table token definitions
     const snippetLabel = fragmentIds.join(', ');
@@ -4172,10 +4505,12 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     void updateDocumentTypeContext(newDocument);
 
     vscode.window.showInformationMessage(`Kahua: Token template opened in new editor for ${fragmentIds.join(', ')}`);
+    setGenerationStatus('Template ready in new editor', true);
 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error occurred';
     vscode.window.showErrorMessage(`Kahua Token Template: ${message}`);
+    setGenerationStatus('Generation failed', true);
   }
 }
 
@@ -4299,6 +4634,7 @@ async function handleSelectionInternal(
             throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
         }
         const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+        setGenerationStatus('Validating template data…', false);
 
         const allTokenReferences = new Set<string>();
         selectedFragmentDefs.forEach(def => {
@@ -4315,11 +4651,13 @@ async function handleSelectionInternal(
             throw new Error('Current document contains no valid token data. Remove comments/whitespace-only lines or add token rows.');
         }
 
+        setGenerationStatus(`Detected ${groups.length} group${groups.length === 1 ? '' : 's'} - preparing…`, false);
         const allWarnings: string[] = [];
         const outputSections: string[] = [];
 
         for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
             const group = groups[groupIndex];
+            setGenerationStatus(`Processing group ${groupIndex + 1} of ${groups.length}…`, false);
             const headerLine = headerTokens.length > 0 && group.length > 0 ? group[0] : undefined;
             const dataLines = headerLine ? group.slice(1) : group;
 
@@ -4340,7 +4678,7 @@ async function handleSelectionInternal(
 
             const precomputedFragments = new Map<string, {
                 processedFragmentSets: Record<string, Record<string, string>>;
-                conditionalFragmentSets: Record<string, Record<string, string>>;
+                conditionalFragmentSets: Record<string, ConditionalFragmentEntry[]>;
             }>();
 
             for (const fragmentDef of selectedFragmentDefs) {
@@ -4383,81 +4721,75 @@ async function handleSelectionInternal(
                         }
 
                         for (const [setName, conditionalFragments] of Object.entries(precomputed.conditionalFragmentSets)) {
-                            for (const [conditionalKey, template] of Object.entries(conditionalFragments)) {
-                                const strippedKey = conditionalKey.replace(/^"(.*)"$/, '$1');
-                                let processedKey = strippedKey;
-
-                                for (const [tokenName, cleanValue] of Object.entries(cleanTokenValues)) {
-                                    const pattern = `{$${tokenName}`;
-                                    if (processedKey.includes(pattern)) {
-                                        const tokenPattern = new RegExp(`\\{\\$${tokenName}(?:\\|([^}]+))?\\}`, 'g');
-                                        let match;
-
-                                        while ((match = tokenPattern.exec(processedKey)) !== null) {
-                                            const fullMatch = match[0];
-                                            const transformation = match[1] || 'default';
-                                            const rawValue = rawTokenValues[tokenName] || '';
-                                            const transformedValue = applyTokenTransformation(rawValue, transformation);
-
-                                            processedKey = processedKey.replace(fullMatch, transformedValue);
-                                            tokenPattern.lastIndex = 0;
-                                        }
-                                    }
-                                }
-
-                                const { result, warnings: conditionalWarnings } = processConditionalTemplate(processedKey, cleanTokenValues, suppressWarnings);
-                                warnings.push(...conditionalWarnings);
-
-                                if (result.trim()) {
-                                    debugLog(`[KAHUA] Row evaluation: ${setName}.${conditionalKey} -> "${result.trim()}"`);
-                                    if (!processedFragmentSets[setName]) {
-                                        processedFragmentSets[setName] = {};
-                                    }
-                                    processedFragmentSets[setName][result.trim()] = template;
+                            if (!processedFragmentSets[setName]) {
+                                processedFragmentSets[setName] = {};
+                            }
+                            for (const entry of conditionalFragments) {
+                                const { result: keyResult, warnings: keyWarnings } = renderCompiledTemplate(
+                                    entry.compiledKey,
+                                    cleanTokenValues,
+                                    rawTokenValues,
+                                    suppressWarnings
+                                );
+                                warnings.push(...keyWarnings);
+                                const normalizedKey = keyResult.trim();
+                                if (normalizedKey) {
+                                    debugLog(`[KAHUA] Row evaluation: ${setName}.${entry.rawKey} -> "${normalizedKey}"`);
+                                    processedFragmentSets[setName][normalizedKey] = entry.template;
                                 }
                             }
                         }
 
                         const fragmentType = fragmentDef.type || 'grouped';
-                        const setDisplayName = fragmentDef.name;
+                        const fragmentLabel = fragmentDef.name;
 
                         if (fragmentType === 'table') {
-                            if (!structuredFragments[setDisplayName]) {
-                                structuredFragments[setDisplayName] = { 'default': { body: [] } };
-                            }
-                            const groupKey = 'default';
+                            for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
+                                const groupKey = setName === 'default' ? 'default' : setName;
 
-                            const headerTemplate = processedFragmentSets[setDisplayName]?.header;
-                            if (headerTemplate && !structuredFragments[setDisplayName][groupKey].header) {
-                                const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                structuredFragments[setDisplayName][groupKey].header = rendered.result;
-                                allWarnings.push(...rendered.warnings);
-                            }
+                                if (!structuredFragments[fragmentLabel]) {
+                                    structuredFragments[fragmentLabel] = {};
+                                }
+                                if (!structuredFragments[fragmentLabel][groupKey]) {
+                                    structuredFragments[fragmentLabel][groupKey] = { body: [] };
+                                }
 
-                            const bodyTemplate = processedFragmentSets[setDisplayName]?.body;
-                            if (bodyTemplate) {
-                                const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                structuredFragments[setDisplayName][groupKey].body.push(rendered.result);
-                                allWarnings.push(...rendered.warnings);
-                            }
+                                const headerTemplate = fragments.header;
+                                if (headerTemplate && !structuredFragments[fragmentLabel][groupKey].header) {
+                                    const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                    structuredFragments[fragmentLabel][groupKey].header = rendered.result;
+                                    allWarnings.push(...rendered.warnings);
+                                }
 
-                            const footerTemplate = processedFragmentSets[setDisplayName]?.footer;
-                            if (footerTemplate && !structuredFragments[setDisplayName][groupKey].footer) {
-                                const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                structuredFragments[setDisplayName][groupKey].footer = rendered.result;
-                                allWarnings.push(...rendered.warnings);
+                                const bodyTemplate = fragments.body;
+                                if (bodyTemplate) {
+                                    const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                    structuredFragments[fragmentLabel][groupKey].body.push(rendered.result);
+                                    allWarnings.push(...rendered.warnings);
+                                }
+
+                                const footerTemplate = fragments.footer;
+                                if (footerTemplate && !structuredFragments[fragmentLabel][groupKey].footer) {
+                                    const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                    structuredFragments[fragmentLabel][groupKey].footer = rendered.result;
+                                    allWarnings.push(...rendered.warnings);
+                                }
                             }
                         } else {
-                            if (!groupedFragments[setDisplayName]) {
-                                groupedFragments[setDisplayName] = {};
+                            if (!groupedFragments[fragmentLabel]) {
+                                groupedFragments[fragmentLabel] = {};
                             }
-                            for (const [key, template] of Object.entries(processedFragmentSets[setDisplayName] || {})) {
-                                if (!groupedFragments[setDisplayName][key]) {
-                                    groupedFragments[setDisplayName][key] = [];
+
+                            for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
+                                for (const [key, template] of Object.entries(fragments)) {
+                                    const fragmentKeyName = setName === 'default' ? key : `${setName}.${key}`;
+                                    if (!groupedFragments[fragmentLabel][fragmentKeyName]) {
+                                        groupedFragments[fragmentLabel][fragmentKeyName] = [];
+                                    }
+                                    const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+                                    groupedFragments[fragmentLabel][fragmentKeyName].push(rendered.result);
+                                    allWarnings.push(...rendered.warnings);
                                 }
-                                const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                groupedFragments[setDisplayName][key].push(rendered.result);
-                                allWarnings.push(...rendered.warnings);
                             }
                         }
                     }
@@ -4485,6 +4817,7 @@ async function handleSelectionInternal(
             outputSections.push(groupOutputSections.join('\n\n'));
         }
 
+        setGenerationStatus('Formatting generated XML…', false);
         if (allWarnings.length > 0 && !suppressWarnings) {
             vscode.window.showWarningMessage(`Kahua: ${allWarnings.join('; ')}`);
         }
@@ -4504,6 +4837,7 @@ async function handleSelectionInternal(
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error occurred';
         vscode.window.showErrorMessage(`Kahua Attribute Generator: ${message}`);
+        setGenerationStatus('Generation failed', true);
         return undefined;
     }
 }
@@ -4523,6 +4857,7 @@ async function finalizeGeneratedFragments(
 
   if (!target) {
     vscode.window.showInformationMessage('Kahua: Generation cancelled');
+    setGenerationStatus('Generation cancelled', true);
     return;
   }
 
@@ -4542,6 +4877,7 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
       );
+      setGenerationStatus('Inserted fragments into current file', true);
       break;
     }
 
@@ -4559,6 +4895,7 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
       );
+      setGenerationStatus(`Inserted fragments into ${sourceFileName}`, true);
       break;
     }
 
@@ -4576,6 +4913,7 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
       );
+      setGenerationStatus(`Inserted fragments into ${fileName}`, true);
       break;
     }
 
@@ -4591,6 +4929,7 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
       );
+      setGenerationStatus('Opened fragments in new editor', true);
       break;
     }
 
@@ -4599,6 +4938,7 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
       );
+      setGenerationStatus('Fragments copied to clipboard', true);
       break;
     }
   }
