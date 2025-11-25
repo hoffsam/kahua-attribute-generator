@@ -24,7 +24,9 @@
     "compile-tests": "tsc -p . --outDir out --module commonjs",
     "test": "npm run compile-tests && npx mocha out/test/suite/simple.test.js",
     "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
-    "test:integration": "npm run compile-tests && node ./out/test/runTest.js"
+    "test:integration": "npm run compile-tests && node ./out/test/runTest.js",
+    "test:xpath": "npx mocha src/test/xpath-template.standalone.test.js",
+    "test:all": "npm run test:xpath && npm run test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

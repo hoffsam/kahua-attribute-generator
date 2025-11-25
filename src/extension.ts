@@ -1513,8 +1513,16 @@ async function insertXmlIntoFile(
 
   if (existingEditor) {
     editor = existingEditor;
-    await vscode.window.showTextDocument(existingEditor.document, { preserveFocus: false, preview: false });
+    // File is already open, but only show it if it's not the currently active editor
+    if (vscode.window.activeTextEditor !== existingEditor) {
+      debugLog(`[KAHUA] Bringing existing editor to focus: ${uri.fsPath}`);
+      await vscode.window.showTextDocument(existingEditor.document, { preserveFocus: false, preview: false });
+    } else {
+      debugLog(`[KAHUA] Using already active editor for file: ${uri.fsPath}`);
+    }
   } else {
+    // File is not open - open it in a new editor
+    debugLog(`[KAHUA] Opening new editor for file: ${uri.fsPath}`);
     editor = await vscode.window.showTextDocument(document, {
       preserveFocus: false,
       preview: false
