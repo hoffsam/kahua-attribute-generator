@@ -54,34 +54,6 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "kahua.generateIntoDocument",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
-        {
-          "command": "kahua.generateIntoNewEditor",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateAtCursor",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateIntoNewEditor",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateAtCursor",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.selectEntityAndGenerate",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
-        {
-          "command": "kahua.generateEntities",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
-        {
           "command": "kahua.generateAttributesExtension",
           "when": "kahua.documentType == 'extension' && (kahua.isTemplateDocument || kahua.isSnippetDocument || kahua.hasValidSelection)"
         },
@@ -130,41 +102,6 @@
         }
       ],
       "kahua.submenu": [
-        {
-          "command": "kahua.generateIntoDocument",
-          "group": "simplified@1",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
-        {
-          "command": "kahua.generateIntoNewEditor",
-          "group": "simplified@1.5",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateAtCursor",
-          "group": "simplified@1.6",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateIntoNewEditor",
-          "group": "simplified@1.5",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.generateAtCursor",
-          "group": "simplified@1.6",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
-          "command": "kahua.selectEntityAndGenerate",
-          "group": "simplified@2",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
-        {
-          "command": "kahua.generateEntities",
-          "group": "simplified@3",
-          "when": "config.kahua.showSimplifiedWorkflow && (kahua.isTemplateDocument || kahua.hasValidSelection)"
-        },
         {
           "command": "kahua.generateAttributesExtension",
           "group": "attributes@1",
@@ -253,34 +190,6 @@
         "title": "Kahua: Generate Template for Lookup Lists"
       },
       {
-        "command": "kahua.generateIntoDocument",
-        "title": "Kahua: Generate into Document"
-      },
-      {
-        "command": "kahua.generateIntoNewEditor",
-        "title": "Kahua: Generate into New Editor"
-      },
-      {
-        "command": "kahua.generateAtCursor",
-        "title": "Kahua: Generate at Cursor"
-      },
-      {
-        "command": "kahua.generateIntoNewEditor",
-        "title": "Kahua: Generate into New Editor"
-      },
-      {
-        "command": "kahua.generateAtCursor",
-        "title": "Kahua: Generate at Cursor"
-      },
-      {
-        "command": "kahua.selectEntityAndGenerate",
-        "title": "Kahua: Select Entity and Generate"
-      },
-      {
-        "command": "kahua.generateEntities",
-        "title": "Kahua: Generate Entities from Template"
-      },
-      {
         "command": "kahua.generateCustom",
         "title": "Kahua: Generate from Custom"
       },
@@ -334,11 +243,6 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically detect XML document type on open and update the simplified workflow context."
-        },
-        "kahua.showSimplifiedWorkflow": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show simplified Kahua workflow commands (Generate into Document, Select Entity, Generate Entities) when applicable."
         },
         "kahua.defaultSnippetTableRows": {
           "type": "number",

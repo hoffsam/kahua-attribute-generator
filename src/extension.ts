@@ -97,10 +97,6 @@ type OutputTarget =
   | { type: 'newEditor' }
   | { type: 'clipboard' };
 
-interface GenerationOptions {
-  forcedTarget?: OutputTarget;
-}
-
 /**
  * Map to track which XML file a snippet/template document came from
  * Key: URI of snippet/template document
@@ -177,6 +173,9 @@ const DEBUG_MODE = process.env.NODE_ENV === 'development';
 const debugLog = DEBUG_MODE ? console.log : () => {};
 const debugWarn = DEBUG_MODE ? console.warn : () => {};
 const debugError = DEBUG_MODE ? console.error : () => {};
+function logDuration(label: string, startTime: number): void {
+  debugLog(`[KAHUA] ${label} completed in ${Date.now() - startTime}ms`);
+}
 
 let generateStatusBarItem: vscode.StatusBarItem | undefined;
 
@@ -812,10 +811,7 @@ async function setTemplateDocumentContext(document?: vscode.TextDocument): Promi
   );
 
   if (generateStatusBarItem) {
-    const showButton =
-      isTemplate &&
-      getKahuaConfig(document?.uri).get<boolean>('showSimplifiedWorkflow') !== false;
-    if (showButton) {
+    if (isTemplate) {
       generateStatusBarItem.show();
     } else {
       generateStatusBarItem.hide();
@@ -1166,73 +1162,6 @@ function escapeXml(value: string): string {
 function formatXml(xml: string, _indentSize: number = 2): string {
   if (xml == null) return xml as unknown as string;
   return String(xml).replace(/\r\n?/g, '\n');
-}
-
-/**
- * Formats a collection of XML fragments with section headers and proper indentation
- */
-// Replaces the old, unused version
-type TableFragmentsMap = {
-  [fragmentName: string]: {
-    [group: string]: { header?: string; body: string[]; footer?: string }
-  }
-};
-
-type GroupedFragmentsMap = {
-  [fragmentName: string]: {
-    [fragmentKey: string]: string[]
-  }
-};
-
-/**
- * Renders fragment collections (both table-style groups and grouped fragments)
- * into a single string, preserving author formatting by default.
- *
- * - Adds a leading space before comment headers ( " <!-- ... -->" )
- * - Preserves blank lines and fragment formatting; only calls formatXml if applyFormatting === true
- */
-function formatFragmentCollection(
-  opts: {
-    table?: TableFragmentsMap,
-    grouped?: GroupedFragmentsMap,
-    applyFormatting?: boolean,
-    indentSize?: number
-  }
-): string {
-  const { table, grouped, applyFormatting = false, indentSize = 2 } = opts;
-  const sections: string[] = [];
-
-  // Table (header/body/footer) groups
-  if (table) {
-    for (const [fragmentName, groupsMap] of Object.entries(table)) {
-      for (const [group, partsObj] of Object.entries(groupsMap)) {
-        const parts: string[] = [];
-        if (partsObj.header) parts.push(partsObj.header);
-        parts.push(...partsObj.body);
-        if (partsObj.footer) parts.push(partsObj.footer);
-
-        const label = group === 'default' ? fragmentName : `${fragmentName} - ${group}`;
-        let body = parts.join('\n');
-        if (applyFormatting) body = formatXml(body, indentSize);
-
-        sections.push(`\n <!-- ${label} -->\n\n${body}`);
-      }
-    }
-  }
-
-  // Grouped (named) fragments
-  if (grouped) {
-    for (const [_fragmentName, fragmentGroups] of Object.entries(grouped)) {
-      for (const [fragmentKey, fragments] of Object.entries(fragmentGroups)) {
-        let body = fragments.join('\n');
-        if (applyFormatting) body = formatXml(body, indentSize);
-
-        sections.push(`\n <!-- ${fragmentKey} -->\n\n${body}`);
-      }
-    }
-  }
-
-  return sections.join('\n');
 }
 
 /**
@@ -3346,7 +3275,7 @@ export function activate(context: vscode.ExtensionContext) {
   vscode.commands.executeCommand('setContext', SNIPPET_KIND_CONTEXT_KEY, '');
   generateStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   generateStatusBarItem.text = DEFAULT_STATUS_TEXT;
-  generateStatusBarItem.command = 'kahua.generateEntities';
+  generateStatusBarItem.command = 'kahua.generateAttributesExtension';
   generateStatusBarItem.tooltip = 'Kahua: Generate Entities';
   generateStatusBarItem.hide();
   context.subscriptions.push(generateStatusBarItem);
@@ -3422,9 +3351,6 @@ export function activate(context: vscode.ExtensionContext) {
         }
       }
 
-      if (event.affectsConfiguration('kahua.showSimplifiedWorkflow')) {
-        void updateDocumentTypeContext(vscode.window.activeTextEditor?.document);
-      }
     })
   );
 
@@ -3445,25 +3371,6 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register custom generation commands (read kahua-scoped config with resource)
   context.subscriptions.push(
-    vscode.commands.registerCommand('kahua.generateIntoDocument', () => handleSimplifiedGeneration()),
-    vscode.commands.registerCommand('kahua.generateIntoNewEditor', () => handleSimplifiedGeneration({ forcedTarget: { type: 'newEditor' } })),
-    vscode.commands.registerCommand('kahua.generateAtCursor', async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage('No active editor found.');
-        return;
-      }
-      const sourceUri = getRememberedSourceXmlUri(editor.document);
-      if (!sourceUri) {
-        vscode.window.showErrorMessage('Kahua: Cannot determine the source XML for this template/snippet.');
-        return;
-      }
-      await handleSimplifiedGeneration({
-        forcedTarget: { type: 'currentFile', uri: sourceUri, insertionStrategy: 'cursor' }
-      });
-    }),
-    vscode.commands.registerCommand('kahua.selectEntityAndGenerate', () => handleEntitySelectionCommand()),
-    vscode.commands.registerCommand('kahua.generateEntities', () => handleTemplateBasedGeneration()),
     vscode.commands.registerCommand('kahua.generateCustom', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -3920,96 +3827,6 @@ async function selectCustomFragments(
       title: 'Kahua Custom Fragment Selector'
     }
   );
-}
-
-async function handleSimplifiedGeneration(options?: GenerationOptions): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found.');
-    return;
-  }
-
-  try {
-    const templateMode = isTemplateDocument(editor.document);
-    const snippetMode = isSnippetDocument(editor.document);
-    const selectionMode = hasValidFragmentSelection(editor);
-    if (!templateMode && !snippetMode && !selectionMode) {
-      vscode.window.showErrorMessage('Select CSV rows or open a Kahua template/snippet before running this command.');
-      return;
-    }
-    const documentType = requireDocumentType(editor.document);
-    const defaultFragments = getDefaultFragmentsForDocumentType(documentType);
-
-    if (defaultFragments.length === 0) {
-      throw new Error(`No simplified fragments configured for document type "${documentType}".`);
-    }
-
-    await handleSelection(defaultFragments, options);
-  } catch (error) {
-    vscode.window.showErrorMessage(
-      error instanceof Error ? error.message : `Kahua: ${error}`
-    );
-  }
-}
-
-async function handleEntitySelectionCommand(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found.');
-    return;
-  }
-
-  try {
-    if (!isTemplateDocument(editor.document)) {
-      vscode.window.showErrorMessage('Entity selection is only available inside a Kahua template.');
-      return;
-    }
-    const xmlDocument = await getXmlDocumentForContext(editor.document);
-    if (!xmlDocument) {
-      throw new Error('Entity selection requires an XML document or a generated template linked to an XML file.');
-    }
-
-    const entityOptions = extractSelectableValues(xmlDocument, 'EntityDefs/EntityDef', 'Name');
-    if (entityOptions.length === 0) {
-      throw new Error('No EntityDef entries were found in the current XML document.');
-    }
-
-    const selected = await showValueSelectionPick('entity', entityOptions);
-    if (!selected) {
-      vscode.window.showInformationMessage('Kahua: Entity selection cancelled.');
-      return;
-    }
-
-    rememberEntitySelectionForUri(xmlDocument.uri, selected);
-    rememberEntitySelectionForDocument(editor.document, selected);
-    vscode.window.showInformationMessage(`Kahua: Entity "${selected}" selected.`);
-
-    await handleSimplifiedGeneration();
-  } catch (error) {
-    vscode.window.showErrorMessage(
-      error instanceof Error ? error.message : `Kahua: ${error}`
-    );
-  }
-}
-
-async function handleTemplateBasedGeneration(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showErrorMessage('No active editor found.');
-    return;
-  }
-
-  if (!isTemplateDocument(editor.document)) {
-    vscode.window.showErrorMessage('Generate Entities is only available in Kahua template files.');
-    return;
-  }
-
-  if (!getRememberedSourceXmlUri(editor.document)) {
-    vscode.window.showErrorMessage('Kahua: Generate Entities is only available in templates created by the Kahua extension.');
-    return;
-  }
-
-  await handleSimplifiedGeneration();
 }
 
 /**
@@ -4528,7 +4345,7 @@ export function deactivate() {
  *
  * @param fragmentIds Array of fragment definition IDs to process
  */
-async function handleSelection(fragmentIds: string[], options?: GenerationOptions): Promise<void> {
+async function handleSelection(fragmentIds: string[]): Promise<void> {
   const editor = vscode.window.activeTextEditor;
 
   if (!editor) {
@@ -4549,7 +4366,7 @@ async function handleSelection(fragmentIds: string[], options?: GenerationOption
     return;
   }
 
-  await finalizeGeneratedFragments(editor, fragmentIds, generationResult, options?.forcedTarget);
+  await finalizeGeneratedFragments(editor, fragmentIds, generationResult);
 }
 
 /**
@@ -4666,15 +4483,11 @@ async function handleSelectionInternal(
             }
 
             const groupTokenData: Array<{ clean: Record<string, string>; raw: Record<string, string> }> = [];
-            const structuredFragments: {
-                [fragmentName: string]: {
-                    [group: string]: { header?: string; body: string[]; footer?: string }
-                }
-            } = {};
-
-            const groupedFragments: { [fragmentName: string]: { [fragmentKey: string]: string[] } } = {};
+            const tableSectionOutputs = new Map<string, { label: string; header?: string; body?: string; footer?: string }>();
+            const groupedSectionOutputs = new Map<string, { label: string; body?: string }>();
 
             progress.report({ message: `Processing group ${groupIndex + 1} rows...`, increment: 30 });
+            const groupRenderStart = Date.now();
 
             const precomputedFragments = new Map<string, {
                 processedFragmentSets: Record<string, Record<string, string>>;
@@ -4746,48 +4559,45 @@ async function handleSelectionInternal(
                         if (fragmentType === 'table') {
                             for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
                                 const groupKey = setName === 'default' ? 'default' : setName;
-
-                                if (!structuredFragments[fragmentLabel]) {
-                                    structuredFragments[fragmentLabel] = {};
+                                const sectionId = `${fragmentLabel}||${groupKey}`;
+                                if (!tableSectionOutputs.has(sectionId)) {
+                                    const label = groupKey === 'default' ? fragmentLabel : `${fragmentLabel} - ${groupKey}`;
+                                    tableSectionOutputs.set(sectionId, { label });
                                 }
-                                if (!structuredFragments[fragmentLabel][groupKey]) {
-                                    structuredFragments[fragmentLabel][groupKey] = { body: [] };
-                                }
+                                const section = tableSectionOutputs.get(sectionId)!;
 
                                 const headerTemplate = fragments.header;
-                                if (headerTemplate && !structuredFragments[fragmentLabel][groupKey].header) {
+                                if (headerTemplate && !section.header) {
                                     const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    structuredFragments[fragmentLabel][groupKey].header = rendered.result;
+                                    section.header = rendered.result;
                                     allWarnings.push(...rendered.warnings);
                                 }
 
                                 const bodyTemplate = fragments.body;
                                 if (bodyTemplate) {
                                     const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    structuredFragments[fragmentLabel][groupKey].body.push(rendered.result);
+                                    section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
                                     allWarnings.push(...rendered.warnings);
                                 }
 
                                 const footerTemplate = fragments.footer;
-                                if (footerTemplate && !structuredFragments[fragmentLabel][groupKey].footer) {
+                                if (footerTemplate && !section.footer) {
                                     const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    structuredFragments[fragmentLabel][groupKey].footer = rendered.result;
+                                    section.footer = rendered.result;
                                     allWarnings.push(...rendered.warnings);
                                 }
                             }
                         } else {
-                            if (!groupedFragments[fragmentLabel]) {
-                                groupedFragments[fragmentLabel] = {};
-                            }
-
                             for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
                                 for (const [key, template] of Object.entries(fragments)) {
                                     const fragmentKeyName = setName === 'default' ? key : `${setName}.${key}`;
-                                    if (!groupedFragments[fragmentLabel][fragmentKeyName]) {
-                                        groupedFragments[fragmentLabel][fragmentKeyName] = [];
+                                    const sectionId = `${fragmentLabel}||${fragmentKeyName}`;
+                                    if (!groupedSectionOutputs.has(sectionId)) {
+                                        groupedSectionOutputs.set(sectionId, { label: fragmentKeyName });
                                     }
+                                    const section = groupedSectionOutputs.get(sectionId)!;
                                     const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    groupedFragments[fragmentLabel][fragmentKeyName].push(rendered.result);
+                                    section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
                                     allWarnings.push(...rendered.warnings);
                                 }
                             }
@@ -4799,20 +4609,48 @@ async function handleSelectionInternal(
                     await new Promise(resolve => setTimeout(resolve, 0));
                 }
             }
+            logDuration(`Group ${groupIndex + 1}: fragment rendering`, groupRenderStart);
 
             const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
+            debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: preparing token table for ${groupTokenData.length} rows`);
+            const tokenTableStart = Date.now();
             const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
+            logDuration(`Group ${groupIndex + 1}: token table`, tokenTableStart);
 
             const groupOutputSections: string[] = [tokenTable];
+            const tableFormattingStart = Date.now();
+            debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: emitting table fragments (${tableSectionOutputs.size})`);
+            for (const section of tableSectionOutputs.values()) {
+                const parts: string[] = [];
+                if (section.header) parts.push(section.header);
+                if (section.body) parts.push(section.body);
+                if (section.footer) parts.push(section.footer);
+                if (parts.length === 0) {
+                    continue;
+                }
+                let body = parts.join('\n');
+                if (applyFormatting) {
+                    debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: applying XML formatting to table section "${section.label}"`);
+                    body = formatXml(body, xmlIndentSize);
+                }
+                groupOutputSections.push(`\n <!-- ${section.label} -->\n\n${body}`);
+            }
+            logDuration(`Group ${groupIndex + 1}: table fragment assembly`, tableFormattingStart);
 
-            groupOutputSections.push(
-                formatFragmentCollection({
-                    table: structuredFragments,
-                    grouped: groupedFragments,
-                    applyFormatting,
-                    indentSize: xmlIndentSize
-                })
-            );
+            const groupedFormattingStart = Date.now();
+            debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: emitting grouped fragments (${groupedSectionOutputs.size})`);
+            for (const section of groupedSectionOutputs.values()) {
+                if (!section.body) {
+                    continue;
+                }
+                let body = section.body;
+                if (applyFormatting) {
+                    debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: applying XML formatting to grouped section "${section.label}"`);
+                    body = formatXml(body, xmlIndentSize);
+                }
+                groupOutputSections.push(`\n <!-- ${section.label} -->\n\n${body}`);
+            }
+            logDuration(`Group ${groupIndex + 1}: grouped fragment assembly`, groupedFormattingStart);
 
             outputSections.push(groupOutputSections.join('\n\n'));
         }
@@ -4845,15 +4683,15 @@ async function handleSelectionInternal(
 async function finalizeGeneratedFragments(
   editor: vscode.TextEditor,
   fragmentIds: string[],
-  generation: GeneratedFragmentResult,
-  forcedTarget?: OutputTarget
+  generation: GeneratedFragmentResult
 ): Promise<void> {
   const currentDocument = editor.document;
   const currentFileUri = currentDocument.uri;
   const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
 
-  const target: OutputTarget | undefined = forcedTarget
-    ?? (rememberedSourceUri ? { type: 'sourceFile', uri: rememberedSourceUri } : await showOutputTargetQuickPick(currentDocument));
+  const target: OutputTarget | undefined = rememberedSourceUri
+    ? { type: 'sourceFile', uri: rememberedSourceUri }
+    : await showOutputTargetQuickPick(currentDocument);
 
   if (!target) {
     vscode.window.showInformationMessage('Kahua: Generation cancelled');
