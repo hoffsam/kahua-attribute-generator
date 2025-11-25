@@ -159,5 +159,97 @@ describe('XPath Template Application Fix', function() {
       assert.strictEqual(result.success, true);
       assert.strictEqual(result.result, 'EntityDefs/EntityDef[@Name=\'DifferentEntity\']/Attributes');
     });
+
+    it('should handle absolute paths starting with App/', function() {
+      const absoluteTokenDefinitions = [{
+        id: 'appname',
+        tokenReadPaths: {
+          entity: {
+            type: 'selection',
+            path: 'EntityDefs/EntityDef',
+            attribute: 'Name',
+            affectsInjection: true,
+            injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+          }
+        }
+      }];
+      
+      const xpath = 'App/EntityDefs/EntityDef/Attributes';
+      const result = applyInjectionPathTemplate(xpath, mockAffectingTokens, absoluteTokenDefinitions);
+      
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.result, 'App/EntityDefs/EntityDef[@Name=\'EntityA\']/Attributes');
+    });
+
+    it('should NOT apply template to absolute DataStore paths with non-DataStore content', function() {
+      const absoluteTokenDefinitions = [{
+        id: 'appname',
+        tokenReadPaths: {
+          entity: {
+            type: 'selection',
+            path: 'EntityDefs/EntityDef',
+            attribute: 'Name',
+            affectsInjection: true,
+            injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+          }
+        }
+      }];
+      
+      // This should NOT match because it's not an EntityDef path
+      const xpath = 'App/DataStore/Tables/Table/Columns';
+      const result = applyInjectionPathTemplate(xpath, mockAffectingTokens, absoluteTokenDefinitions);
+      
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.result, xpath); // Should remain unchanged
+    });
+
+    it('should distinguish between App/DataStore and WorkflowDef paths', function() {
+      // This test verifies that absolute paths prevent wrong matches
+      const absoluteTokenDefinitions = [{
+        id: 'appname', 
+        tokenReadPaths: {
+          entity: {
+            type: 'selection',
+            path: 'EntityDefs/EntityDef',
+            attribute: 'Name',
+            affectsInjection: true,
+            injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+          }
+        }
+      }];
+      
+      // Absolute DataStore path - should NOT get entity template applied
+      const dataStorePath = 'App/DataStore/Tables/Table/Columns';
+      const dataStoreResult = applyInjectionPathTemplate(dataStorePath, mockAffectingTokens, absoluteTokenDefinitions);
+      assert.strictEqual(dataStoreResult.result, dataStorePath); // Unchanged
+      
+      // Absolute EntityDef path - SHOULD get entity template applied  
+      const entityPath = 'App/EntityDefs/EntityDef/Attributes';
+      const entityResult = applyInjectionPathTemplate(entityPath, mockAffectingTokens, absoluteTokenDefinitions);
+      assert.strictEqual(entityResult.result, 'App/EntityDefs/EntityDef[@Name=\'EntityA\']/Attributes'); // Changed
+    });
+
+    it('should prevent injection into App.DataSources paths', function() {
+      // This specifically tests the reported bug scenario
+      const absoluteTokenDefinitions = [{
+        id: 'appname',
+        tokenReadPaths: {
+          entity: {
+            type: 'selection',
+            path: 'EntityDefs/EntityDef',
+            attribute: 'Name',
+            affectsInjection: true,
+            injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+          }
+        }
+      }];
+
+      // This path should NOT get entity templates applied
+      const dataSourcePath = 'App/App.DataSources/LegacyDataSource/LegacyDataSource.DataSourceXml/Select/Attribute/Attributes';
+      const result = applyInjectionPathTemplate(dataSourcePath, mockAffectingTokens, absoluteTokenDefinitions);
+      
+      // Should remain unchanged - no entity template should be applied
+      assert.strictEqual(result.result, dataSourcePath);
+    });
   });
 });

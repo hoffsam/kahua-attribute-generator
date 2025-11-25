@@ -514,6 +514,34 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(result.success, true);
 				assert.strictEqual(result.result, 'EntityDefs/EntityDef[@Name=\'DifferentEntity\']/Attributes');
 			});
+
+			test('should enforce absolute path precision for App/ paths', () => {
+				const absoluteTokenDefinitions = [{
+					id: 'appname',
+					name: 'App Name Header',
+					type: 'header' as const,
+					tokens: 'appname,entity:Field',
+					tokenReadPaths: {
+						entity: {
+							type: 'selection' as const,
+							path: 'EntityDefs/EntityDef',
+							attribute: 'Name',
+							affectsInjection: true,
+							injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+						}
+					}
+				}];
+
+				// Test that App/DataStore path doesn't get entity template
+				const dataStorePath = 'App/DataStore/Tables/Table/Columns';
+				const dataStoreResult = applyInjectionPathTemplate(dataStorePath, mockAffectingTokens, absoluteTokenDefinitions);
+				assert.strictEqual(dataStoreResult.result, dataStorePath); // Should remain unchanged
+
+				// Test that App/EntityDefs path does get entity template
+				const entityPath = 'App/EntityDefs/EntityDef/Attributes'; 
+				const entityResult = applyInjectionPathTemplate(entityPath, mockAffectingTokens, absoluteTokenDefinitions);
+				assert.strictEqual(entityResult.result, 'App/EntityDefs/EntityDef[@Name=\'EntityA\']/Attributes');
+			});
 		});
 	});
 });

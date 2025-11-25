@@ -1681,8 +1681,19 @@ async function insertXmlIntoFile(
             insertPosition = document.lineAt(targetSection.openTagLine).range.end;
             insertionText = '\n' + indentedContent;
           } else {
+            // For non-self-closing tags, insert before the closing tag
             insertPosition = document.lineAt(targetSection.closeTagLine).range.start;
-            insertionText = '\n' + indentedContent + '\n';
+            
+            // Check if there's existing content between opening and closing tags
+            const hasExistingContent = targetSection.lastChildLine > targetSection.openTagLine;
+            
+            if (hasExistingContent) {
+              // There's existing content, insert after it without leading newline
+              insertionText = indentedContent + '\n';
+            } else {
+              // Empty element, add proper formatting with newlines  
+              insertionText = '\n' + indentedContent + '\n';
+            }
           }
 
           editBuilder.insert(
@@ -1904,6 +1915,7 @@ function parseTargetXmlStructure(
       });
       
       debugLog(`[DEBUG] Added section for "${sectionName}" at line ${line + 1} with path: ${candidate.pathSoFar}`);
+      debugLog(`[DEBUG] Final XPath used: ${finalXpath}, Original XPath: ${xpath}`);
     }
   }
 
@@ -1945,6 +1957,16 @@ export function applyInjectionPathTemplate(
               // Check if this part is "EntityDef" or "EntityDef[...]" but not "@EntityDefName"
               return part === 'EntityDef' || (part.startsWith('EntityDef[') && !part.includes('@EntityDefName'));
             });
+            
+            // For absolute paths, also ensure the path structures match
+            if (shouldApplyTemplate && templateBasePath.startsWith('App/') && xpath.startsWith('App/')) {
+              // Both are absolute paths - check structural compatibility more strictly
+              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
+              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
+              
+              // Check if xpath structure matches template structure (allowing for the target to be more specific)
+              shouldApplyTemplate = xpathStructure.startsWith(templateStructure) || templateStructure.startsWith(xpathStructure);
+            }
           } else {
             // For other templates, check exact path match
             shouldApplyTemplate = xpath === templateBasePath;
@@ -1985,10 +2007,24 @@ function findElementsByHierarchicalXPath(
   
   const parts = xpath.split('/').filter(p => p);
   
-  // Skip root if it matches first part
-  if (parts.length && root.tagName === parts[0]) {
+  // Check if this is an absolute path (starts with App)
+  const isAbsolutePath = parts.length > 0 && parts[0] === 'App';
+  
+  if (isAbsolutePath) {
+    // For absolute paths, ensure we start from the correct root App element
+    if (root.tagName !== 'App') {
+      debugLog(`[DEBUG] Absolute path requires App root, but document root is ${root.tagName}`);
+      return [];
+    }
+    // Remove "App" from parts since we're starting from the App root
     parts.shift();
-    debugLog(`[DEBUG] Skipping root element ${root.tagName}, remaining parts: ${parts.join('/')}`);
+    debugLog(`[DEBUG] Using absolute path from App root, remaining parts: ${parts.join('/')}`);
+  } else {
+    // For relative paths (backwards compatibility), skip root if it matches first part
+    if (parts.length && root.tagName === parts[0]) {
+      parts.shift();
+      debugLog(`[DEBUG] Using relative path, skipping root element ${root.tagName}, remaining parts: ${parts.join('/')}`);
+    }
   }
   
   // Start with root element
@@ -2982,12 +3018,59 @@ async function selectTargetsFromMultiple(
   const items = targets.map((target, index) => {
     const lineInfo = `Line ${target.openTagLine + 1}`;
     let label = lineInfo;
+    let description = target.context && target.context !== lineInfo ? target.context : undefined;
+    
+    // Enhanced labeling for better disambiguation
     if (target.xmlNodeName === 'HubDef' && target.nameAttributeValue) {
       label = `HubDef: ${target.nameAttributeValue} (${lineInfo})`;
     } else if (target.nameAttributeValue) {
       label = `${target.nameAttributeValue} (${lineInfo})`;
     }
-    const description = target.context && target.context !== lineInfo ? target.context : undefined;
+    
+    // Add path context to label for better identification
+    if (description) {
+      // Extract the most relevant parent context for the label
+      const pathParts = description.split('/');
+      if (pathParts.length > 2) {
+        // For EntityDef paths (correct target for Attributes), highlight prominently
+        if (description.includes('EntityDefs') || description.includes('EntityDef')) {
+          const entityIndex = pathParts.findIndex(part => part.includes('EntityDef'));
+          if (entityIndex >= 0) {
+            const contextPath = pathParts.slice(entityIndex - 1, entityIndex + 2).join('/');
+            label = `🎯 ENTITY: ${contextPath} (${lineInfo}) ← RECOMMENDED`;
+          }
+        }
+        // For DataStore paths, highlight the DataStore context
+        else if (description.includes('DataStore')) {
+          const dataStoreIndex = pathParts.findIndex(part => part.includes('DataStore'));
+          if (dataStoreIndex >= 0 && dataStoreIndex < pathParts.length - 2) {
+            const contextPath = pathParts.slice(dataStoreIndex, dataStoreIndex + 3).join('/');
+            label = `📊 DataStore: ${contextPath} (${lineInfo})`;
+          }
+        }
+        // For Workflow paths, highlight as potentially incorrect
+        else if (description.includes('WorkflowDef')) {
+          const workflowIndex = pathParts.findIndex(part => part.includes('WorkflowDef'));
+          if (workflowIndex >= 0 && workflowIndex < pathParts.length - 2) {
+            const contextPath = pathParts.slice(workflowIndex, workflowIndex + 3).join('/');
+            label = `⚠️  Workflow: ${contextPath} (${lineInfo}) ← LIKELY WRONG`;
+          }
+        }
+        // For DataSources paths, mark as wrong for Attributes
+        else if (description.includes('DataSources') || description.includes('App.DataSources')) {
+          const dataSourceIndex = pathParts.findIndex(part => part.includes('DataSource'));
+          if (dataSourceIndex >= 0) {
+            const contextPath = pathParts.slice(dataSourceIndex - 1, dataSourceIndex + 3).join('/');
+            label = `❌ DataSource: ${contextPath} (${lineInfo}) ← WRONG TARGET`;
+          }
+        }
+        // For other paths, show the last 2-3 relevant parts
+        else {
+          const contextPath = pathParts.slice(-3).join('/');
+          label = `📁 Other: ${contextPath} (${lineInfo})`;
+        }
+      }
+    }
 
     return {
       label,

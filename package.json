@@ -26,7 +26,9 @@
     "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
     "test:integration": "npm run compile-tests && node ./out/test/runTest.js",
     "test:xpath": "npx mocha src/test/xpath-template.standalone.test.js",
-    "test:all": "npm run test:xpath && npm run test"
+    "test:formatting": "npx mocha src/test/injection-formatting.standalone.test.js", 
+    "test:standalone": "npm run test:xpath && npm run test:formatting",
+    "test:all": "npm run test:standalone && npm run test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -284,7 +286,7 @@
                   "path": "EntityDefs/EntityDef",
                   "attribute": "Name",
                   "affectsInjection": true,
-                  "injectionPathTemplate": "EntityDefs/EntityDef[@Name='{value}']/Attributes"
+                  "injectionPathTemplate": "App/EntityDefs/EntityDef[@Name='{value}']/Attributes"
                 }
               }
             },
@@ -292,7 +294,7 @@
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+              "tokens": "name,type:Text,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
             },
             {
               "id": "lookupheader",
@@ -393,24 +395,24 @@
                 "attributes"
               ],
               "injectionPaths": {
-                "Attributes": "EntityDefs/EntityDef/Attributes",
-                "Labels": "Cultures/Culture[@Code='en']/Labels",
-                "LookupListLabels": "Cultures/Culture[@Code='en']/Labels",
-                "DataTags": "DataTags",
-                "LookupLists": "LookupLists",
-                "LookupList": "LookupLists",
-                "FieldDefs": "App.HubDefs/HubDef/HubDef.LogDef/LogDef.FieldDefs",
-                "DataStore": "DataStore/Tables/Table/Columns",
-                "ImportDefs": "App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef/ImportDef.Sheets/Sheet/Sheet.Columns"
+                "Attributes": "App/EntityDefs/EntityDef/Attributes",
+                "Labels": "App/Cultures/Culture[@Code='en']/Labels",
+                "LookupListLabels": "App/Cultures/Culture[@Code='en']/Labels",
+                "DataTags": "App/DataTags",
+                "LookupLists": "App/LookupLists",
+                "LookupList": "App/LookupLists",
+                "FieldDefs": "App/App.HubDefs/HubDef/HubDef.LogDef/LogDef.FieldDefs",
+                "DataStore": "App/DataStore/Tables/Table/Columns",
+                "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef/ImportDef.Sheets/Sheet/Sheet.Columns"
               },
               "fragments": {
                 "body": {
                   "Attributes": "<Attribute Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' || '{$type}'=='LookupList' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' || '{$type}'=='EntityDef' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" />",
                   "Labels": "<Label Key=\"{$entity}_{$name}Label\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}Description\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
                   "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Label Key=\"{$entity}_{$name}LookupListLabel\">{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}</Label>\n<Label Key=\"{$entity}_{$name}LookupListDescription\">{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}</Label>",
-                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" />",
+                  "DataTags": "<DataTag Name=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" />",
                   "Fields": "<Field Attribute=\"{$name}\" />",
-                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "FieldDefs": "<FieldDef Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" />",
                   "DataStore": "<Column AttributeName=\"{$name}\" />",
                   "LogFields": "<Field FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
@@ -433,8 +435,8 @@
               ],
               "type": "table",
               "injectionPaths": {
-                "Lookups": "LookupLists",
-                "Lookup Labels": "Cultures/Culture[@Code='en']/Labels"
+                "Lookups": "App/LookupLists",
+                "Lookup Labels": "App/Cultures/Culture[@Code='en']/Labels"
               },
               "fragments": {
                 "Lookups": {
@@ -473,9 +475,9 @@
                   "Attributes": "<Add Name=\"{$name}\" Label=\"[{$entity}_{$name}Label]\" Description=\"[{$entity}_{$name}Description]\" DataType=\"{$type}\"{'{$type}'=='Lookup' ? ' LookupListName=\"{$appname|raw}.{$entity}_{$name}LookupList\"' : ''}{'{$type}'=='Entity' ? ' LinkedEntityDef=\"{$linkedEntityDef|raw}\"' : ''} IsConfigurable=\"true\" SupplementAction=\"Add\" />",
                   "Labels": "<Add Key=\"{$entity}_{$name}Label\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}Description\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
                   "{'{$type}'=='Lookup' ? 'LookupListLabels' : ''}": "<Add Key=\"{$entity}_{$name}LookupListLabel\" Value=\"{'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}\" />\n<Add Key=\"{$entity}_{$name}LookupListDescription\" Value=\"{'{$descriptionlabel}'!='' ? '{$descriptionlabel|friendly}' : {'{$label}'!='' ? '{$label|friendly}' : '{$name|friendly}'}}\" />",
-                  "DataTags": "<Add Name=\"{$entity}_{$name}\" Key=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
+                  "DataTags": "<Add Name=\"{$entity}_{$name}\" Label=\"[{$entity}_{$name}Label]\" CultureLabelKey=\"{$entity}_{$name}Label\" SupplementAction=\"Add\" />",
                   "Fields": "<Add Attribute=\"{$name}\" />",
-                  "FieldDefs": "<Add Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" Edit.Path=\"{$name}\" />",
+                  "FieldDefs": "<Add Name=\"{$name}\" Path=\"{$name}\" DataTag=\"{$entity}_{$name}\" />",
                   "DataStore": "<Add AttributeName=\"{$name}\" />",
                   "LogFields": "<Add FieldDef=\"{$name}\" />",
                   "ImportDefs": "<Column AttributeName=\"{$name}\" Name=\"{$name|friendly}\" />",
