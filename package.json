@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -18,7 +18,7 @@
     "esbuild-watch": "npm run esbuild-base -- --sourcemap=inline --watch",
     "compile": "tsc -p . --noEmit",
     "watch": "tsc -watch -p . --noEmit",
-    "package": "vsce package --no-dependencies",
+    "package": "vsce package",
     "build": "npm run esbuild-prod && npm run package",
     "pretest": "npm run compile-tests",
     "compile-tests": "tsc -p . --outDir out --module commonjs",
@@ -30,10 +30,12 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.19.122",
     "@types/vscode": "^1.85.0",
+    "@types/sinon": "^17.0.3",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.27.0",
     "glob": "^11.0.3",
     "mocha": "^10.8.2",
+    "sinon": "^18.0.0",
     "typescript": "^5.4.0"
   },
   "activationEvents": [
@@ -52,48 +54,6 @@
       }
     ],
     "menus": {
-      "commandPalette": [
-        {
-          "command": "kahua.generateAttributesExtension",
-          "when": "kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateAttributesSupplement",
-          "when": "kahua.documentType == 'supplement'"
-        },
-        {
-          "command": "kahua.generateSnippetAttributes",
-          "when": "kahua.canGenerateSnippets && kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateTemplateAttributes",
-          "when": "kahua.canGenerateTemplates && kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateLookups",
-          "when": "kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateSnippetLookups",
-          "when": "kahua.canGenerateSnippets && kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateTemplateLookups",
-          "when": "kahua.canGenerateTemplates && kahua.documentType == 'extension'"
-        },
-        {
-          "command": "kahua.generateCustom",
-          "when": "kahua.hasApplicableDocument"
-        },
-        {
-          "command": "kahua.generateSnippetCustom",
-          "when": "kahua.hasApplicableDocument && config.kahua.showSnippetsInMenu && kahua.canGenerateSnippets"
-        },
-        {
-          "command": "kahua.generateTemplateCustom",
-          "when": "kahua.hasApplicableDocument && config.kahua.showTemplatesInMenu && kahua.canGenerateTemplates"
-        }
-      ],
       "editor/context": [
         {
           "submenu": "kahua.submenu",

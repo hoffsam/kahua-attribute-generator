@@ -326,6 +326,34 @@ interface ElementDisplayConfig {
   overrides: Record<string, string[]>;
 }
 
+const DEFAULT_ELEMENT_DISPLAY_CONFIG: ElementDisplayConfig = {
+  defaultOrder: ['Name', 'DisplayName', 'Id'],
+  exclusions: ['App'],
+  overrides: {
+    Table: ['EntityDefName', 'Name'],
+    ViewDef: ['DisplayName', 'Name']
+  }
+};
+
+function getResolvedElementDisplayConfig(): ElementDisplayConfig {
+  const configured = getKahuaConfig().get<ElementDisplayConfig>('elementDisplayAttributes');
+  const defaultClone = {
+    defaultOrder: [...DEFAULT_ELEMENT_DISPLAY_CONFIG.defaultOrder],
+    exclusions: [...DEFAULT_ELEMENT_DISPLAY_CONFIG.exclusions],
+    overrides: { ...DEFAULT_ELEMENT_DISPLAY_CONFIG.overrides }
+  };
+
+  if (!configured) {
+    return defaultClone;
+  }
+
+  return {
+    defaultOrder: configured.defaultOrder?.length ? configured.defaultOrder : defaultClone.defaultOrder,
+    exclusions: configured.exclusions?.length ? configured.exclusions : defaultClone.exclusions,
+    overrides: configured.overrides ? configured.overrides : defaultClone.overrides
+  };
+}
+
 function getElementDisplayName(
   tagName: string,
   attributes: Record<string, any>,
@@ -360,11 +388,46 @@ function elementAttributesToRecord(element: XmlElement | null): Record<string, s
   }
   for (let i = 0; i < element.attributes.length; i++) {
     const attr = element.attributes.item(i);
-    if (attr) {
+    if (attr && !attr.nodeName.startsWith('xmlns')) {
       record[attr.nodeName] = attr.nodeValue ?? '';
     }
   }
   return record;
+}
+
+const PLACEHOLDER_ATTRIBUTE_PATTERN = /^\s*(\[[^\]]+\]\s*)+$/;
+
+function isPlaceholderAttributeValue(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return false;
+  }
+  return PLACEHOLDER_ATTRIBUTE_PATTERN.test(normalized);
+}
+
+function filterPlaceholderAttributes(attributes: Record<string, any>): Record<string, any> {
+  let requiresClone = false;
+  for (const value of Object.values(attributes)) {
+    if (isPlaceholderAttributeValue(value)) {
+      requiresClone = true;
+      break;
+    }
+  }
+
+  if (!requiresClone) {
+    return attributes;
+  }
+
+  const filtered: Record<string, any> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (!isPlaceholderAttributeValue(value)) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
 }
 
 function getChildElements(element: XmlElement): XmlElement[] {
@@ -447,13 +510,23 @@ function getParsedXmlFromCache(document: vscode.TextDocument, content: string, c
 
 function getParsedXmlContext(document: vscode.TextDocument): ParsedXmlContext {
   const existing = parsedXmlContextCache.get(document);
-  if (existing && existing.version === document.version && existing.pathLineInfo && existing.pathLineInfo.size > 0) {
+  const content = document.getText();
+  const contentHash = simpleHash(content);
+  let dom: XmlDocument;
+  if (existing && existing.contentHash === contentHash) {
+    dom = existing.dom;
+  } else {
+    dom = getParsedXmlFromCache(document, content, contentHash);
+  }
+
+  if (existing && existing.contentHash === contentHash) {
+    existing.version = document.version;
+    existing.textDocument = document;
+    existing.dom = dom;
+    debugLog(`[KAHUA] Reusing parsed XML context for ${document.uri.fsPath}`);
     return existing;
   }
 
-  const content = document.getText();
-  const contentHash = simpleHash(content);
-  const dom = getParsedXmlFromCache(document, content, contentHash);
   const pathLineInfo = buildPathLineIndex(document, content);
   debugLog(`[KAHUA] Built path line index with ${pathLineInfo.size} entries for ${document.uri.fsPath}`);
   const context: ParsedXmlContext = {
@@ -1435,10 +1508,18 @@ async function insertXmlIntoFile(
   const document = await vscode.workspace.openTextDocument(uri);
   const xmlContext = getParsedXmlContext(document);
   debugLog(`[KAHUA] insertXmlIntoFile: target=${uri.fsPath} strategy=${strategy ?? 'prompt'}`);
-  const editor = await vscode.window.showTextDocument(document, {
-    preserveFocus: false,
-    preview: false
-  });
+  let editor: vscode.TextEditor;
+  const existingEditor = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri.toString());
+
+  if (existingEditor) {
+    editor = existingEditor;
+    await vscode.window.showTextDocument(existingEditor.document, { preserveFocus: false, preview: false });
+  } else {
+    editor = await vscode.window.showTextDocument(document, {
+      preserveFocus: false,
+      preview: false
+    });
+  }
 
   if (!strategy || strategy === 'cursor') {
     // Simple insertion at cursor position
@@ -1504,7 +1585,7 @@ async function insertXmlIntoFile(
   const generatedSections = parseGeneratedXmlSections(content);
   debugLog(`[KAHUA] insertXmlIntoFile: parsed ${generatedSections.length} generated sections`);
   const parseStart = Date.now();
-  const allTargetSections = parseTargetXmlStructure(document, injectionPaths, xmlContext);
+  const allTargetSections = parseTargetXmlStructure(document, injectionPaths, xmlContext, affectingTokens, tokenDefinitions);
   debugLog(`[KAHUA] insertXmlIntoFile: parseTargetXmlStructure completed in ${Date.now() - parseStart}ms with ${allTargetSections.length} sections`);
 
   // Deduplicate target sections that point to the same line
@@ -1735,110 +1816,333 @@ function findLastChildElement(document: vscode.TextDocument, openLine: number, c
 }
 
 /**
- * Parses target XML file to find section tags where content can be inserted using configured injection paths
- * Creates multiple target sections when there are multiple matches for a path
+ * Simplified XML target finding - finds all possible injection points and lets user choose
+ * No complex cache matching needed
  */
 function parseTargetXmlStructure(
   document: vscode.TextDocument,
   injectionPaths: Record<string, string | InjectionPathConfig>,
-  xmlContext: ParsedXmlContext
+  xmlContext: ParsedXmlContext,
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
 ): XmlTargetSection[] {
   const sections: XmlTargetSection[] = [];
+
+  // Get element display configuration
+  const config = getResolvedElementDisplayConfig();
 
   for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
     // Normalize to always have path and displayAttribute(s)
     const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
-    const displayAttrConfig = typeof pathConfig === 'string' ? 'Name' : (pathConfig.displayAttribute || 'Name');
-    const displayAttributes = Array.isArray(displayAttrConfig) ? displayAttrConfig : [displayAttrConfig];
+    
+    debugLog(`[DEBUG] Processing section "${sectionName}" with xpath: ${xpath}`);
 
-    const allTargets = findAllXPathTargets(xmlContext, xpath);
-
-    // Deduplicate by line number
-    const seenLines = new Set<number>();
-    const uniqueTargets = allTargets.filter(target => {
-      if (seenLines.has(target.line)) {
-        return false;
-      }
-      seenLines.add(target.line);
-      return true;
-    });
-
-    debugLog(`[DEBUG] parseTargetXmlStructure: ${sectionName} -> ${uniqueTargets.length} unique targets (from ${allTargets.length} total)`);
-
-    for (const target of uniqueTargets) {
-      const pathInfo = xmlContext.pathLineInfo.get(getPathNodesCacheKey(target.pathNodes));
-      const openTagLine = pathInfo?.openLine ?? target.line;
-      const line = document.lineAt(openTagLine);
-      const text = line.text;
-
-      const tagName = target.tagName;
-    const indentation = pathInfo?.indentation ?? (text.match(/^(\s*)</)?.[1] || '');
-    const isSelfClosing = pathInfo?.isSelfClosing ?? text.includes('/>');
-
-    if (!pathInfo) {
-      debugLog(`[KAHUA] Missing precomputed line info for ${sectionName} -> ${target.enrichedPath}; using fallback positions.`);
+    const templateApplied = applyInjectionPathTemplate(xpath, affectingTokens || new Map(), tokenDefinitions);
+    if (!templateApplied.success) {
+      debugLog(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
+      continue;
     }
 
-    // Try each display attribute in order until we find one with a value
-    let contextDescription = `Line ${openTagLine + 1}`;
-      let foundAttribute = false;
-      for (const attr of displayAttributes) {
-        const displayValue = target.attributes[attr];
-        if (displayValue) {
-          contextDescription += ` (${attr}="${displayValue}")`;
-          foundAttribute = true;
-          break;
-        }
-      }
+    const finalXpath = templateApplied.result;
+    debugLog(`[DEBUG] Final xpath after template application: ${finalXpath}`);
+    
+    // Use hierarchical XPath matching - respects exact path structure
+    const candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+    debugLog(`[DEBUG] Found ${candidates.length} candidates via hierarchical XPath for section "${sectionName}"`);
+    
+    if (candidates.length === 0) {
+      debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath}`);
+      continue;
+    }
 
-      // If no configured attributes had values, try "Name" as a default fallback
-      if (!foundAttribute && !displayAttributes.includes('Name')) {
-        const nameValue = target.attributes['Name'];
-        if (nameValue) {
-          contextDescription += ` (Name="${nameValue}")`;
-        }
+    // Process each candidate found
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      const element = candidate.element;
+      
+      debugLog(`[DEBUG] Processing candidate ${i + 1}/${candidates.length} for section "${sectionName}": ${candidate.pathSoFar}`);
+      
+      // Find the line number using simple search
+      const line = findElementLineInDocument(document, element);
+      debugLog(`[DEBUG] Found element at line: ${line + 1} (0-based: ${line})`);
+      
+      if (line === -1) {
+        debugLog(`[DEBUG] Could not locate line for element ${element.tagName} in section "${sectionName}"`);
+        continue;
       }
       
-      let finalXpath = target.enrichedPath; // Use the pre-calculated enriched path
+      const lineText = document.lineAt(line).text;
+      const tagName = element.tagName;
+      const indentation = lineText.match(/^(\s*)</)?.[1] || '';
+      const isSelfClosing = lineText.includes('/>');
+      const closeLine = isSelfClosing ? line : findClosingTag(document, tagName, line);
+      const lastChildLine = isSelfClosing ? line : findLastChildElement(document, line, closeLine);
 
-      if (isSelfClosing) {
-        sections.push({
-          tagName: sectionName,
-          xmlNodeName: tagName,
-          openTagLine,
-          closeTagLine: pathInfo?.closeLine ?? openTagLine,
-          indentation,
-          isSelfClosing: true,
-          lastChildLine: pathInfo?.lastChildLine ?? openTagLine,
-          context: contextDescription,
-          injectionPath: target.enrichedPath,
-          attributes: target.attributes,
-          nameAttributeValue: target.nameAttributeValue,
-          enrichedPath: target.enrichedPath
-        });
-      } else {
-        const closeTagLine = pathInfo?.closeLine ?? findClosingTag(document, tagName, openTagLine);
-        const lastChildLine = pathInfo?.lastChildLine ?? findLastChildElement(document, openTagLine, closeTagLine);
+      debugLog(`[DEBUG] Element details - line: ${line + 1}, selfClosing: ${isSelfClosing}, closeLine: ${closeLine + 1}, lastChild: ${lastChildLine + 1}`);
 
-        sections.push({
-          tagName: sectionName,
-          xmlNodeName: tagName,
-          openTagLine,
-          closeTagLine,
-          indentation,
-          isSelfClosing: false,
-          lastChildLine: lastChildLine, // Use the locally calculated lastChildLine
-          context: contextDescription,
-          injectionPath: target.enrichedPath,
-          attributes: target.attributes,
-          nameAttributeValue: target.nameAttributeValue,
-          enrichedPath: target.enrichedPath
-        });
-      }
+      sections.push({
+        tagName: sectionName,  // The section name (e.g., "Attributes")
+        xmlNodeName: tagName,  // The XML tag name (e.g., "Attributes") 
+        openTagLine: line,
+        closeTagLine: closeLine,
+        lastChildLine,
+        indentation,
+        isSelfClosing,
+        context: candidate.pathSoFar,  // Use the hierarchical path as context
+        injectionPath: finalXpath,
+        attributes: elementAttributesToRecord(element),
+        nameAttributeValue: extractNameAttribute(element, config),
+        enrichedPath: candidate.pathSoFar
+      });
+      
+      debugLog(`[DEBUG] Added section for "${sectionName}" at line ${line + 1} with path: ${candidate.pathSoFar}`);
     }
   }
 
   return sections;
+}
+
+/**
+ * Apply injection path templates with token substitution
+ */
+export function applyInjectionPathTemplate(
+  xpath: string, 
+  affectingTokens: Map<string, string>, 
+  tokenDefinitions: TokenNameDefinition[] = []
+): { success: boolean; result: string } {
+  let modifiedXPath = xpath;
+  let applied = false;
+
+  // Check each token definition for injection path templates
+  for (const tokenDef of tokenDefinitions) {
+    if (tokenDef.tokenReadPaths) {
+      for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+        if (readPath.affectsInjection && readPath.injectionPathTemplate && affectingTokens.has(tokenName)) {
+          // Only apply template if the original xpath matches the pattern that the template is for
+          // Extract the base path from the template (everything before the filter)
+          const templateBasePath = readPath.injectionPathTemplate.split('[')[0];
+
+          // Check if the original xpath matches the path structure that this template is meant for
+          // Parse both paths to compare their structural elements, not just string matching
+          const xpathParts = xpath.split('/').filter(p => p);
+          const templateParts = templateBasePath.split('/').filter(p => p);
+          
+          // Check if this template should apply to this xpath by comparing path structure
+          let shouldApplyTemplate = false;
+          
+          // For EntityDef-based templates, check if we're actually targeting EntityDef elements
+          if (templateBasePath.includes('EntityDef')) {
+            // Only apply if the xpath has EntityDef as a path element (not just in attribute filters)
+            shouldApplyTemplate = xpathParts.some(part => {
+              // Check if this part is "EntityDef" or "EntityDef[...]" but not "@EntityDefName"
+              return part === 'EntityDef' || (part.startsWith('EntityDef[') && !part.includes('@EntityDefName'));
+            });
+          } else {
+            // For other templates, check exact path match
+            shouldApplyTemplate = xpath === templateBasePath;
+          }
+          
+          if (shouldApplyTemplate) {
+            const tokenValue = affectingTokens.get(tokenName)!;
+            modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
+            applied = true;
+            debugLog(`[DEBUG] Applied injection path template: ${xpath} -> ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    success: true, // Always return success, just use original xpath if no template applied
+    result: applied ? modifiedXPath : xpath
+  };
+}
+
+/**
+ * Proper hierarchical XPath traversal - respects exact path structure
+ */
+function findElementsByHierarchicalXPath(
+  xmlContext: ParsedXmlContext, 
+  xpath: string,
+  config: ElementDisplayConfig,
+  document: vscode.TextDocument
+): Array<{ element: XmlElement; pathSoFar: string; candidatesAtLevel: Array<{ element: XmlElement; displayName: string; line: number }> }> {
+  const doc = xmlContext.dom;
+  const root = doc.documentElement;
+  if (!root) return [];
+  
+  debugLog(`[DEBUG] Starting hierarchical XPath traversal for: ${xpath}`);
+  
+  const parts = xpath.split('/').filter(p => p);
+  
+  // Skip root if it matches first part
+  if (parts.length && root.tagName === parts[0]) {
+    parts.shift();
+    debugLog(`[DEBUG] Skipping root element ${root.tagName}, remaining parts: ${parts.join('/')}`);
+  }
+  
+  // Start with root element
+  let currentCandidates: Array<{ element: XmlElement; pathSoFar: string; candidatesAtLevel: Array<{ element: XmlElement; displayName: string; line: number }> }> = [{ 
+    element: root, 
+    pathSoFar: root.tagName,
+    candidatesAtLevel: []
+  }];
+  
+  // Traverse each level of the XPath
+  for (let level = 0; level < parts.length; level++) {
+    const part = parts[level];
+    const isLastLevel = level === parts.length - 1;
+    
+    debugLog(`[DEBUG] Processing level ${level + 1}/${parts.length}: "${part}" (isLastLevel: ${isLastLevel})`);
+    
+    // Parse part (handle [@attr='value'] syntax if needed)
+    const attrMatch = part.match(/^([\w.]+)\[@(\w+)='([^']+)'\]$/);
+    const tagName = attrMatch ? attrMatch[1] : part;
+    const filterAttr = attrMatch ? attrMatch[2] : undefined;
+    const filterValue = attrMatch ? attrMatch[3] : undefined;
+    
+    debugLog(`[DEBUG] Looking for tagName: ${tagName}, filterAttr: ${filterAttr}, filterValue: ${filterValue}`);
+    
+    const nextCandidates: Array<{ element: XmlElement; pathSoFar: string; candidatesAtLevel: Array<{ element: XmlElement; displayName: string; line: number }> }> = [];
+    
+    for (const candidate of currentCandidates) {
+      const children = getChildElements(candidate.element);
+      const matchingChildren: Array<{ element: XmlElement; displayName: string; line: number }> = [];
+      
+      debugLog(`[DEBUG] Checking ${children.length} children of ${candidate.element.tagName}`);
+      
+      for (const child of children) {
+        if (child.tagName !== tagName) continue;
+        
+        // Apply attribute filter if specified
+        if (filterAttr && filterValue) {
+          const attrValue = child.getAttribute(filterAttr);
+          if (attrValue !== filterValue) {
+            debugLog(`[DEBUG] Skipping ${child.tagName}: ${filterAttr}="${attrValue}" != "${filterValue}"`);
+            continue;
+          }
+        }
+        
+        const displayName = getElementDisplayName(child.tagName, elementAttributesToRecord(child), config).displayName || child.tagName;
+        const line = findElementLineInDocument(document, child);
+        
+        matchingChildren.push({ element: child, displayName, line });
+        debugLog(`[DEBUG] Found matching child: ${child.tagName} (${displayName}) at line ${line + 1}`);
+      }
+      
+      if (matchingChildren.length > 0) {
+        if (isLastLevel) {
+          // This is our target level - we found the injection points
+          for (const match of matchingChildren) {
+            nextCandidates.push({
+              element: match.element,
+              pathSoFar: `${candidate.pathSoFar}/${tagName}(${match.displayName})`,
+              candidatesAtLevel: matchingChildren // Store all candidates at this level for user selection
+            });
+          }
+        } else {
+          // Not the final level - continue traversal with each matching child
+          for (const match of matchingChildren) {
+            nextCandidates.push({
+              element: match.element,
+              pathSoFar: `${candidate.pathSoFar}/${tagName}(${match.displayName})`,
+              candidatesAtLevel: matchingChildren
+            });
+          }
+        }
+      } else {
+        debugLog(`[DEBUG] No matching children found for ${tagName} under ${candidate.element.tagName}`);
+      }
+    }
+    
+    currentCandidates = nextCandidates;
+    debugLog(`[DEBUG] After level ${level + 1}: ${currentCandidates.length} candidates remaining`);
+    
+    if (currentCandidates.length === 0) {
+      debugLog(`[DEBUG] No candidates found at level ${level + 1}, stopping traversal`);
+      break;
+    }
+  }
+  
+  debugLog(`[DEBUG] Hierarchical XPath traversal complete: found ${currentCandidates.length} final candidates`);
+  return currentCandidates;
+}
+
+/**
+ * Create display label using configured attribute priority
+ */
+function createElementDisplayLabel(element: XmlElement, config: ElementDisplayConfig): string {
+  const tagName = element.tagName;
+  const attributes = elementAttributesToRecord(element);
+  
+  // Get attribute order for this element type
+  const attributeOrder = config.overrides?.[tagName] || config.defaultOrder || ['Name', 'DisplayName', 'Id'];
+  
+  // Find first available attribute
+  for (const attrName of attributeOrder) {
+    const attrValue = attributes[attrName];
+    if (attrValue && attrValue.trim()) {
+      return `${tagName}: ${attrValue}`;
+    }
+  }
+  
+  // No identifying attribute found, just use tag name
+  return tagName;
+}
+
+/**
+ * Extract name attribute using configured priority
+ */
+function extractNameAttribute(element: XmlElement, config: ElementDisplayConfig): string | undefined {
+  const attributes = elementAttributesToRecord(element);
+  const attributeOrder = config.overrides?.[element.tagName] || config.defaultOrder || ['Name', 'DisplayName', 'Id'];
+  
+  for (const attrName of attributeOrder) {
+    const attrValue = attributes[attrName];
+    if (attrValue && attrValue.trim()) {
+      return attrValue;
+    }
+  }
+  
+  return undefined;
+}
+
+/**
+ * Find line number of element in document text using simple search
+ */
+function findElementLineInDocument(document: vscode.TextDocument, element: XmlElement): number {
+  const attributes = elementAttributesToRecord(element);
+  const tagName = element.tagName;
+  
+  // Create search patterns for this element - try most specific first
+  const patterns = [];
+  
+  // Try with multiple identifying attributes for better matching
+  if (attributes.Name) {
+    patterns.push(new RegExp(`<${escapeRegExp(tagName)}[^>]*Name\\s*=\\s*["']${escapeRegExp(attributes.Name)}["'][^>]*>`, 'i'));
+  }
+  if (attributes.Id) {
+    patterns.push(new RegExp(`<${escapeRegExp(tagName)}[^>]*Id\\s*=\\s*["']${escapeRegExp(attributes.Id)}["'][^>]*>`, 'i'));
+  }
+  if (attributes.DisplayName) {
+    patterns.push(new RegExp(`<${escapeRegExp(tagName)}[^>]*DisplayName\\s*=\\s*["']${escapeRegExp(attributes.DisplayName)}["'][^>]*>`, 'i'));
+  }
+  
+  // Fallback to just tag name
+  patterns.push(new RegExp(`<${escapeRegExp(tagName)}(?=\\s|>|/)`, 'i'));
+  
+  for (const pattern of patterns) {
+    for (let i = 0; i < document.lineCount; i++) {
+      const line = document.lineAt(i);
+      if (pattern.test(line.text)) {
+        return i;
+      }
+    }
+  }
+  
+  return -1;
 }
 
 /**
@@ -1891,24 +2195,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
     return cached;
   }
 
-  let config = getKahuaConfig().get<ElementDisplayConfig>('elementDisplayAttributes');
-  if (!config) {
-    config = {
-      defaultOrder: ['Name', 'DisplayName', 'Id'],
-      exclusions: ['App'],
-      overrides: {
-        Table: ['EntityDefName', 'Name'],
-        ViewDef: ['DisplayName', 'Name']
-      }
-    };
-  } else {
-    config.defaultOrder = config.defaultOrder || ['Name', 'DisplayName', 'Id'];
-    config.exclusions = config.exclusions || ['App'];
-    config.overrides = config.overrides || {
-      Table: ['EntityDefName', 'Name'],
-      ViewDef: ['DisplayName', 'Name']
-    };
-  }
+  const config = getResolvedElementDisplayConfig();
 
   type TraversalResult = {
     element: XmlElement;
@@ -1925,6 +2212,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
 
   let parts = xpath.split('/').filter(p => p);
   const rootAttributes = elementAttributesToRecord(root);
+  const rootPathAttributes = filterPlaceholderAttributes(rootAttributes);
   const { displayName: rootNameAttr, isExcluded: rootIsExcluded } = getElementDisplayName(root.tagName, rootAttributes, config);
   const rootSegment = rootIsExcluded || !rootNameAttr ? root.tagName : `${root.tagName} (${rootNameAttr})`;
 
@@ -1932,7 +2220,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
     element: root,
     nameAttributeValue: rootNameAttr,
     currentEnrichedPath: `/${rootSegment}`,
-    pathNodes: [{ tagName: root.tagName, attributes: rootAttributes }]
+    pathNodes: [{ tagName: root.tagName, attributes: rootPathAttributes }]
   }];
 
   if (parts.length && root.tagName === parts[0]) {
@@ -1944,6 +2232,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
     const tagName = attrMatch ? attrMatch[1] : part;
     const filterAttrName = attrMatch ? attrMatch[2] : undefined;
     const filterAttrValue = attrMatch ? attrMatch[3] : undefined;
+    const filterIsPlaceholder = filterAttrValue?.startsWith('[') && filterAttrValue.endsWith(']');
 
     const nextElements: TraversalResult[] = [];
 
@@ -1952,7 +2241,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
         if (child.tagName !== tagName) {
           continue;
         }
-        if (filterAttrName && filterAttrValue) {
+        if (filterAttrName && filterAttrValue && !filterIsPlaceholder) {
           const attr = child.getAttribute(filterAttrName);
           if (attr !== filterAttrValue) {
             continue;
@@ -1960,6 +2249,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
         }
 
         const attributesForChild = elementAttributesToRecord(child);
+        const filteredAttributesForPath = filterPlaceholderAttributes(attributesForChild);
         const { displayName, isExcluded } = getElementDisplayName(tagName, attributesForChild, config);
         const segment = isExcluded || !displayName ? tagName : `${tagName} (${displayName})`;
 
@@ -1967,7 +2257,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
           element: child,
           nameAttributeValue: displayName,
           currentEnrichedPath: `${current.currentEnrichedPath}/${segment}`,
-          pathNodes: [...current.pathNodes, { tagName, attributes: attributesForChild }]
+          pathNodes: [...current.pathNodes, { tagName, attributes: filteredAttributesForPath }]
         });
       }
     }
@@ -2103,8 +2393,9 @@ const stack: StackEntry[] = [];
     const openLine = Math.max(0, parser.line - 1);
     const indentation = getIndentationForLine(document, openLine);
     const attributes = saxesAttributesToRecord(tag.attributes as Record<string, { value: string }>);
+    const normalizedAttributes = filterPlaceholderAttributes(attributes);
     const parentPath = stack.length ? stack[stack.length - 1].pathNodes : [];
-    const pathNodes = [...parentPath, { tagName: tag.name, attributes }];
+    const pathNodes = [...parentPath, { tagName: tag.name, attributes: normalizedAttributes }];
     const entry: StackEntry = {
       tagName: tag.name,
       attributes,
@@ -4747,6 +5038,19 @@ async function handleSelectionInternal(
 ): Promise<GeneratedFragmentResult | undefined> {
     try {
         progress.report({ message: "Loading configuration...", increment: 10 });
+        
+        // Check if we're operating on a template/snippet document
+        const isTemplate = isTemplateDocument(editor.document);
+        const isSnippet = isSnippetDocument(editor.document);
+        const isTemplateOrSnippet = isTemplate || isSnippet;
+        
+        // If we're in a template/snippet, we need to get the source XML document for token reading
+        let sourceXmlDocumentForTokens: vscode.TextDocument | undefined;
+        if (isTemplateOrSnippet) {
+            sourceXmlDocumentForTokens = await getXmlDocumentForContext(editor.document);
+            debugLog(`[DEBUG] handleSelectionInternal: Using source XML for token reading: ${sourceXmlDocumentForTokens?.uri.fsPath}`);
+        }
+        
         const documentType = requireDocumentType(editor.document);
         let documentText: string;
         try {

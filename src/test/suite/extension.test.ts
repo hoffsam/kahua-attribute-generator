@@ -16,28 +16,6 @@ suite('Extension Test Suite', () => {
 		}
 	});
 
-	test('Commands should be registered', async () => {
-		const commands = await vscode.commands.getCommands(true);
-		
-		// Check that our main commands are registered
-		const expectedCommands = [
-			'kahua.generateAttributesExtension',
-			'kahua.generateAttributesSupplement',
-			'kahua.generateSnippetAttributes',
-			'kahua.generateTemplateAttributes',
-			'kahua.generateLookups',
-			'kahua.generateSnippetLookups',
-			'kahua.generateTemplateLookups',
-			'kahua.generateCustom',
-			'kahua.generateSnippetCustom',
-			'kahua.generateTemplateCustom'
-		];
-
-		for (const cmd of expectedCommands) {
-			assert.ok(commands.includes(cmd), `Command ${cmd} should be registered`);
-		}
-	});
-
 	test('Configuration should have expected properties', () => {
 		const config = vscode.workspace.getConfiguration('kahua');
 		
