@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
@@ -22,13 +22,18 @@
     "build": "npm run esbuild-prod && npm run package",
     "pretest": "npm run compile-tests",
     "compile-tests": "tsc -p . --outDir out --module commonjs",
-    "test": "npm run compile-tests && npx mocha out/test/suite/simple.test.js",
-    "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
+    "test": "npm run test:unit",
+    "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,baseapp-config,smart-injection,hierarchical-injection,document-type-detection,entity-matching}.test.js",
+    "test:smart-injection": "npx tsc src/test/suite/smart-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/smart-injection.test.js",
+    "test:baseapp-config": "npx tsc src/test/suite/baseapp-config.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/baseapp-config.test.js",
+    "test:hierarchical": "npx tsc src/test/suite/hierarchical-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/hierarchical-injection.test.js",
+    "test:hierarchical-integration": "node src/test/hierarchical-integration.test.js",
     "test:integration": "npm run compile-tests && node ./out/test/runTest.js",
     "test:xpath": "npx mocha src/test/xpath-template.standalone.test.js",
     "test:formatting": "npx mocha src/test/injection-formatting.standalone.test.js",
-    "test:standalone": "npm run test:xpath && npm run test:formatting",
-    "test:all": "npm run test:standalone && npm run test"
+    "test:token-substitution": "node src/test/token-substitution.standalone.test.js",
+    "test:standalone": "npm run test:xpath && npm run test:formatting && npm run test:token-substitution",
+    "test:all": "npm run test:standalone && npm run test:smart-injection && npm run test:baseapp-config && npm run test:hierarchical && npm run test:hierarchical-integration && npm run test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -185,12 +190,37 @@
           "default": [
             {
               "id": "extension",
-              "name": "Extension XML",
-              "priority": 200,
+              "name": "Extension",
+              "priority": 300,
               "rules": [
                 {
                   "kind": "rootElement",
                   "value": "App"
+                },
+                {
+                  "kind": "attributeExists",
+                  "xpath": "App",
+                  "attribute": "Extends"
+                },
+                {
+                  "kind": "xpathNotExists",
+                  "xpath": "App/App.Supplements"
+                }
+              ]
+            },
+            {
+              "id": "attributes",
+              "name": "Base App",
+              "priority": 250,
+              "rules": [
+                {
+                  "kind": "rootElement",
+                  "value": "App"
+                },
+                {
+                  "kind": "attributeNotExists",
+                  "xpath": "App",
+                  "attribute": "Extends"
                 },
                 {
                   "kind": "xpathNotExists",
@@ -240,9 +270,11 @@
                       "enum": [
                         "rootElement",
                         "xpathExists",
-                        "xpathNotExists"
+                        "xpathNotExists",
+                        "attributeExists",
+                        "attributeNotExists"
                       ],
-                      "description": "Rule logic: match root tag or check if an XPath-like path exists/does not exist."
+                      "description": "Rule logic: match root tag, check if an XPath-like path exists/does not exist, or check if an attribute exists/does not exist at a given path."
                     },
                     "value": {
                       "type": "string",
@@ -250,7 +282,11 @@
                     },
                     "xpath": {
                       "type": "string",
-                      "description": "Required when kind is 'xpathExists' or 'xpathNotExists'. Slash-delimited path such as 'App/App.Supplements'."
+                      "description": "Required when kind is 'xpathExists', 'xpathNotExists', 'attributeExists', or 'attributeNotExists'. Slash-delimited path such as 'App/App.Supplements'."
+                    },
+                    "attribute": {
+                      "type": "string",
+                      "description": "Required when kind is 'attributeExists' or 'attributeNotExists'. The attribute name to check for at the given xpath."
                     }
                   },
                   "required": [
@@ -281,6 +317,7 @@
                   "type": "attribute",
                   "path": "App/@Name"
                 },
+
                 "entity": {
                   "type": "selection",
                   "path": "EntityDefs/EntityDef",
@@ -401,9 +438,17 @@
                 "DataTags": "App/DataTags",
                 "LookupLists": "App/LookupLists",
                 "LookupList": "App/LookupLists",
+                "LogFields": "App/App.HubDefs/HubDef/HubDef.Logs/Logs/Log.Fields",
                 "FieldDefs": "App/App.HubDefs/HubDef/HubDef.LogDef/LogDef.FieldDefs",
-                "DataStore": "App/DataStore/Tables/Table/Columns",
+                "DataStore": "App/DataStore/Tables/Table[@EntityDefName='{appname}.{entity}']/Columns",
                 "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef/ImportDef.Sheets/Sheet/Sheet.Columns"
+              },
+              "hierarchicalInjectionGroups": {
+                "HubDef": {
+                  "groupSelector": "App/App.HubDefs/HubDef",
+                  "groupDisplayAttribute": "Name",
+                  "groupPathToken": "$hubpath"
+                }
               },
               "fragments": {
                 "body": {

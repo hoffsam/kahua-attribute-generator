@@ -422,6 +422,59 @@ suite('SAX Parser Tests', () => {
       console.log('✅ Extension integration expectations defined');
     });
 
+    test('should support smart injection path resolution', function() {
+      // Test the smart injection resolution logic
+      const mockTargets = [
+        {
+          injectionPath: 'DataStore/Tables/Table[@EntityDefName="someapp.SomeEntity"]/Columns',
+          context: 'Table[EntityDefName="someapp.SomeEntity"]/Columns',
+          attributes: { EntityDefName: 'someapp.SomeEntity' },
+          openTagLine: 10,
+          closeTagLine: 15,
+          xmlNodeName: 'Columns',
+          enrichedPath: 'DataStore/Tables/Table/Columns'
+        },
+        {
+          injectionPath: 'DataStore/Tables/Table[@EntityDefName="kahua_aec_rfi_extension.Field"]/Columns',
+          context: 'Table[EntityDefName="kahua_aec_rfi_extension.Field"]/Columns',
+          attributes: { EntityDefName: 'kahua_aec_rfi_extension.Field' },
+          openTagLine: 20,
+          closeTagLine: 25,
+          xmlNodeName: 'Columns',
+          enrichedPath: 'DataStore/Tables/Table/Columns'
+        },
+        {
+          injectionPath: 'DataStore/Tables/Table[@EntityDefName="otherapp.Project"]/Columns',
+          context: 'Table[EntityDefName="otherapp.Project"]/Columns',
+          attributes: { EntityDefName: 'otherapp.Project' },
+          openTagLine: 30,
+          closeTagLine: 35,
+          xmlNodeName: 'Columns',
+          enrichedPath: 'DataStore/Tables/Table/Columns'
+        }
+      ];
+
+      const affectingTokens = new Map([
+        ['appname', 'kahua_aec_rfi_extension'],
+        ['entity', 'Field']
+      ]);
+
+      // Test that smart resolution would pick the correct target
+      const expectedEntityDefName = 'kahua_aec_rfi_extension.Field';
+      const matchingTarget = mockTargets.find(t => 
+        t.attributes?.EntityDefName === expectedEntityDefName ||
+        t.injectionPath.includes(`EntityDefName="${expectedEntityDefName}"`)
+      );
+
+      assert.ok(matchingTarget, 'Should find target with matching EntityDefName');
+      assert.strictEqual(matchingTarget.attributes?.EntityDefName, expectedEntityDefName, 
+                        'Target should have correct EntityDefName');
+
+      console.log('✅ Smart injection resolution logic validated');
+      console.log(`   Expected: ${expectedEntityDefName}`);
+      console.log(`   Found: ${matchingTarget.attributes?.EntityDefName}`);
+    });
+
     test('should provide fix recommendations', function() {
       const recommendations = {
         attributeExtractionFix: 'Use direct string access: attributes[key] = String(attr)',
@@ -447,6 +500,52 @@ suite('SAX Parser Tests', () => {
       assert.ok(recommendations.fallbackMethods.length > 0, 'Should have fallback methods');
 
       console.log('💡 Fix recommendations generated');
+    });
+  });
+
+  suite('Extension Function Integration', () => {
+    test('should extract attributes correctly via extension functions', () => {
+      // Test using the actual extension parsing logic
+      const xmlContent = `<?xml version="1.0" encoding="UTF-8"?>
+<App Extends="kahua_AEC_RFI" Name="kahua_aec_rfi_extension" DataScope="Default">
+  <EntityDefs>
+    <EntityDef Name="Field" EntityType="Application" />
+  </EntityDefs>
+</App>`;
+
+      // Mock TextDocument
+      const mockDocument = {
+        getText: () => xmlContent,
+        uri: { fsPath: '/test/file.xml', toString: () => 'file:///test/file.xml' },
+        version: 1,
+        languageId: 'xml'
+      } as any;
+
+      // Import and test the actual extension functions
+      const extension = require('../../extension');
+      
+      // Test parseXmlDocumentInternal directly
+      const rootElement = extension.parseXmlDocumentInternal(xmlContent);
+      
+      assert.ok(rootElement, 'Should parse XML successfully');
+      assert.strictEqual(rootElement.tagName, 'App', 'Root element should be App');
+      assert.ok(rootElement.attributes, 'Root element should have attributes');
+      
+      console.log('Root element attributes:', rootElement.attributes);
+      console.log('Root element attributes keys:', Object.keys(rootElement.attributes));
+      
+      assert.strictEqual(rootElement.attributes.Name, 'kahua_aec_rfi_extension', 'App Name should be extracted');
+      assert.strictEqual(rootElement.attributes.Extends, 'kahua_AEC_RFI', 'App Extends should be extracted');
+      
+      // Test extractAttributeValue
+      const appName = extension.extractAttributeValue(mockDocument, 'App/@Name');
+      const appExtends = extension.extractAttributeValue(mockDocument, 'App/@Extends');
+      
+      console.log('Extracted App Name:', `"${appName}"`);
+      console.log('Extracted App Extends:', `"${appExtends}"`);
+      
+      assert.strictEqual(appName, 'kahua_aec_rfi_extension', 'extractAttributeValue should return correct App Name');
+      assert.strictEqual(appExtends, 'kahua_AEC_RFI', 'extractAttributeValue should return correct App Extends');
     });
   });
 

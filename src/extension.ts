@@ -44,6 +44,12 @@ interface InjectionPathConfig {
   displayAttribute?: string | string[];
 }
 
+interface HierarchicalInjectionGroup {
+  groupSelector: string;
+  groupDisplayAttribute: string;
+  groupPathToken: string;
+}
+
 interface FragmentDefinition {
   id: string;
   name: string;
@@ -52,6 +58,7 @@ interface FragmentDefinition {
   applicableDocumentTypes?: string[];
   fragments: Record<string, string | Record<string, string | Record<string, string>>>;
   injectionPaths?: Record<string, string | InjectionPathConfig>;
+  hierarchicalInjectionGroups?: Record<string, HierarchicalInjectionGroup>;
 }
 
 interface FragmentSet {
@@ -67,9 +74,10 @@ interface MenuOption {
 }
 
 interface DocumentTypeRule {
-  kind: 'rootElement' | 'xpathExists' | 'xpathNotExists';
+  kind: 'rootElement' | 'xpathExists' | 'xpathNotExists' | 'attributeExists' | 'attributeNotExists';
   value?: string;
   xpath?: string;
+  attribute?: string;
 }
 
 interface DocumentTypeDefinition {
@@ -231,6 +239,7 @@ interface XmlTargetSection {
   attributes?: Record<string, any>; // Attributes of the element
   nameAttributeValue?: string;  // Value of the 'Name' attribute if present for this element
   enrichedPath: string;         // The full XPath with element names included
+  xpathPath?: string;           // The proper XPath for injection (without display names)
 }
 
 interface XPathMatchedElement {
@@ -238,6 +247,7 @@ interface XPathMatchedElement {
   attributes: Record<string, any>;
   nameAttributeValue?: string;
   enrichedPath: string;
+  xpathPath: string;           // The proper XPath for injection (without display names)
   pathNodes: Array<{ tagName: string; attributes: Record<string, any> }>;
 }
 
@@ -314,6 +324,7 @@ interface GeneratedFragmentResult {
   generatedXml: string;
   fragmentDefinition: FragmentDefinition;
   tokenDefinitions: TokenNameDefinition[];
+  extractedTokens?: Map<string, string>; // Token values extracted from template content
 }
 
 /* ----------------------------- config helpers ----------------------------- */
@@ -435,14 +446,20 @@ function filterPlaceholderAttributes(attributes: Record<string, any>): Record<st
 
 
 function getDocumentTypeDefinitions(resource?: vscode.Uri): DocumentTypeDefinition[] {
-  return getKahuaConfig(resource).get<DocumentTypeDefinition[]>('documentTypes') || [];
+  const config = getKahuaConfig(resource);
+  const definitions = config.get<DocumentTypeDefinition[]>('documentTypes') || [];
+  debugLog(`[KAHUA] getDocumentTypeDefinitions: Found ${definitions.length} definitions for resource ${resource?.fsPath}`);
+  if (definitions.length > 0) {
+    debugLog(`[KAHUA] getDocumentTypeDefinitions: First definition: ${JSON.stringify(definitions[0])}`);
+  }
+  return definitions;
 }
 
 /**
  * Performance: Simple hash function for content caching
  */
 // Export functions for testing
-export { parseXmlDocumentInternal, extractAttributeValue, extractTextContent, extractSelectableValues, findElementsByXPath, getParsedXmlContext };
+export { parseXmlDocumentInternal, extractAttributeValue, extractTextContent, extractSelectableValues, findElementsByXPath, getParsedXmlContext, evaluateDocumentTypeRule };
 
 export function simpleHash(text: string): string {
   let hash = 0;
@@ -577,6 +594,8 @@ function getParsedXmlContext(document: vscode.TextDocument): ParsedXmlContext {
 
 function parseXmlForDocumentTypeDetection(text: string): SaxElement | null | undefined {
   try {
+    debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsing ${text.length} characters`);
+    
     // Performance: Check cache first
     const contentHash = simpleHash(text);
     const cacheKey = `doctype_${contentHash}`;
@@ -584,10 +603,12 @@ function parseXmlForDocumentTypeDetection(text: string): SaxElement | null | und
     
     if (cached && cached.contentHash === contentHash) {
       cached.timestamp = Date.now(); // Update access time
+      debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Using cached result`);
       return cached.dom;
     }
 
     const dom = parseXmlDocumentInternal(text);
+    debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsed DOM, root element: ${dom?.tagName}`);
     
     // Performance: Cache the result
     cleanupXmlCache();
@@ -658,17 +679,53 @@ function evaluateDocumentTypeRule(
   rootElement: SaxElement | null | undefined,
   rootElementName?: string
 ): boolean {
+  debugLog(`[KAHUA] evaluateDocumentTypeRule: kind=${rule.kind}, value=${rule.value}, xpath=${rule.xpath}, rootElement=${rootElementName}`);
+  
   switch (rule.kind) {
     case 'rootElement':
       if (!rule.value || !rootElementName) {
+        debugLog(`[KAHUA] evaluateDocumentTypeRule: rootElement check failed - rule.value=${rule.value}, rootElementName=${rootElementName}`);
         return false;
       }
-      return rootElementName.toLowerCase() === rule.value.toLowerCase();
+      const matches = rootElementName.toLowerCase() === rule.value.toLowerCase();
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: rootElement '${rootElementName}' === '${rule.value}' -> ${matches}`);
+      return matches;
     case 'xpathExists':
-      return !!(rule.xpath && hasXmlPath(rootElement || null, rule.xpath));
+      const existsResult = !!(rule.xpath && hasXmlPath(rootElement || null, rule.xpath));
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: xpathExists '${rule.xpath}' -> ${existsResult}`);
+      return existsResult;
     case 'xpathNotExists':
-      return !!(rule.xpath) && !hasXmlPath(rootElement || null, rule.xpath);
+      const notExistsResult = !!(rule.xpath) && !hasXmlPath(rootElement || null, rule.xpath);
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: xpathNotExists '${rule.xpath}' -> ${notExistsResult}`);
+      return notExistsResult;
+    case 'attributeExists':
+      if (!rule.xpath || !rule.attribute || !rootElement) {
+        debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeExists missing params - xpath=${rule.xpath}, attribute=${rule.attribute}, rootElement=${!!rootElement}`);
+        return false;
+      }
+      // For document type detection, we typically check the root element
+      if (rule.xpath === 'App' && rootElement) {
+        const hasAttribute = rootElement.attributes && rule.attribute in rootElement.attributes;
+        debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeExists '${rule.xpath}/@${rule.attribute}' -> ${hasAttribute}`);
+        return hasAttribute;
+      }
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeExists currently only supports 'App' xpath for document type detection`);
+      return false;
+    case 'attributeNotExists':
+      if (!rule.xpath || !rule.attribute || !rootElement) {
+        debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeNotExists missing params - xpath=${rule.xpath}, attribute=${rule.attribute}, rootElement=${!!rootElement}`);
+        return false;
+      }
+      // For document type detection, we typically check the root element
+      if (rule.xpath === 'App' && rootElement) {
+        const lacksAttribute = !rootElement.attributes || !(rule.attribute in rootElement.attributes);
+        debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeNotExists '${rule.xpath}/@${rule.attribute}' -> ${lacksAttribute}`);
+        return lacksAttribute;
+      }
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: attributeNotExists currently only supports 'App' xpath for document type detection`);
+      return false;
     default:
+      debugLog(`[KAHUA] evaluateDocumentTypeRule: unknown rule kind '${rule.kind}'`);
       return false;
   }
 }
@@ -702,12 +759,16 @@ function detectDocumentTypeId(document: vscode.TextDocument): string | undefined
 
   for (const definition of sortedDefinitions) {
     if (!definition.rules || definition.rules.length === 0) {
+      debugLog(`[KAHUA] detectDocumentTypeId: ${definition.id} has no rules, skipping`);
       continue;
     }
 
-    const matches = definition.rules.every(rule =>
-      evaluateDocumentTypeRule(rule, parsedXml, rootName)
-    );
+    debugLog(`[KAHUA] detectDocumentTypeId: Testing ${definition.id} with ${definition.rules.length} rules`);
+    const matches = definition.rules.every(rule => {
+      const ruleResult = evaluateDocumentTypeRule(rule, parsedXml, rootName);
+      debugLog(`[KAHUA] detectDocumentTypeId: Rule ${rule.kind}=${JSON.stringify(rule)} -> ${ruleResult}`);
+      return ruleResult;
+    });
 
     if (matches) {
       debugLog(`[KAHUA] detectDocumentTypeId: Matched document type ${definition.id} for ${document.uri.fsPath}`);
@@ -1541,11 +1602,11 @@ async function insertXmlIntoFile(
   if (existingEditor) {
     editor = existingEditor;
     // File is already open, but only show it if it's not the currently active editor
-    if (vscode.window.activeTextEditor !== existingEditor) {
+    if (vscode.window.activeTextEditor?.document.uri.toString() !== uri.toString()) {
       debugLog(`[KAHUA] Bringing existing editor to focus: ${uri.fsPath}`);
       await vscode.window.showTextDocument(existingEditor.document, { preserveFocus: false, preview: false });
     } else {
-      debugLog(`[KAHUA] Using already active editor for file: ${uri.fsPath}`);
+      debugLog(`[KAHUA] File already active, no need to show: ${uri.fsPath}`);
     }
   } else {
     // File is not open - open it in a new editor
@@ -1575,6 +1636,18 @@ async function insertXmlIntoFile(
 
   // Smart insertion - get injection paths from the fragment definition
   let injectionPaths: Record<string, string | InjectionPathConfig> = fragmentDefinition?.injectionPaths || {};
+  
+  // Handle hierarchical injection groups (e.g., HubDef containers)
+  if (fragmentDefinition?.hierarchicalInjectionGroups && xmlContext) {
+    injectionPaths = await processHierarchicalInjectionGroups(
+      injectionPaths, 
+      fragmentDefinition.hierarchicalInjectionGroups, 
+      xmlContext,
+      affectingTokens,
+      tokenDefinitions
+    );
+  }
+  
   const results: InjectionResult[] = [];
 
   // Apply injection path templates based on selected token values
@@ -1596,9 +1669,10 @@ async function insertXmlIntoFile(
               const templateBasePath = readPath.injectionPathTemplate.split('[')[0];
 
               // Check if the original xpath starts with or contains the same base path structure
-              if (xpath.includes('EntityDef') || xpath === templateBasePath) {
+              if (xpath.includes('EntityDef') || xpath === templateBasePath || 
+                  (templateBasePath.includes('DataStore/Tables/Table') && xpath.includes('DataStore') && xpath.includes('Tables') && xpath.includes('Table'))) {
                 const tokenValue = affectingTokens.get(tokenName)!;
-                modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
+                modifiedXPath = applyMultiTokenTemplate(readPath.injectionPathTemplate, tokenName, tokenValue, affectingTokens);
                 debugLog(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
               } else {
                 debugLog(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
@@ -1674,8 +1748,8 @@ async function insertXmlIntoFile(
     } else if (targetMatches.length === 1) {
       selectedTargets.set(sectionName, targetMatches);
     } else {
-      // Multiple matches - ask user to select
-      const selected = await selectTargetsFromMultiple(sectionName, targetMatches);
+      // Multiple matches - try smart resolution first, then ask user to select
+      const selected = await selectTargetsFromMultiple(sectionName, targetMatches, affectingTokens);
       if (selected) {
         selectedTargets.set(sectionName, selected);
       } else {
@@ -1950,6 +2024,77 @@ function parseTargetXmlStructure(
 }
 
 /**
+ * Extracts token values from template comments like "// Entity Context: RFI"
+ * @param document Template document to parse
+ * @returns Map of token names to values extracted from comments
+ */
+export function extractTokensFromTemplateComments(document: vscode.TextDocument): Map<string, string> {
+  const extractedTokens = new Map<string, string>();
+  const content = document.getText();
+  const lines = content.split(/\r?\n/);
+  
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    
+    // Parse "// Entity Context: RFI" format
+    const entityMatch = trimmedLine.match(/^\/\/\s*Entity Context:\s*(.+)$/);
+    if (entityMatch && entityMatch[1] && entityMatch[1] !== '<Select entity>') {
+      extractedTokens.set('entity', entityMatch[1]);
+      debugLog(`[DEBUG] Extracted entity from template comments: ${entityMatch[1]}`);
+      continue;
+    }
+    
+    // Parse "// Header tokens: appname:MyApp, entity:Field" format
+    const headerTokensMatch = trimmedLine.match(/^\/\/\s*Header tokens:\s*(.+)$/);
+    if (headerTokensMatch) {
+      const tokenPairs = headerTokensMatch[1].split(',').map(pair => pair.trim());
+      for (const pair of tokenPairs) {
+        const colonIndex = pair.indexOf(':');
+        if (colonIndex > 0) {
+          const tokenName = pair.substring(0, colonIndex).trim();
+          const tokenValue = pair.substring(colonIndex + 1).trim();
+          if (tokenName && tokenValue) {
+            extractedTokens.set(tokenName, tokenValue);
+            debugLog(`[DEBUG] Extracted token from template comments: ${tokenName}=${tokenValue}`);
+          }
+        }
+      }
+    }
+  }
+  
+  return extractedTokens;
+}
+
+/**
+ * Enhanced template replacement that handles multiple token substitutions
+ * @param template Template string like "Table[@EntityDefName='{appname}.{entity}']"
+ * @param currentTokenName The token being processed (e.g., "entity")
+ * @param currentTokenValue The value of the current token (e.g., "Field")
+ * @param allTokens Map of all available token values
+ */
+function applyMultiTokenTemplate(
+  template: string,
+  currentTokenName: string,
+  currentTokenValue: string,
+  allTokens: Map<string, string>
+): string {
+  let result = template;
+  
+  // First replace {value} with the current token's value (backward compatibility)
+  result = result.replace(/{value}/g, currentTokenValue);
+  
+  // Then replace all other token references
+  for (const [tokenName, tokenValue] of allTokens.entries()) {
+    const tokenPattern = new RegExp(`\\{${tokenName}\\}`, 'g');
+    result = result.replace(tokenPattern, tokenValue);
+  }
+  
+  debugLog(`[DEBUG] Multi-token template: "${template}" -> "${result}" (current: ${currentTokenName}=${currentTokenValue})`);
+  debugLog(`[DEBUG] All tokens used in template: ${JSON.stringify(Array.from(allTokens.entries()))}`);
+  return result;
+}
+
+/**
  * Apply injection path templates with token substitution
  */
 export function applyInjectionPathTemplate(
@@ -1960,7 +2105,17 @@ export function applyInjectionPathTemplate(
   let modifiedXPath = xpath;
   let applied = false;
 
-  // Check each token definition for injection path templates
+  // First, apply general token substitution for any {tokenName} placeholders in the path
+  for (const [tokenName, tokenValue] of affectingTokens.entries()) {
+    const tokenPattern = new RegExp(`\\{${tokenName}\\}`, 'g');
+    if (tokenPattern.test(modifiedXPath)) {
+      modifiedXPath = modifiedXPath.replace(tokenPattern, tokenValue);
+      applied = true;
+      debugLog(`[DEBUG] Applied general token substitution: {${tokenName}} -> ${tokenValue} in path`);
+    }
+  }
+
+  // Then check each token definition for injection path templates (existing logic)
   for (const tokenDef of tokenDefinitions) {
     if (tokenDef.tokenReadPaths) {
       for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
@@ -1994,6 +2149,22 @@ export function applyInjectionPathTemplate(
               // Check if xpath structure matches template structure (allowing for the target to be more specific)
               shouldApplyTemplate = xpathStructure.startsWith(templateStructure) || templateStructure.startsWith(xpathStructure);
             }
+          } else if (templateBasePath.includes('DataStore/Tables/Table')) {
+            // For DataStore Table templates, check if we're targeting DataStore Table elements
+            shouldApplyTemplate = xpathParts.includes('DataStore') && 
+                                  xpathParts.includes('Tables') && 
+                                  xpathParts.includes('Table');
+            
+            // For DataStore paths, also check structural compatibility
+            if (shouldApplyTemplate) {
+              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
+              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
+              
+              // Check if xpath structure is compatible with template (xpath should be more specific than template)
+              // e.g., "App/DataStore/Tables/Table/Columns" should match template "DataStore/Tables/Table"
+              shouldApplyTemplate = xpathStructure.includes(templateStructure) || 
+                                    templateStructure.includes(xpathStructure);
+            }
           } else {
             // For other templates, check exact path match
             shouldApplyTemplate = xpath === templateBasePath;
@@ -2001,7 +2172,8 @@ export function applyInjectionPathTemplate(
           
           if (shouldApplyTemplate) {
             const tokenValue = affectingTokens.get(tokenName)!;
-            modifiedXPath = readPath.injectionPathTemplate.replace('{value}', tokenValue);
+            // Enhanced template replacement that handles multiple token substitutions
+            modifiedXPath = applyMultiTokenTemplate(readPath.injectionPathTemplate, tokenName, tokenValue, affectingTokens);
             applied = true;
             debugLog(`[DEBUG] Applied injection path template: ${xpath} -> ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
             break;
@@ -2013,9 +2185,128 @@ export function applyInjectionPathTemplate(
 
   return {
     success: true, // Always return success, just use original xpath if no template applied
-    result: applied ? modifiedXPath : xpath
+    result: modifiedXPath
   };
 }
+
+/**
+ * Process hierarchical injection groups (e.g., HubDef containers)
+ * Allows grouping injection paths by a common container element like HubDef
+ */
+async function processHierarchicalInjectionGroups(
+  injectionPaths: Record<string, string | InjectionPathConfig>,
+  hierarchicalGroups: Record<string, HierarchicalInjectionGroup>,
+  xmlContext: ParsedXmlContext,
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
+): Promise<Record<string, string | InjectionPathConfig>> {
+  const processedPaths: Record<string, string | InjectionPathConfig> = { ...injectionPaths };
+  
+  for (const [groupName, groupConfig] of Object.entries(hierarchicalGroups)) {
+    debugLog(`[DEBUG] Processing hierarchical group: ${groupName}`);
+    
+    // Auto-detect which injection paths belong to this group by matching the group selector pattern
+    const groupSelectorParts = groupConfig.groupSelector.split('/');
+    const groupPathPattern = groupSelectorParts.join('/');
+    
+    // Find injection paths that contain the group pattern
+    const affectedSections: string[] = [];
+    const originalPaths: Record<string, string> = {};
+    
+    for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
+      const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
+      
+      // Check if this injection path contains the hierarchical group pattern
+      if (xpath.includes(groupPathPattern)) {
+        affectedSections.push(sectionName);
+        originalPaths[sectionName] = xpath;
+        debugLog(`[DEBUG] Found injection path "${sectionName}" that uses ${groupName}: ${xpath}`);
+      }
+    }
+    
+    if (affectedSections.length === 0) {
+      debugLog(`[DEBUG] No injection paths found that use group ${groupName}, skipping`);
+      continue;
+    }
+    
+    // Find all available group containers (e.g., HubDefs) in the source document
+    const groupContainers = findElementsByXPath(xmlContext, groupConfig.groupSelector);
+    
+    if (groupContainers.length === 0) {
+      debugLog(`[DEBUG] No group containers found for selector: ${groupConfig.groupSelector}`);
+      continue;
+    }
+    
+    // If only one container, auto-select it
+    let selectedContainer: XPathMatchedElement;
+    if (groupContainers.length === 1) {
+      selectedContainer = groupContainers[0];
+      const displayName = selectedContainer.attributes[groupConfig.groupDisplayAttribute] || selectedContainer.tagName;
+      debugLog(`[DEBUG] Auto-selecting single ${groupName}: ${displayName}`);
+    } else {
+      // Multiple containers - prompt user to select
+      const containerOptions = groupContainers.map(container => {
+        const displayName = container.attributes[groupConfig.groupDisplayAttribute] || container.tagName;
+        return {
+          label: displayName,
+          detail: `XPath: ${container.enrichedPath}`,
+          container
+        };
+      });
+      
+      // Add "None" option to skip this group
+      containerOptions.push({
+        label: "None (Skip injection into this group)",
+        detail: "Skip all injections for this container type",
+        container: null as any
+      });
+      
+      const selected = await vscode.window.showQuickPick(containerOptions, {
+        placeHolder: `Select ${groupName} container for injection`,
+        title: `Multiple ${groupName} containers found`
+      });
+      
+      if (!selected || !selected.container) {
+        debugLog(`[DEBUG] User skipped ${groupName} selection, removing affected paths`);
+        // Remove affected sections from processed paths
+        for (const section of affectedSections) {
+          delete processedPaths[section];
+        }
+        continue;
+      }
+      
+      selectedContainer = selected.container;
+    }
+    
+    // Calculate the group path for token substitution using proper XPath format
+    // Convert display format "HubDef (ExtendedWorkflow)" to XPath format "HubDef[@Name='ExtendedWorkflow']"
+    const groupPath = convertEnrichedPathToXPath(selectedContainer.enrichedPath, selectedContainer.attributes);
+    
+    // Update injection paths for this group by substituting the group path token
+    for (const sectionName of affectedSections) {
+      if (sectionName in injectionPaths) {
+        const originalPath = originalPaths[sectionName];
+        
+        // Replace the generic group selector with the specific selected container path
+        const expandedPath = originalPath.replace(groupConfig.groupSelector, groupPath);
+        
+        // Apply any additional injection path templates
+        if (affectingTokens && tokenDefinitions) {
+          const templateResult = applyInjectionPathTemplate(expandedPath, affectingTokens, tokenDefinitions);
+          processedPaths[sectionName] = templateResult.result;
+        } else {
+          processedPaths[sectionName] = expandedPath;
+        }
+        
+        debugLog(`[DEBUG] Updated ${sectionName}: ${originalPath} -> ${processedPaths[sectionName]}`);
+      }
+    }
+  }
+  
+  return processedPaths;
+}
+
+
 
 /**
  * Proper hierarchical XPath traversal - respects exact path structure
@@ -2025,7 +2316,7 @@ function findElementsByHierarchicalXPath(
   xpath: string,
   config: ElementDisplayConfig,
   document: vscode.TextDocument
-): Array<{ element: SaxElement; pathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> {
+): Array<{ element: SaxElement; pathSoFar: string; xpathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> {
   const root = xmlContext.rootElement;
   if (!root) return [];
   
@@ -2054,9 +2345,10 @@ function findElementsByHierarchicalXPath(
   }
   
   // Start with root element
-  let currentCandidates: Array<{ element: SaxElement; pathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> = [{ 
+  let currentCandidates: Array<{ element: SaxElement; pathSoFar: string; xpathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> = [{ 
     element: root, 
     pathSoFar: root.tagName,
+    xpathSoFar: root.tagName,
     candidatesAtLevel: []
   }];
   
@@ -2075,7 +2367,7 @@ function findElementsByHierarchicalXPath(
     
     debugLog(`[DEBUG] Looking for tagName: ${tagName}, filterAttr: ${filterAttr}, filterValue: ${filterValue}`);
     
-    const nextCandidates: Array<{ element: SaxElement; pathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> = [];
+    const nextCandidates: Array<{ element: SaxElement; pathSoFar: string; xpathSoFar: string; candidatesAtLevel: Array<{ element: SaxElement; displayName: string; line: number }> }> = [];
     
     for (const candidate of currentCandidates) {
       const children = candidate.element.children;
@@ -2106,18 +2398,22 @@ function findElementsByHierarchicalXPath(
         if (isLastLevel) {
           // This is our target level - we found the injection points
           for (const match of matchingChildren) {
+            const xpathSegment = match.displayName ? `${tagName}[@Name='${match.displayName}']` : tagName;
             nextCandidates.push({
               element: match.element,
               pathSoFar: `${candidate.pathSoFar}/${tagName}(${match.displayName})`,
+              xpathSoFar: `${candidate.xpathSoFar}/${xpathSegment}`,
               candidatesAtLevel: matchingChildren // Store all candidates at this level for user selection
             });
           }
         } else {
           // Not the final level - continue traversal with each matching child
           for (const match of matchingChildren) {
+            const xpathSegment = match.displayName ? `${tagName}[@Name='${match.displayName}']` : tagName;
             nextCandidates.push({
               element: match.element,
               pathSoFar: `${candidate.pathSoFar}/${tagName}(${match.displayName})`,
+              xpathSoFar: `${candidate.xpathSoFar}/${xpathSegment}`,
               candidatesAtLevel: matchingChildren
             });
           }
@@ -2195,6 +2491,9 @@ function getCachedParsedXml(document: vscode.TextDocument): SaxElement | null {
  * Internal XML parsing function using SAX parser
  */
 function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
+  // Strip BOM if present
+  const cleanXmlContent = xmlContent.replace(/^\uFEFF/, '');
+  
   const parser = new SaxesParser({ xmlns: false, position: true });
   let rootElement: SaxElement | null = null;
   const elementStack: SaxElement[] = [];
@@ -2204,8 +2503,16 @@ function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
     const attributes: Record<string, string> = {};
     
     for (const [key, attr] of Object.entries(tag.attributes)) {
-      // SAX attributes are direct string values, not objects
-      attributes[key] = String(attr || '');
+      // SAX attributes should be direct string values, but let's be defensive
+      let value: string;
+      if (typeof attr === 'string') {
+        value = attr;
+      } else if (attr && typeof attr === 'object') {
+        value = (attr as any).value || (attr as any).nodeValue || String(attr);
+      } else {
+        value = String(attr || '');
+      }
+      attributes[key] = value;
     }
 
     // Build path from element stack
@@ -2259,7 +2566,7 @@ function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
     throw new Error(`XML parsing error: ${error}`);
   });
 
-  const xmlText = xmlContent.replace(/xmlns="[^"]*"/g, '');
+  const xmlText = cleanXmlContent.replace(/xmlns="[^"]*"/g, '');
   parser.write(xmlText).close();
 
   if (DEBUG_MODE && rootElement) {
@@ -2366,6 +2673,7 @@ function findElementsByXPath(xmlContext: ParsedXmlContext, xpath: string): XPath
     attributes: res.element.attributes,
     nameAttributeValue: res.nameAttributeValue,
     enrichedPath: res.currentEnrichedPath,
+    xpathPath: res.currentEnrichedPath, // For now, use the same path; could be enhanced later
     pathNodes: res.pathNodes
   }));
 
@@ -2789,6 +3097,31 @@ function extractTextContent(
 }
 
 /**
+ * Determines the appropriate display label for a fragment based on document type.
+ * Shows "Extension" vs "Base App" based on whether the App element has an Extends attribute.
+ */
+function getFragmentDisplayLabel(fragmentName: string, document: vscode.TextDocument | null): string {
+  if (!document) {
+    return fragmentName;
+  }
+  
+  if (fragmentName.toLowerCase().includes('app') || fragmentName.toLowerCase().includes('base')) {
+    try {
+      const extendsValue = extractAttributeValue(document, 'App/@Extends');
+      if (extendsValue && extendsValue.trim() !== '') {
+        return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Extension');
+      } else {
+        return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Base App');
+      }
+    } catch (error) {
+      // If we can't determine, return original name
+      return fragmentName;
+    }
+  }
+  return fragmentName;
+}
+
+/**
  * Finds all elements matching an XPath and extracts their attribute values
  * Returns array of {value, context} for selection UI
  * Filters out elements that don't have the required attribute
@@ -3005,12 +3338,102 @@ async function openInjectionReport(results: InjectionResult[], targetFileUri: vs
 }
 
 /**
+ * Attempts to automatically resolve the correct injection target using token information
+ * @param sectionName The section being injected (e.g., "columns")
+ * @param targets Available injection targets
+ * @param affectingTokens Token values that affect injection (e.g., appname, entity)
+ * @returns The automatically resolved target, or undefined if can't auto-resolve
+ */
+function trySmartInjectionResolution(
+  sectionName: string,
+  targets: XmlTargetSection[],
+  affectingTokens?: Map<string, string>
+): XmlTargetSection | undefined {
+  if (!affectingTokens || affectingTokens.size === 0) {
+    return undefined;
+  }
+
+  const appname = affectingTokens.get('appname');
+  const entity = affectingTokens.get('entity');
+  
+  debugLog(`[DEBUG] Smart injection resolution: section=${sectionName}, appname=${appname}, entity=${entity}, targets=${targets.length}`);
+  console.log(`[KAHUA] Smart injection: section="${sectionName}", appname="${appname}", entity="${entity}", ${targets.length} targets`);
+
+  // For DataStore/Table injection (like columns), look for Table with matching EntityDefName
+  if (sectionName.toLowerCase().includes('column') || sectionName.toLowerCase() === 'columns') {
+    if (appname && entity) {
+      const expectedEntityDefName = `${appname}.${entity}`;
+      debugLog(`[DEBUG] Looking for Table with EntityDefName="${expectedEntityDefName}"`);
+      
+      for (const target of targets) {
+        // Check if this target is under a Table with the right EntityDefName
+        if (target.injectionPath && target.injectionPath.includes('Table')) {
+          // Look for EntityDefName attribute in the injection path or context
+          const pathHasEntityDefName = target.injectionPath.includes(`@EntityDefName="${expectedEntityDefName}"`) ||
+                                       target.injectionPath.includes(`@EntityDefName='${expectedEntityDefName}'`) ||
+                                       target.injectionPath.includes(`EntityDefName="${expectedEntityDefName}"`);
+          
+          if (pathHasEntityDefName) {
+            debugLog(`[DEBUG] Found matching Table target: ${target.injectionPath}`);
+            return target;
+          }
+          
+          // Also check if the context contains the expected EntityDefName
+          if (target.context && target.context.includes(expectedEntityDefName)) {
+            debugLog(`[DEBUG] Found matching Table target by context: ${target.context}`);
+            return target;
+          }
+          
+          // Check attributes if available
+          if (target.attributes && target.attributes['EntityDefName'] === expectedEntityDefName) {
+            debugLog(`[DEBUG] Found matching Table target by attributes: EntityDefName=${target.attributes['EntityDefName']}`);
+            return target;
+          }
+        }
+      }
+      
+      debugLog(`[DEBUG] No Table found with EntityDefName="${expectedEntityDefName}"`);
+    }
+  }
+  
+  // For EntityDef-based injection (like attributes into App structure)
+  if (sectionName.toLowerCase().includes('attribute') && entity) {
+    for (const target of targets) {
+      // Look for EntityDef with matching Name attribute
+      if (target.injectionPath && target.injectionPath.includes('EntityDef')) {
+        const pathHasEntityName = target.injectionPath.includes(`@Name="${entity}"`) ||
+                                  target.injectionPath.includes(`@Name='${entity}'`) ||
+                                  target.injectionPath.includes(`Name="${entity}"`);
+        
+        if (pathHasEntityName) {
+          debugLog(`[DEBUG] Found matching EntityDef target: ${target.injectionPath}`);
+          return target;
+        }
+        
+        // Check attributes
+        if (target.attributes && target.attributes['Name'] === entity) {
+          debugLog(`[DEBUG] Found matching EntityDef target by attributes: Name=${target.attributes['Name']}`);
+          return target;
+        }
+      }
+    }
+  }
+  
+  // Could add more smart resolution rules here for other patterns
+  // e.g., WorkflowDef matching, specific DataSource patterns, etc.
+  
+  debugLog(`[DEBUG] No smart resolution found for section "${sectionName}"`);
+  return undefined;
+}
+
+/**
  * Shows a quick pick for selecting target locations when there are multiple matches
  * Returns the selected targets, or undefined if cancelled
  */
 async function selectTargetsFromMultiple(
   sectionName: string,
-  targets: XmlTargetSection[]
+  targets: XmlTargetSection[],
+  affectingTokens?: Map<string, string>
 ): Promise<XmlTargetSection[] | undefined> {
   if (targets.length === 0) {
     return undefined;
@@ -3018,6 +3441,15 @@ async function selectTargetsFromMultiple(
 
   if (targets.length === 1) {
     return targets;
+  }
+
+  // Smart auto-resolution: try to automatically select the correct target
+  // when we have enough information to uniquely identify it
+  const smartSelected = trySmartInjectionResolution(sectionName, targets, affectingTokens);
+  if (smartSelected) {
+    debugLog(`[DEBUG] Smart injection auto-resolved to: ${smartSelected.context} (${smartSelected.injectionPath})`);
+    console.log(`[KAHUA] 🎯 Smart injection: Auto-selected injection target for "${sectionName}" based on template tokens`);
+    return [smartSelected];
   }
 
   const items = targets.map((target, index) => {
@@ -3226,6 +3658,23 @@ async function showInsertionStrategyPick(
   }
 
   return selected.label.includes('Smart') ? 'smart' : 'cursor';
+}
+
+/**
+ * Converts an enriched path with display names back to proper XPath format
+ * Example: "App/App.HubDefs/HubDef (ExtendedWorkflow)" -> "App/App.HubDefs/HubDef[@Name='ExtendedWorkflow']"
+ */
+function convertEnrichedPathToXPath(enrichedPath: string, elementAttributes: Record<string, any>): string {
+  // For simple cases without display names, return as-is
+  if (!enrichedPath.includes('(')) {
+    return enrichedPath;
+  }
+  
+  // Convert display format segments to proper XPath format
+  return enrichedPath.replace(/(\w+)\s*\(([^)]+)\)/g, (match, tagName, displayName) => {
+    // Use Name attribute by default, but could be enhanced to check other attributes
+    return `${tagName}[@Name='${displayName}']`;
+  });
 }
 
 /**
@@ -3816,6 +4265,13 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
+      // Check if current document is a valid Kahua document
+      const docTypeId = detectDocumentTypeId(editor.document);
+      if (!docTypeId) {
+        vscode.window.showWarningMessage('This command is only available in valid Kahua documents.');
+        return;
+      }
+
       try {
         const documentType = requireDocumentType(editor.document);
         const pick = await selectFragments('Select fragments for template generation', documentType);
@@ -3830,6 +4286,13 @@ export function activate(context: vscode.ExtensionContext) {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
         vscode.window.showErrorMessage('No active editor found.');
+        return;
+      }
+
+      // Check if current document is a valid Kahua document  
+      const docTypeId = detectDocumentTypeId(editor.document);
+      if (!docTypeId) {
+        vscode.window.showWarningMessage('This command is only available in valid Kahua documents.');
         return;
       }
 
@@ -4690,12 +5153,8 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     );
     debugLog(`[DEBUG] Found entityToken:`, entityToken?.name);
     let selectedEntity = entityToken ? extractedValues.get(entityToken.name) : undefined;
-    const storedEntityPreference = getStoredEntityForDocument(currentEditor.document);
-    debugLog(`[DEBUG] selectedEntity:`, selectedEntity, 'storedEntityPreference:', storedEntityPreference);
-    if (entityToken && storedEntityPreference) {
-      extractedValues.set(entityToken.name, storedEntityPreference);
-      selectedEntity = storedEntityPreference;
-    }
+    // Don't use stored entity preference - always base selection on template content
+    debugLog(`[DEBUG] selectedEntity:`, selectedEntity, '(not using stored preferences)');
 
     debugLog(`[DEBUG] Entity selection conditions: entityToken=${!!entityToken}, selectedEntity=${selectedEntity}, hasXmlContext=${hasXmlContext}`);
     if (entityToken && !selectedEntity && sourceXmlDocument) {
@@ -5013,7 +5472,8 @@ async function finalizeGeneratedFragmentsWithTarget(
 ): Promise<void> {
   const currentDocument = editor.document;
   const currentFileUri = currentDocument.uri;
-  const affectingTokens = injectionAffectingTokens.get(currentFileUri.toString());
+  // Use freshly extracted tokens from generation, not cached ones
+  const affectingTokens = generation.extractedTokens || injectionAffectingTokens.get(currentFileUri.toString());
 
   switch (target.type) {
     case 'currentFile': {
@@ -5241,6 +5701,31 @@ async function handleSelectionInternal(
             Array.from(allTokenReferences)
         );
 
+        // Extract values from source XML if processing a template/snippet with source XML context
+        const xmlExtractedValues = new Map<string, string>();
+        if (sourceXmlDocumentForTokens) {
+            const referencedTokenDefs = tokenDefinitions.filter(def =>
+                allTokenReferences.has(def.id)
+            );
+            
+            debugLog(`[DEBUG] handleSelectionInternal: Found ${referencedTokenDefs.length} referenced token definitions for XML extraction`);
+
+            for (const tokenDef of referencedTokenDefs) {
+                if (tokenDef.tokenReadPaths) {
+                    try {
+                        debugLog(`[DEBUG] handleSelectionInternal: Reading XML tokens for ${tokenDef.id}`);
+                        const values = await readTokenValuesFromXml(sourceXmlDocumentForTokens, tokenDef.tokenReadPaths);
+                        debugLog(`[DEBUG] handleSelectionInternal: Got ${values.size} values from XML`);
+                        values.forEach((value, key) => xmlExtractedValues.set(key, value));
+                    } catch (tokenError) {
+                        debugLog(`[DEBUG] handleSelectionInternal: Error reading XML tokens for ${tokenDef.id}:`, tokenError instanceof Error ? tokenError.message : String(tokenError));
+                    }
+                }
+            }
+            
+            debugLog(`[DEBUG] handleSelectionInternal: Total XML extracted values: ${xmlExtractedValues.size}`);
+        }
+
         const groups = splitIntoGroups(documentText);
         if (groups.length === 0) {
             throw new Error('Current document contains no valid token data. Remove comments/whitespace-only lines or add token rows.');
@@ -5332,7 +5817,7 @@ async function handleSelectionInternal(
                         }
 
                         const fragmentType = fragmentDef.type || 'grouped';
-                        const fragmentLabel = fragmentDef.name;
+                        const fragmentLabel = getFragmentDisplayLabel(fragmentDef.name, sourceXmlDocumentForTokens || editor.document);
 
                         if (fragmentType === 'table') {
                             for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
@@ -5444,10 +5929,60 @@ async function handleSelectionInternal(
             generatedXml = formatXml(generatedXml, xmlIndentSize);
         }
 
+        // Extract tokens that affect injection from multiple sources
+        const extractedTokens = new Map<string, string>();
+        
+        // First, include tokens extracted from XML source (e.g., appname, entity selection)
+        for (const tokenDef of tokenDefinitions) {
+            if (tokenDef.tokenReadPaths) {
+                for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+                    if (readPath.affectsInjection && xmlExtractedValues.has(tokenName)) {
+                        extractedTokens.set(tokenName, xmlExtractedValues.get(tokenName)!);
+                        debugLog(`[DEBUG] Extracted injection token from XML: ${tokenName}=${xmlExtractedValues.get(tokenName)}`);
+                    }
+                }
+            }
+        }
+        
+        // Extract tokens from template comments (e.g., "// Entity Context: RFI")
+        const templateTokens = extractTokensFromTemplateComments(editor.document);
+        for (const [tokenName, tokenValue] of templateTokens) {
+            // Template values override XML values for injection-affecting tokens
+            const affectsInjection = tokenDefinitions.some(tokenDef => 
+                tokenDef.tokenReadPaths?.[tokenName]?.affectsInjection
+            );
+            if (affectsInjection || tokenName === 'entity') {
+                extractedTokens.set(tokenName, tokenValue);
+                debugLog(`[DEBUG] Extracted injection token from template comments: ${tokenName}=${tokenValue}`);
+            }
+        }
+        
+        // Then, include tokens from template header data (but don't override template comment values)
+        if (groups.length > 0 && groups[0].length > 0 && headerTokens.length > 0) {
+            const firstGroup = groups[0];
+            const headerLine = firstGroup[0];
+            const { rawTokenValues } = getTokenValues(headerTokens, tableTokens, headerLine, '');
+            
+            // Only include tokens that affect injection and aren't already set from template comments
+            for (const tokenDef of tokenDefinitions) {
+                if (tokenDef.tokenReadPaths) {
+                    for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+                        if (readPath.affectsInjection && rawTokenValues[tokenName] && !extractedTokens.has(tokenName)) {
+                            // Use raw value and trim it, but don't apply case transformations
+                            const rawValue = rawTokenValues[tokenName].trim();
+                            extractedTokens.set(tokenName, rawValue);
+                            debugLog(`[DEBUG] Extracted injection token from template header (raw): ${tokenName}=${rawValue}`);
+                        }
+                    }
+                }
+            }
+        }
+
         return {
             generatedXml,
             fragmentDefinition: selectedFragmentDefs[0],
-            tokenDefinitions
+            tokenDefinitions,
+            extractedTokens
         };
 
     } catch (error) {
@@ -5477,7 +6012,8 @@ async function finalizeGeneratedFragments(
     return;
   }
 
-  const affectingTokens = injectionAffectingTokens.get(currentFileUri.toString());
+  // Use freshly extracted tokens from generation, not cached ones
+  const affectingTokens = generation.extractedTokens || injectionAffectingTokens.get(currentFileUri.toString());
 
   switch (target.type) {
     case 'currentFile': {
