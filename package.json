@@ -26,15 +26,15 @@
     "test:unit": "npm run compile-tests && npx mocha --ui tdd out/test/suite/{simple,unit,conditionals}.test.js --grep \"Unit Tests|Simple Unit Tests\"",
     "test:integration": "npm run compile-tests && node ./out/test/runTest.js",
     "test:xpath": "npx mocha src/test/xpath-template.standalone.test.js",
-    "test:formatting": "npx mocha src/test/injection-formatting.standalone.test.js", 
+    "test:formatting": "npx mocha src/test/injection-formatting.standalone.test.js",
     "test:standalone": "npm run test:xpath && npm run test:formatting",
     "test:all": "npm run test:standalone && npm run test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.19.122",
-    "@types/vscode": "^1.85.0",
     "@types/sinon": "^17.0.3",
+    "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.27.0",
     "glob": "^11.0.3",
@@ -73,7 +73,7 @@
         },
         {
           "command": "kahua.showSnippetForGeneration",
-          "group": "kahua@2", 
+          "group": "kahua@2",
           "when": "config.kahua.showSnippetsInMenu && kahua.hasApplicableDocument && kahua.canGenerateSnippets"
         },
         {
@@ -647,7 +647,6 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@xmldom/xmldom": "^0.8.10",
     "saxes": "^6.0.0"
   }
 }
