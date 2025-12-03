@@ -23,13 +23,13 @@ async function main() {
 		console.log('  User data:', userDataDir);
 		console.log('  Extensions:', extensionsDir);
 
+		// Don't pass extensionDevelopmentPath in launchArgs to avoid space issues
 		await runTests({
 			extensionDevelopmentPath,
 			extensionTestsPath,
 			launchArgs: [
 				'--user-data-dir', userDataDir, 
 				'--extensions-dir', extensionsDir,
-				'--extensionDevelopmentPath', `"${extensionDevelopmentPath}"`,
 				'--disable-workspace-trust',
 				'--skip-welcome',
 				'--skip-release-notes',

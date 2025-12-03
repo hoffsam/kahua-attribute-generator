@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { SaxesParser } from 'saxes';
 import * as path from 'path';
+// TableGenerationPanel import removed - tables now use document-based approach
 
 /**
  * Regex pattern for detecting conditional expressions in fragment keys
@@ -42,6 +43,15 @@ interface TokenNameDefinition {
 interface InjectionPathConfig {
   path: string;
   displayAttribute?: string | string[];
+  attributeDisplayConfig?: string;
+  attributeDisplayHints?: AttributeDisplayHint[];
+  pathSegments?: string[];
+}
+
+interface ResolvedInjectionPathConfig extends InjectionPathConfig {
+  path: string;
+  attributeDisplayHints?: AttributeDisplayHint[];
+  pathSegments?: string[];
 }
 
 interface HierarchicalInjectionGroup {
@@ -93,6 +103,7 @@ interface DocumentTypeDefinition {
 interface ParsedToken {
   name: string;
   defaultValue: string;
+  required?: boolean;
 }
 
 /**
@@ -129,17 +140,11 @@ const SOURCE_METADATA_SCAN_LINES = 20;
 const documentTypeOverrides = new Map<string, string>();
 
 /**
- * Map to remember token selections per document/template
- * Key: Document/template URI
- * Value: Map of token name to selected value
- */
-const selectedTokenValuesByDocument = new Map<string, Map<string, string>>();
-
-/**
  * Tracks template documents (generated token templates)
  */
 const templateDocumentUris = new Set<string>();
 const snippetDocumentUris = new Set<string>();
+const tableDocumentUris = new Set<string>();
 
 /**
  * Cache of detected document types keyed by URI
@@ -173,6 +178,7 @@ const SNIPPET_DOCUMENT_CONTEXT_KEY = 'kahua.isSnippetDocument';
 const SELECTION_CONTEXT_KEY = 'kahua.hasValidSelection';
 const CAN_GENERATE_TEMPLATES_CONTEXT_KEY = 'kahua.canGenerateTemplates';
 const CAN_GENERATE_SNIPPETS_CONTEXT_KEY = 'kahua.canGenerateSnippets';
+const CAN_GENERATE_TABLES_CONTEXT_KEY = 'kahua.canGenerateTables';
 const TEMPLATE_KIND_CONTEXT_KEY = 'kahua.templateKind';
 const SNIPPET_KIND_CONTEXT_KEY = 'kahua.snippetKind';
 const HAS_SOURCE_FILE_CONTEXT_KEY = 'kahua.hasSourceFile';
@@ -213,6 +219,181 @@ function resetGenerationStatus(): void {
 }
 
 /**
+ * Unified CSV Generation Service - Consolidates all CSV creation logic
+ * This eliminates the 5+ duplicate CSV generation implementations throughout the codebase
+ */
+class CsvGenerationService {
+  /**
+   * Generate CSV content with context headers and data rows
+   */
+  static generateCsv(options: {
+    fragmentIds: string[];
+    sourceFile?: string;
+    sourceUri?: string;
+    headerTokens: ParsedToken[];
+    tableTokens: ParsedToken[];
+    extractedTokens: Map<string, string>;
+    dataRows?: any[];
+    includeDefaultRow?: boolean;
+    snippetMode?: boolean;
+    tabStopStartIndex?: number;
+  }): string {
+    const lines: string[] = [];
+    
+    // Add context headers
+    lines.push(`// Kahua ${options.snippetMode ? 'Snippet' : 'Template'} for ${options.fragmentIds.join(', ').toLowerCase()}`);
+    
+    if (options.sourceFile) {
+      lines.push(`${SOURCE_XML_COMMENT_PREFIX} ${options.sourceFile}`);
+    }
+    if (options.sourceUri) {
+      lines.push(`${SOURCE_XML_URI_PREFIX} ${options.sourceUri}`);
+    }
+    
+    if (!options.snippetMode) {
+      // Template-specific header
+      lines.push('// Token Template for ' + options.fragmentIds.join(', ').toLowerCase() + ':');
+    }
+    
+    lines.push('// ----------------------------------------------------------------');
+    
+    // Add entity context if available
+    const selectedEntity = options.extractedTokens.get('entity');
+    if (selectedEntity) {
+      lines.push(`// Entity Context: ${selectedEntity}`);
+      if (!options.snippetMode) {
+        // Template-specific entity guidance
+        lines.push('// All template rows will target this entity. Update this header if you change entities.');
+        lines.push('// Smart injection will automatically use this entity for Attributes, Labels, and DataTags.');
+      }
+    }
+    
+    // Add other context comments
+    const appname = options.extractedTokens.get('appname');
+    if (appname) {
+      lines.push(`// Appname Context: ${appname}`);
+    }
+    
+    
+    // Add header columns information
+    if (options.headerTokens.length > 0) {
+      const headerColumnsDisplay = options.headerTokens.map(token => {
+        const extractedValue = options.extractedTokens.get(token.name);
+        const value = extractedValue || token.defaultValue || token.name;
+        return `${token.name}:${value}`;
+      }).join(', ');
+      lines.push(`// Header Columns: ${headerColumnsDisplay}`);
+    }
+    
+    // Add table columns information with defaults
+    if (options.tableTokens.length > 0) {
+      const tableColumnsDisplay = options.tableTokens.map(token => {
+        return token.defaultValue ? `${token.name}:${token.defaultValue}*` : token.name;
+      }).join(', ');
+      lines.push(`// Table Columns: ${tableColumnsDisplay}`);
+      
+      // Add default explanation if any defaults exist
+      const hasDefaults = options.tableTokens.some(token => token.defaultValue);
+      if (hasDefaults) {
+        lines.push('// * = Default value will be applied to new rows');
+      }
+    }
+    
+    lines.push('// ----------------------------------------------------------------');
+    if (!options.snippetMode) {
+      lines.push('// Edit the template data below and use generation commands');
+    }
+    lines.push('');
+    
+    // Add header tokens row if any
+    if (options.headerTokens.length > 0) {
+      const headerValues = options.headerTokens.map(token => {
+        const extractedValue = options.extractedTokens.get(token.name);
+        return extractedValue || token.defaultValue || token.name;
+      });
+      lines.push(headerValues.join(','));
+    }
+    
+    // Add data rows
+    if (options.dataRows && options.dataRows.length > 0) {
+      // Use provided data rows - snippet mode needs multiple rows with tab stops
+      if (options.snippetMode && options.tableTokens.length > 0) {
+        let tabStopIndex = options.tabStopStartIndex || 1;
+        for (let rowIndex = 0; rowIndex < options.dataRows.length; rowIndex++) {
+          const rowParts = options.tableTokens.map(token => {
+            const defaultValue = token.defaultValue || '';
+            const placeholder = defaultValue ? `\${${tabStopIndex}:${defaultValue}}` : `\${${tabStopIndex}:${token.name}}`;
+            tabStopIndex++;
+            return placeholder;
+          });
+          lines.push(rowParts.join(','));
+        }
+        // Add final tab stop for snippets
+        lines.push(`$0`);
+      } else {
+        // Regular data rows for templates/tables
+        const allTokenNames = [...options.headerTokens.map(t => t.name), ...options.tableTokens.map(t => t.name)];
+        for (const row of options.dataRows) {
+          const rowValues = allTokenNames.map(tokenName => row[tokenName] || '');
+          lines.push(rowValues.join(','));
+        }
+      }
+    } else if (options.includeDefaultRow && options.tableTokens.length > 0) {
+      // Add default row for editing
+      if (options.snippetMode) {
+        // Generate snippet with tab stops
+        let tabStopIndex = options.tabStopStartIndex || 1;
+        const rowParts = options.tableTokens.map(token => {
+          const defaultValue = token.defaultValue || '';
+          const placeholder = defaultValue ? `\${${tabStopIndex}:${defaultValue}}` : `\${${tabStopIndex}:${token.name}}`;
+          tabStopIndex++;
+          return placeholder;
+        });
+        lines.push(rowParts.join(','));
+        
+        // Add final tab stop
+        lines.push(`$0`);
+      } else {
+        // Regular template with defaults
+        const defaultValues = options.tableTokens.map(token => token.defaultValue || '');
+        lines.push(defaultValues.join(','));
+      }
+    }
+    
+    return lines.join('\n');
+  }
+  
+  /**
+   * Generate CSV for table generation with proper header/data separation
+   */
+  static generateTableCsv(options: {
+    headerFields: Record<string, string>;
+    headerTokens: ParsedToken[];
+    tableRows: any[][];
+  }): string {
+    const lines: string[] = [];
+    
+    // Add context comments
+    lines.push(`// Entity Context: ${options.headerFields.entity || ''}`);
+    lines.push('// Generated from table - entity already selected');
+    lines.push(`// Appname Context: ${options.headerFields.appname || ''}`);
+    
+    // Add header row (from headerFields)
+    const headerRow = (options.headerTokens || []).map((token: any) => 
+      options.headerFields[token.name] || token.defaultValue || ''
+    );
+    lines.push(headerRow.join(','));
+    
+    // Add table data rows
+    for (const row of options.tableRows) {
+      lines.push(row.join(','));
+    }
+    
+    return lines.join('\n');
+  }
+}
+
+/**
  * Represents a parsed section from generated XML output
  */
 interface XmlSection {
@@ -240,6 +421,9 @@ interface XmlTargetSection {
   nameAttributeValue?: string;  // Value of the 'Name' attribute if present for this element
   enrichedPath: string;         // The full XPath with element names included
   xpathPath?: string;           // The proper XPath for injection (without display names)
+  element?: SaxElement;
+  attributeDisplayHints?: AttributeDisplayHint[];
+  pathSegments?: string[];
 }
 
 interface XPathMatchedElement {
@@ -325,6 +509,16 @@ interface GeneratedFragmentResult {
   fragmentDefinition: FragmentDefinition;
   tokenDefinitions: TokenNameDefinition[];
   extractedTokens?: Map<string, string>; // Token values extracted from template content
+}
+
+interface RowTokenData {
+  clean: Record<string, string>;
+  raw: Record<string, string>;
+}
+
+interface AttributeDisplayHint {
+  segmentIndex: number;
+  attributes: string[];
 }
 
 /* ----------------------------- config helpers ----------------------------- */
@@ -459,7 +653,7 @@ function getDocumentTypeDefinitions(resource?: vscode.Uri): DocumentTypeDefiniti
  * Performance: Simple hash function for content caching
  */
 // Export functions for testing
-export { parseXmlDocumentInternal, extractAttributeValue, extractTextContent, extractSelectableValues, findElementsByXPath, getParsedXmlContext, evaluateDocumentTypeRule };
+export { XmlParsingService, FragmentValidationService, TokenExtractionService, extractAttributeValue, extractTextContent, extractSelectableValues, findElementsByXPath, getParsedXmlContext, evaluateDocumentTypeRule, compileTemplate, renderTemplate, evaluateExpression, splitIntoGroups, getTokenValues };
 
 export function simpleHash(text: string): string {
   let hash = 0;
@@ -500,129 +694,16 @@ function cleanupXmlCache(): void {
   }
 }
 
-function getParsedXmlFromCache(document: vscode.TextDocument, content: string, contentHash: string): SaxElement | null {
-  const cacheKey = `${document.uri.toString()}_${contentHash}`;
-  const cached = xmlParseCache.get(cacheKey);
-  if (cached && cached.contentHash === contentHash) {
-    cached.timestamp = Date.now();
-    return cached.dom;
-  }
 
-  const dom = parseXmlDocumentInternal(content);
-  cleanupXmlCache();
-  xmlParseCache.set(cacheKey, {
-    dom,
-    contentHash,
-    timestamp: Date.now()
-  });
 
-  return dom;
-}
 
-function buildElementsByPath(rootElement: SaxElement | null): Map<string, SaxElement[]> {
-  const elementsByPath = new Map<string, SaxElement[]>();
-  
-  if (!rootElement) {
-    return elementsByPath;
-  }
-
-  function traverse(element: SaxElement) {
-    const path = element.path;
-    
-    if (!elementsByPath.has(path)) {
-      elementsByPath.set(path, []);
-    }
-    elementsByPath.get(path)!.push(element);
-
-    // Also add to partial paths for XPath matching
-    const pathParts = path.split('/').filter(p => p);
-    for (let i = 1; i <= pathParts.length; i++) {
-      const partialPath = pathParts.slice(-i).join('/');
-      if (!elementsByPath.has(partialPath)) {
-        elementsByPath.set(partialPath, []);
-      }
-      elementsByPath.get(partialPath)!.push(element);
-    }
-
-    for (const child of element.children) {
-      traverse(child);
-    }
-  }
-
-  traverse(rootElement);
-  return elementsByPath;
-}
 
 function getParsedXmlContext(document: vscode.TextDocument): ParsedXmlContext {
-  const existing = parsedXmlContextCache.get(document);
-  const content = document.getText();
-  const contentHash = simpleHash(content);
-  let rootElement: SaxElement | null;
-  if (existing && existing.contentHash === contentHash) {
-    rootElement = existing.rootElement;
-  } else {
-    rootElement = getParsedXmlFromCache(document, content, contentHash);
-  }
-
-  if (existing && existing.contentHash === contentHash) {
-    existing.version = document.version;
-    existing.textDocument = document;
-    existing.rootElement = rootElement;
-    debugLog(`[KAHUA] Reusing parsed XML context for ${document.uri.fsPath}`);
-    return existing;
-  }
-
-  // Build elementsByPath from SAX tree (no need for separate parsing)
-  const elementsByPath = buildElementsByPath(rootElement);
-  debugLog(`[KAHUA] Built SAX context with ${elementsByPath.size} element paths for ${document.uri.fsPath}`);
-  
-  const context: ParsedXmlContext = {
-    textDocument: document,
-    version: document.version,
-    contentHash,
-    rootElement,
-    elementsByPath,
-    xpathElementCache: new Map(),
-    xpathTargetCache: new Map(),
-    lineResolutionCache: new Map(),
-    pathLineInfo: new Map() // Simplified - SAX elements have line numbers built-in
-  };
-
-  parsedXmlContextCache.set(document, context);
-  return context;
+  return XmlParsingService.getParsedXmlContext(document);
 }
 
 function parseXmlForDocumentTypeDetection(text: string): SaxElement | null | undefined {
-  try {
-    debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsing ${text.length} characters`);
-    
-    // Performance: Check cache first
-    const contentHash = simpleHash(text);
-    const cacheKey = `doctype_${contentHash}`;
-    const cached = xmlParseCache.get(cacheKey);
-    
-    if (cached && cached.contentHash === contentHash) {
-      cached.timestamp = Date.now(); // Update access time
-      debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Using cached result`);
-      return cached.dom;
-    }
-
-    const dom = parseXmlDocumentInternal(text);
-    debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsed DOM, root element: ${dom?.tagName}`);
-    
-    // Performance: Cache the result
-    cleanupXmlCache();
-    xmlParseCache.set(cacheKey, {
-      dom,
-      contentHash,
-      timestamp: Date.now()
-    });
-    
-    return dom;
-  } catch (error) {
-    debugWarn('[KAHUA] Failed to parse XML for document type detection:', error);
-    return undefined;
-  }
+  return XmlParsingService.parseXmlForDocumentTypeDetection(text);
 }
 
 function resolveRootElementName(rootElement: SaxElement | null | undefined): string | undefined {
@@ -815,27 +896,39 @@ async function refreshDocumentTypeForDocument(document: vscode.TextDocument): Pr
 
 async function setDocumentTypeContext(typeId?: string): Promise<void> {
   debugLog(`[KAHUA] setDocumentTypeContext: ${typeId ?? 'undefined'}`);
+  const hasApplicable = Boolean(typeId);
+  debugLog(`[KAHUA] Setting ${DOCUMENT_APPLICABLE_CONTEXT_KEY} = ${hasApplicable}`);
+  
+  // CRITICAL DEBUG: Log current active document
+  const activeDoc = vscode.window.activeTextEditor?.document;
+  debugLog(`[KAHUA] Active document when setting context: ${activeDoc?.fileName || 'none'}`);
+  debugLog(`[KAHUA] Active document language: ${activeDoc?.languageId || 'none'}`);
+  
   await vscode.commands.executeCommand(
     'setContext',
     DOCUMENT_APPLICABLE_CONTEXT_KEY,
-    Boolean(typeId)
+    hasApplicable
   );
   await vscode.commands.executeCommand(
     'setContext',
     DOCUMENT_TYPE_CONTEXT_KEY,
     typeId ?? ''
   );
+  
+  // CRITICAL DEBUG: Verify context was set by reading it back
+  debugLog(`[KAHUA] Context setting completed. hasApplicable=${hasApplicable}, typeId=${typeId}`);
 }
 
 async function updateDocumentTypeContext(document?: vscode.TextDocument): Promise<void> {
   if (!document) {
-    debugLog('[KAHUA] updateDocumentTypeContext: No active document');
+    debugLog('[KAHUA] updateDocumentTypeContext: No active document - preserving source file context');
     await setDocumentTypeContext(undefined);
     await setTemplateDocumentContext(undefined);
     await setSnippetDocumentContext(undefined);
     await setSelectionContext(undefined);
     await updateGenerationAvailability(undefined);
-    await setSourceFileContext(undefined);
+    // DON'T clear source file context - preserve it for webview operations
+    // await setSourceFileContext(undefined);
     return;
   }
 
@@ -862,7 +955,40 @@ async function updateDocumentTypeContext(document?: vscode.TextDocument): Promis
 
   const typeId = getOrDetectDocumentType(document);
   debugLog(`[KAHUA] updateDocumentTypeContext: Detected type ${typeId} for ${document.uri.fsPath}`);
+  
+  // FALLBACK: If full detection fails but this looks like a Kahua file, enable menu anyway
+  if (!typeId && isBasicKahuaFile(document)) {
+    debugLog(`[KAHUA] updateDocumentTypeContext: Fallback detection - enabling menu for basic Kahua file`);
+    await setDocumentTypeContext('basic-kahua'); // Use special fallback type
+    return;
+  }
+  
   await setDocumentTypeContext(typeId);
+}
+
+/**
+ * Fallback detection for basic Kahua files - shows menu even if full detection fails
+ * This prevents menu regression when document type detection has issues
+ */
+function isBasicKahuaFile(document: vscode.TextDocument): boolean {
+  try {
+    const content = document.getText();
+    if (!content.trim()) {
+      return false;
+    }
+    
+    // Quick check for <App> root element without full XML parsing
+    const appElementMatch = content.match(/<App[\s>]/i);
+    if (appElementMatch) {
+      debugLog(`[KAHUA] isBasicKahuaFile: Found <App> root element at position ${appElementMatch.index}`);
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    debugLog(`[KAHUA] isBasicKahuaFile: Error checking file: ${error}`);
+    return false;
+  }
 }
 
 function requireDocumentType(document: vscode.TextDocument): string {
@@ -873,24 +999,283 @@ function requireDocumentType(document: vscode.TextDocument): string {
   return typeId;
 }
 
+function getDocumentTypeDefinition(document: vscode.TextDocument): DocumentTypeDefinition | undefined {
+  const typeId = requireDocumentType(document);
+  const config = getKahuaConfig(currentResource());
+  const definitions = config.get<DocumentTypeDefinition[]>('documentTypes') || [];
+  return definitions.find(def => def.id === typeId);
+}
+
+/**
+ * Unified Fragment Validation Service - consolidates all fragment validation operations
+ */
+class FragmentValidationService {
+  /**
+   * Check if a fragment is applicable to a specific document type
+   */
+  static isFragmentApplicableToDocument(fragment: FragmentDefinition, documentType: string): boolean {
+    return !fragment.applicableDocumentTypes || fragment.applicableDocumentTypes.includes(documentType);
+  }
+
+  /**
+   * Filter and validate fragments for document type compatibility
+   */
+  static enforceFragmentApplicability(
+    fragments: FragmentDefinition[],
+    documentType: string
+  ): FragmentDefinition[] {
+    console.log(`[KAHUA] enforceFragmentApplicability: documentType="${documentType}", fragments:`, fragments.map(f => ({id: f.id, name: f.name, applicableDocumentTypes: f.applicableDocumentTypes})));
+    
+    const incompatible = fragments.filter(
+      fragment => fragment.applicableDocumentTypes && !fragment.applicableDocumentTypes.includes(documentType)
+    );
+
+    if (incompatible.length > 0) {
+      const names = incompatible.map(f => f.name || f.id).join(', ');
+      console.log(`[KAHUA] Incompatible fragments for documentType "${documentType}":`, incompatible);
+      throw new Error(`Fragment(s) not available for document type "${documentType}": ${names}.`);
+    }
+
+    return fragments;
+  }
+
+  /**
+   * Get fragments by IDs and validate compatibility with document type
+   */
+  static getValidatedFragments(
+    fragmentDefinitions: FragmentDefinition[],
+    fragmentIds: string[],
+    documentType: string
+  ): FragmentDefinition[] {
+    // First filter by requested IDs
+    const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
+    
+    if (selectedFragmentDefsRaw.length === 0) {
+      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
+    }
+
+    // Then validate compatibility and return filtered list
+    return this.enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+  }
+
+  /**
+   * Get all applicable fragments for a document type
+   */
+  static getApplicableFragments(
+    fragmentDefinitions: FragmentDefinition[],
+    documentType: string
+  ): FragmentDefinition[] {
+    const applicableFragments = fragmentDefinitions.filter(def => 
+      this.isFragmentApplicableToDocument(def, documentType)
+    );
+    
+    if (applicableFragments.length === 0) {
+      vscode.window.showWarningMessage(`No fragments are configured for document type "${documentType}".`);
+      return [];
+    }
+
+    return applicableFragments;
+  }
+
+  /**
+   * Collect all unique token references from a set of fragments
+   */
+  static collectTokenReferences(fragments: FragmentDefinition[]): Set<string> {
+    const allTokenReferences = new Set<string>();
+    fragments.forEach(def => {
+      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
+    });
+    return allTokenReferences;
+  }
+}
+
+/**
+ * Unified Token Extraction Service - consolidates token extraction operations
+ */
+class TokenExtractionService {
+  /**
+   * Extract token values from XML document using token definitions
+   */
+  static async extractTokenValuesFromXml(
+    document: vscode.TextDocument,
+    tokenDefinitions: TokenNameDefinition[],
+    allTokenReferences: Set<string>
+  ): Promise<Map<string, string>> {
+    const extractedValues = new Map<string, string>();
+    
+    try {
+      const referencedTokenDefs = tokenDefinitions.filter(def =>
+        allTokenReferences.has(def.id)
+      );
+      
+      for (const tokenDef of referencedTokenDefs) {
+        if (!tokenDef.tokenReadPaths) continue;
+        
+        try {
+          const values = await readTokenValuesFromXml(document, tokenDef.tokenReadPaths);
+          debugLog(`[DEBUG] Got ${values.size} values from readTokenValuesFromXml`);
+          values.forEach((value, key) => extractedValues.set(key, value));
+        } catch (tokenError) {
+          debugLog(`[DEBUG] Error reading token values for ${tokenDef.id}:`, tokenError instanceof Error ? tokenError.message : String(tokenError));
+          // Continue with other tokens even if one fails
+        }
+      }
+    } catch (error) {
+      debugLog(`[DEBUG] Error in extractTokenValuesFromXml:`, error instanceof Error ? error.message : String(error));
+    }
+    
+    debugLog(`[DEBUG] Total extracted values: ${extractedValues.size}`);
+    return extractedValues;
+  }
+
+  /**
+   * Handle entity selection with user prompt if needed
+   */
+  static async handleEntitySelection(
+    entityToken: ParsedToken | undefined,
+    sourceXmlDocument: vscode.TextDocument | undefined,
+    tokenDefinitions: TokenNameDefinition[],
+    allTokenReferences: Set<string>,
+    extractedValues: Map<string, string>
+  ): Promise<string | undefined> {
+    if (!entityToken || !sourceXmlDocument) {
+      return undefined;
+    }
+
+    let selectedEntity: string | undefined = undefined;
+    
+    const referencedTokenDefs = tokenDefinitions.filter(def =>
+      allTokenReferences.has(def.id)
+    );
+    const entityReadPath = referencedTokenDefs
+      .map((def: TokenNameDefinition) => def.tokenReadPaths?.[entityToken.name])
+      .find((readPath?: TokenReadPath) => readPath && readPath.type === 'selection');
+
+    const attributeName = entityReadPath?.attribute || 'Name';
+    const configuredPath = entityReadPath?.path;
+    let options: Array<{ value: string; context: string }> = [];
+
+    if (configuredPath) {
+      options = extractSelectableValues(sourceXmlDocument, configuredPath, attributeName);
+    }
+
+    if (options.length === 0) {
+      options = extractSelectableValues(sourceXmlDocument, 'EntityDefs/EntityDef', attributeName || 'Name');
+    }
+
+    if (options.length > 0) {
+      const picked = await showValueSelectionPick(entityToken.name, options);
+      if (picked) {
+        extractedValues.set(entityToken.name, picked);
+        selectedEntity = picked;
+      }
+    } else {
+      debugLog('[DEBUG] No entity options available in source XML document');
+    }
+
+    return selectedEntity;
+  }
+
+  /**
+   * Extract tokens from template comments (comprehensive parser)
+   */
+  static extractTokensFromTemplateComments(document: vscode.TextDocument): Map<string, string> {
+    const extractedTokens = new Map<string, string>();
+    const content = document.getText();
+    console.log('[KAHUA] extractTokensFromTemplateComments: Document content:', content);
+    const lines = content.split(/\r?\n/);
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      // Parse "// Entity Context: RFI" format
+      const entityMatch = trimmedLine.match(/^\/\/\s*Entity Context:\s*(.+)$/);
+      if (entityMatch && entityMatch[1] && entityMatch[1] !== '<Select entity>') {
+        extractedTokens.set('entity', entityMatch[1]);
+        console.log(`[KAHUA] Extracted entity from template comments: ${entityMatch[1]}`);
+        continue;
+      }
+      
+      // Parse other context comments like "// Appname Context: MyApp" 
+      const contextMatch = trimmedLine.match(/^\/\/\s*(\w+) Context:\s*(.+)$/);
+      if (contextMatch && contextMatch[1] && contextMatch[2] && contextMatch[2] !== '<Select entity>') {
+        const tokenName = contextMatch[1].toLowerCase();
+        const tokenValue = contextMatch[2];
+        extractedTokens.set(tokenName, tokenValue);
+        console.log(`[KAHUA] Extracted ${tokenName} from template comments: ${tokenValue}`);
+        continue;
+      }
+      
+      // Parse "// Header tokens: appname:MyApp, entity:Field" format
+      const headerTokensMatch = trimmedLine.match(/^\/\/\s*Header tokens:\s*(.+)$/);
+      if (headerTokensMatch) {
+        const tokenPairs = headerTokensMatch[1].split(',').map(pair => pair.trim());
+        for (const pair of tokenPairs) {
+          const colonIndex = pair.indexOf(':');
+          if (colonIndex > 0) {
+            const tokenName = pair.substring(0, colonIndex).trim();
+            const tokenValue = pair.substring(colonIndex + 1).trim();
+            if (tokenName && tokenValue) {
+              extractedTokens.set(tokenName, tokenValue);
+              debugLog(`[DEBUG] Extracted token from template comments: ${tokenName}=${tokenValue}`);
+            }
+          }
+        }
+        continue;
+      }
+      
+      // If we hit a non-comment line that doesn't match, stop processing  
+      if (!trimmedLine.startsWith('//') && trimmedLine !== '') {
+        break;
+      }
+    }
+    
+    console.log('[KAHUA] Template tokens extracted:', extractedTokens);
+    return extractedTokens;
+  }
+
+  /**
+   * Merge extracted values with template comment values (template comments take precedence)
+   */
+  static mergeTokenValues(
+    xmlExtractedValues: Map<string, string>,
+    templateCommentValues: Map<string, string>,
+    tokenDefinitions: TokenNameDefinition[]
+  ): Map<string, string> {
+    const mergedTokens = new Map<string, string>();
+    
+    // Start with XML extracted values
+    xmlExtractedValues.forEach((value, key) => mergedTokens.set(key, value));
+    
+    // Override with template comment values for injection-affecting tokens
+    for (const [tokenName, tokenValue] of templateCommentValues) {
+      const tokenDef = tokenDefinitions.find(def => 
+        def.tokenReadPaths && Object.keys(def.tokenReadPaths).includes(tokenName)
+      );
+      
+      if (tokenDef?.tokenReadPaths) {
+        const readPath = tokenDef.tokenReadPaths[tokenName];
+        if (readPath?.affectsInjection) {
+          mergedTokens.set(tokenName, tokenValue);
+          console.log(`[KAHUA] Template comment overrides XML for injection token: ${tokenName}=${tokenValue}`);
+        }
+      }
+    }
+    
+    return mergedTokens;
+  }
+}
+
+// Legacy function delegates for backward compatibility
 function isFragmentApplicableToDocument(fragment: FragmentDefinition, documentType: string): boolean {
-  return !fragment.applicableDocumentTypes || fragment.applicableDocumentTypes.includes(documentType);
+  return FragmentValidationService.isFragmentApplicableToDocument(fragment, documentType);
 }
 
 function enforceFragmentApplicability(
   fragments: FragmentDefinition[],
   documentType: string
 ): FragmentDefinition[] {
-  const incompatible = fragments.filter(
-    fragment => fragment.applicableDocumentTypes && !fragment.applicableDocumentTypes.includes(documentType)
-  );
-
-  if (incompatible.length > 0) {
-    const names = incompatible.map(f => f.name || f.id).join(', ');
-    throw new Error(`Fragment(s) not available for document type "${documentType}": ${names}.`);
-  }
-
-  return fragments;
+  return FragmentValidationService.enforceFragmentApplicability(fragments, documentType);
 }
 
 function isTemplateDocument(document?: vscode.TextDocument): boolean {
@@ -913,6 +1298,16 @@ function isSnippetDocument(document?: vscode.TextDocument): boolean {
   return looksLikeSnippetDocument(document);
 }
 
+function isTableDocument(document?: vscode.TextDocument): boolean {
+  if (!document) {
+    return false;
+  }
+  if (tableDocumentUris.has(document.uri.toString())) {
+    return true;
+  }
+  return looksLikeTableDocument(document);
+}
+
 function looksLikeTemplateDocument(document: vscode.TextDocument): boolean {
   for (let i = 0; i < Math.min(10, document.lineCount); i++) {
     const text = document.lineAt(i).text.trim();
@@ -932,6 +1327,17 @@ function looksLikeSnippetDocument(document: vscode.TextDocument): boolean {
       continue;
     }
     return text.toLowerCase().startsWith('// kahua snippet for ');
+  }
+  return false;
+}
+
+function looksLikeTableDocument(document: vscode.TextDocument): boolean {
+  for (let i = 0; i < Math.min(10, document.lineCount); i++) {
+    const text = document.lineAt(i).text.trim();
+    if (!text) {
+      continue;
+    }
+    return text.toLowerCase().startsWith('// kahua table for ');
   }
   return false;
 }
@@ -1020,8 +1426,12 @@ function unmarkTemplateDocument(document: vscode.TextDocument): void {
   const key = document.uri.toString();
   templateDocumentUris.delete(key);
   documentTypeOverrides.delete(key);
-  selectedTokenValuesByDocument.delete(key);
   injectionAffectingTokens.delete(key);
+}
+
+function markTemplateDocument(document: vscode.TextDocument): void {
+  const key = document.uri.toString();
+  templateDocumentUris.add(key);
 }
 
 async function setSnippetDocumentContext(document?: vscode.TextDocument): Promise<void> {
@@ -1044,18 +1454,16 @@ async function updateGenerationAvailability(document?: vscode.TextDocument): Pro
     !!document &&
     document.languageId === 'xml' &&
     !isTemplateDocument(document) &&
-    !isSnippetDocument(document);
+    !isSnippetDocument(document) &&
+    !isTableDocument(document);
 
-  await vscode.commands.executeCommand(
-    'setContext',
-    CAN_GENERATE_TEMPLATES_CONTEXT_KEY,
-    canGenerate
-  );
-  await vscode.commands.executeCommand(
-    'setContext',
-    CAN_GENERATE_SNIPPETS_CONTEXT_KEY,
-    canGenerate
-  );
+  debugLog(`[KAHUA] updateGenerationAvailability: document=${document?.uri.fsPath ?? 'none'}, canGenerate=${canGenerate}`);
+  if (document) {
+    debugLog(`[KAHUA]   - languageId=${document.languageId}, isTemplate=${isTemplateDocument(document)}, isSnippet=${isSnippetDocument(document)}, isTable=${isTableDocument(document)}`);
+  }
+
+  const contextManager = KahuaContextManager.getInstance();
+  await contextManager.setGenerationAvailable(canGenerate);
 }
 
 function markDocumentAsSnippet(document: vscode.TextDocument, documentType: string): void {
@@ -1070,11 +1478,29 @@ function markDocumentAsSnippet(document: vscode.TextDocument, documentType: stri
   }
 }
 
+function markDocumentAsTable(document: vscode.TextDocument, documentType: string): void {
+  const key = document.uri.toString();
+  tableDocumentUris.add(key);  // ✅ Fixed: Use correct collection
+  documentTypeOverrides.set(key, documentType);
+  
+  // Update context since this document is now a table
+  const activeDocument = vscode.window.activeTextEditor?.document;
+  if (activeDocument && activeDocument.uri.toString() === key) {
+    void setSourceFileContext(activeDocument);
+  }
+}
+
 function unmarkSnippetDocument(document: vscode.TextDocument): void {
   const key = document.uri.toString();
   snippetDocumentUris.delete(key);
   documentTypeOverrides.delete(key);
-  selectedTokenValuesByDocument.delete(key);
+  injectionAffectingTokens.delete(key);
+}
+
+function unmarkTableDocument(document: vscode.TextDocument): void {
+  const key = document.uri.toString();
+  tableDocumentUris.delete(key);
+  documentTypeOverrides.delete(key);
   injectionAffectingTokens.delete(key);
 }
 
@@ -1131,68 +1557,6 @@ function getDefaultFragmentsForDocumentType(documentType: string): string[] {
       return ['supplements'];
     default:
       return [];
-  }
-}
-
-function rememberTokenSelectionForUri(uri: vscode.Uri, tokenName: string, value: string): void {
-  const key = uri.toString();
-  let selections = selectedTokenValuesByDocument.get(key);
-  if (!selections) {
-    selections = new Map<string, string>();
-    selectedTokenValuesByDocument.set(key, selections);
-  }
-  selections.set(tokenName, value);
-}
-
-function rememberTokenSelectionForDocument(document: vscode.TextDocument, tokenName: string, value: string): void {
-  rememberTokenSelectionForUri(document.uri, tokenName, value);
-
-  const sourceUri = getRememberedSourceXmlUri(document);
-  if (sourceUri) {
-    rememberTokenSelectionForUri(sourceUri, tokenName, value);
-  }
-}
-
-function getStoredTokenSelection(document: vscode.TextDocument, tokenName: string): string | undefined {
-  const key = document.uri.toString();
-  const direct = selectedTokenValuesByDocument.get(key)?.get(tokenName);
-  if (direct) {
-    return direct;
-  }
-
-  const sourceUri = getRememberedSourceXmlUri(document);
-  if (sourceUri) {
-    const sourceValue = selectedTokenValuesByDocument.get(sourceUri.toString())?.get(tokenName);
-    if (sourceValue) {
-      return sourceValue;
-    }
-  }
-
-  return undefined;
-}
-
-function getStoredEntityForDocument(document: vscode.TextDocument): string | undefined {
-  return getStoredTokenSelection(document, 'entity');
-}
-
-function rememberEntitySelectionForUri(uri: vscode.Uri, entity: string): void {
-  rememberTokenSelectionForUri(uri, 'entity', entity);
-
-  const key = uri.toString();
-  let affectingTokens = injectionAffectingTokens.get(key);
-  if (!affectingTokens) {
-    affectingTokens = new Map();
-    injectionAffectingTokens.set(key, affectingTokens);
-  }
-  affectingTokens.set('entity', entity);
-}
-
-function rememberEntitySelectionForDocument(document: vscode.TextDocument, entity: string): void {
-  rememberEntitySelectionForUri(document.uri, entity);
-
-  const sourceUri = getRememberedSourceXmlUri(document);
-  if (sourceUri) {
-    rememberEntitySelectionForUri(sourceUri, entity);
   }
 }
 
@@ -1635,28 +1999,32 @@ async function insertXmlIntoFile(
   }
 
   // Smart insertion - get injection paths from the fragment definition
-  let injectionPaths: Record<string, string | InjectionPathConfig> = fragmentDefinition?.injectionPaths || {};
+  let injectionPaths: Record<string, ResolvedInjectionPathConfig> = resolveInjectionPaths(fragmentDefinition?.injectionPaths || {});
   
   // Handle hierarchical injection groups (e.g., HubDef containers)
   if (fragmentDefinition?.hierarchicalInjectionGroups && xmlContext) {
-    injectionPaths = await processHierarchicalInjectionGroups(
-      injectionPaths, 
+    const hierarchicalInput = Object.fromEntries(
+      Object.entries(injectionPaths).map(([name, cfg]) => [name, cfg.path])
+    );
+    const hierarchicalResult = await processHierarchicalInjectionGroups(
+      hierarchicalInput, 
       fragmentDefinition.hierarchicalInjectionGroups, 
       xmlContext,
       affectingTokens,
       tokenDefinitions
     );
+    injectionPaths = resolveInjectionPaths(hierarchicalResult);
   }
   
   const results: InjectionResult[] = [];
 
   // Apply injection path templates based on selected token values
   if (affectingTokens && affectingTokens.size > 0 && tokenDefinitions) {
-    const modifiedPaths: Record<string, string | InjectionPathConfig> = {};
+    const modifiedPaths: Record<string, ResolvedInjectionPathConfig> = {};
 
     for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
-      const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
-      const displayAttribute = typeof pathConfig === 'string' ? undefined : pathConfig.displayAttribute;
+      const xpath = pathConfig.path;
+      const displayAttribute = pathConfig.displayAttribute;
       let modifiedXPath = xpath;
 
       // Check each token definition for injection path templates
@@ -1682,15 +2050,18 @@ async function insertXmlIntoFile(
         }
       }
 
-      modifiedPaths[sectionName] = typeof pathConfig === 'string'
-        ? modifiedXPath
-        : { path: modifiedXPath, ...(displayAttribute && { displayAttribute }) };
+      modifiedPaths[sectionName] = {
+        ...pathConfig,
+        path: modifiedXPath,
+        displayAttribute
+      };
     }
 
     injectionPaths = modifiedPaths;
   }
 
   debugLog(`[KAHUA] insertXmlIntoFile: starting section mapping (strategy=${strategy ?? 'prompt'})`);
+  console.log('[DEBUG] Generated XML content being parsed:', content);
   const generatedSections = parseGeneratedXmlSections(content);
   debugLog(`[KAHUA] insertXmlIntoFile: parsed ${generatedSections.length} generated sections`);
   const parseStart = Date.now();
@@ -1709,7 +2080,10 @@ async function insertXmlIntoFile(
     return true;
   });
 
+  console.log('[DEBUG] Generated sections:', generatedSections.map(s => s.name));
+  console.log('[DEBUG] Target sections:', targetSections.map(s => s.tagName));
   const matches = matchSectionsToTargets(generatedSections, targetSections);
+  console.log('[DEBUG] Section matches:', Array.from(matches.entries()).map(([name, targets]) => ({name, targets: targets.map(t => t.tagName)})));
 
   // Determine insertion strategy
   let insertionStrategy: InsertionStrategy;
@@ -1941,7 +2315,7 @@ function findLastChildElement(document: vscode.TextDocument, openLine: number, c
  */
 function parseTargetXmlStructure(
   document: vscode.TextDocument,
-  injectionPaths: Record<string, string | InjectionPathConfig>,
+  injectionPaths: Record<string, ResolvedInjectionPathConfig>,
   xmlContext: ParsedXmlContext,
   affectingTokens?: Map<string, string>,
   tokenDefinitions?: TokenNameDefinition[]
@@ -1952,22 +2326,21 @@ function parseTargetXmlStructure(
   const config = getResolvedElementDisplayConfig();
 
   for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
-    // Normalize to always have path and displayAttribute(s)
-    const xpath = typeof pathConfig === 'string' ? pathConfig : pathConfig.path;
+    const xpath = pathConfig.path;
     
     debugLog(`[DEBUG] Processing section "${sectionName}" with xpath: ${xpath}`);
 
     const templateApplied = applyInjectionPathTemplate(xpath, affectingTokens || new Map(), tokenDefinitions);
-    if (!templateApplied.success) {
-      debugLog(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
-      continue;
-    }
-
-    const finalXpath = templateApplied.result;
+    let finalXpath = templateApplied.result;
     debugLog(`[DEBUG] Final xpath after template application: ${finalXpath}`);
     
     // Use hierarchical XPath matching - respects exact path structure
-    const candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+    let candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+    if (candidates.length === 0 && templateApplied.applied) {
+      debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath} after template substitution – falling back to original xpath: ${xpath}`);
+      finalXpath = xpath;
+      candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+    }
     debugLog(`[DEBUG] Found ${candidates.length} candidates via hierarchical XPath for section "${sectionName}"`);
     
     if (candidates.length === 0) {
@@ -2001,18 +2374,22 @@ function parseTargetXmlStructure(
       debugLog(`[DEBUG] Element details - line: ${line + 1}, selfClosing: ${isSelfClosing}, closeLine: ${closeLine + 1}, lastChild: ${lastChildLine + 1}`);
 
       sections.push({
-        tagName: sectionName,  // The section name (e.g., "Attributes")
-        xmlNodeName: tagName,  // The XML tag name (e.g., "Attributes") 
+        tagName: sectionName,
+        xmlNodeName: tagName,
         openTagLine: line,
         closeTagLine: closeLine,
         lastChildLine,
         indentation,
         isSelfClosing,
-        context: candidate.pathSoFar,  // Use the hierarchical path as context
+        context: candidate.pathSoFar,
         injectionPath: finalXpath,
         attributes: element.attributes,
         nameAttributeValue: extractNameAttribute(element, config),
-        enrichedPath: candidate.pathSoFar
+        enrichedPath: candidate.pathSoFar,
+        xpathPath: candidate.xpathSoFar,
+        element,
+        attributeDisplayHints: pathConfig.attributeDisplayHints,
+        pathSegments: pathConfig.pathSegments
       });
       
       debugLog(`[DEBUG] Added section for "${sectionName}" at line ${line + 1} with path: ${candidate.pathSoFar}`);
@@ -2029,40 +2406,7 @@ function parseTargetXmlStructure(
  * @returns Map of token names to values extracted from comments
  */
 export function extractTokensFromTemplateComments(document: vscode.TextDocument): Map<string, string> {
-  const extractedTokens = new Map<string, string>();
-  const content = document.getText();
-  const lines = content.split(/\r?\n/);
-  
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    
-    // Parse "// Entity Context: RFI" format
-    const entityMatch = trimmedLine.match(/^\/\/\s*Entity Context:\s*(.+)$/);
-    if (entityMatch && entityMatch[1] && entityMatch[1] !== '<Select entity>') {
-      extractedTokens.set('entity', entityMatch[1]);
-      debugLog(`[DEBUG] Extracted entity from template comments: ${entityMatch[1]}`);
-      continue;
-    }
-    
-    // Parse "// Header tokens: appname:MyApp, entity:Field" format
-    const headerTokensMatch = trimmedLine.match(/^\/\/\s*Header tokens:\s*(.+)$/);
-    if (headerTokensMatch) {
-      const tokenPairs = headerTokensMatch[1].split(',').map(pair => pair.trim());
-      for (const pair of tokenPairs) {
-        const colonIndex = pair.indexOf(':');
-        if (colonIndex > 0) {
-          const tokenName = pair.substring(0, colonIndex).trim();
-          const tokenValue = pair.substring(colonIndex + 1).trim();
-          if (tokenName && tokenValue) {
-            extractedTokens.set(tokenName, tokenValue);
-            debugLog(`[DEBUG] Extracted token from template comments: ${tokenName}=${tokenValue}`);
-          }
-        }
-      }
-    }
-  }
-  
-  return extractedTokens;
+  return TokenExtractionService.extractTokensFromTemplateComments(document);
 }
 
 /**
@@ -2101,7 +2445,7 @@ export function applyInjectionPathTemplate(
   xpath: string, 
   affectingTokens: Map<string, string>, 
   tokenDefinitions: TokenNameDefinition[] = []
-): { success: boolean; result: string } {
+): { success: boolean; result: string; applied: boolean } {
   let modifiedXPath = xpath;
   let applied = false;
 
@@ -2165,6 +2509,22 @@ export function applyInjectionPathTemplate(
               shouldApplyTemplate = xpathStructure.includes(templateStructure) || 
                                     templateStructure.includes(xpathStructure);
             }
+          } else if (templateBasePath.includes('HubDef')) {
+            // For HubDef-based templates, check if we're actually targeting HubDef elements
+            shouldApplyTemplate = xpathParts.some(part => {
+              // Check if this part is "HubDef" or "HubDef[...]"
+              return part === 'HubDef' || part.startsWith('HubDef[');
+            });
+            
+            // For HubDef paths, also check structural compatibility
+            if (shouldApplyTemplate && templateBasePath.startsWith('App/') && xpath.startsWith('/App/')) {
+              // Both are absolute paths - check structural compatibility
+              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
+              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
+              
+              // Check if xpath structure matches template structure (allowing for the target to be more specific)
+              shouldApplyTemplate = xpathStructure.includes(templateStructure) || templateStructure.includes(xpathStructure);
+            }
           } else {
             // For other templates, check exact path match
             shouldApplyTemplate = xpath === templateBasePath;
@@ -2184,8 +2544,9 @@ export function applyInjectionPathTemplate(
   }
 
   return {
-    success: true, // Always return success, just use original xpath if no template applied
-    result: modifiedXPath
+    success: true,
+    result: modifiedXPath,
+    applied
   };
 }
 
@@ -2481,16 +2842,111 @@ function extractNameAttribute(element: SaxElement, config: ElementDisplayConfig)
 // Removed: findElementLineInDocument - SAX elements have element.line built-in
 
 /**
- * Performance: Get cached parsed XML document or parse and cache
+ * Unified XML Parsing Service - consolidates all XML parsing operations
  */
-function getCachedParsedXml(document: vscode.TextDocument): SaxElement | null {
-  return getParsedXmlContext(document).rootElement;
-}
+class XmlParsingService {
+  /**
+   * Get cached parsed XML document or parse and cache
+   */
+  static getCachedParsedXml(document: vscode.TextDocument): SaxElement | null {
+    return this.getParsedXmlContext(document).rootElement;
+  }
 
-/**
- * Internal XML parsing function using SAX parser
- */
-function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
+  /**
+   * Get full parsed XML context with SAX elements
+   */
+  static getParsedXmlContext(document: vscode.TextDocument): ParsedXmlContext {
+    const existing = parsedXmlContextCache.get(document);
+    const content = document.getText();
+    const contentHash = simpleHash(content);
+    
+    if (existing && existing.contentHash === contentHash) {
+      // Update document reference in case it changed
+      existing.textDocument = document;
+      existing.version = document.version;
+      debugLog(`[KAHUA] Reusing parsed XML context for ${document.uri.fsPath}`);
+      return existing;
+    }
+
+    debugLog(`[KAHUA] Building new SAX context for ${document.uri.fsPath}`);
+    const start = performance.now();
+    
+    const rootElement = this.parseXmlDocumentInternal(content);
+    const elementsByPath = this.buildElementsByPath(rootElement);
+    
+    const end = performance.now();
+    debugLog(`[KAHUA] Built SAX context with ${elementsByPath.size} element paths for ${document.uri.fsPath} in ${Math.round(end - start)}ms`);
+
+    const result: ParsedXmlContext = {
+      textDocument: document,
+      version: document.version,
+      contentHash,
+      rootElement,
+      elementsByPath,
+      xpathElementCache: new Map(),
+      xpathTargetCache: new Map(),
+      lineResolutionCache: new Map(),
+      pathLineInfo: new Map()
+    };
+    
+    parsedXmlContextCache.set(document, result);
+    return result;
+  }
+
+  /**
+   * Parse XML for document type detection (lightweight)
+   */
+  static parseXmlForDocumentTypeDetection(text: string): SaxElement | null | undefined {
+    try {
+      debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsing ${text.length} characters`);
+      
+      // Performance: Check cache first
+      const contentHash = simpleHash(text);
+      const cacheKey = `doctype_${contentHash}`;
+      const cached = xmlParseCache.get(cacheKey);
+      
+      if (cached && cached.contentHash === contentHash) {
+        cached.timestamp = Date.now(); // Update access time
+        debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Using cached result`);
+        return cached.dom;
+      }
+
+      const dom = this.parseXmlDocumentInternal(text);
+      debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Parsed DOM, root element: ${dom?.tagName}`);
+      
+      // Performance: Cache the result
+      cleanupXmlCache();
+      xmlParseCache.set(cacheKey, {
+        dom,
+        contentHash,
+        timestamp: Date.now()
+      });
+      
+      return dom;
+    } catch (error) {
+      debugLog(`[KAHUA] parseXmlForDocumentTypeDetection: Error parsing XML: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Build elements by path map for XPath queries
+   */
+  static buildElementsByPath(rootElement: SaxElement | null): Map<string, SaxElement[]> {
+    const elementsByPath = new Map<string, SaxElement[]>();
+
+    if (!rootElement) {
+      return elementsByPath;
+    }
+
+    this.traverseForPath(rootElement, '', elementsByPath);
+    return elementsByPath;
+  }
+
+  /**
+   * Internal XML parsing function using SAX parser
+   */
+  static parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
   // Strip BOM if present
   const cleanXmlContent = xmlContent.replace(/^\uFEFF/, '');
   
@@ -2567,6 +3023,8 @@ function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
   });
 
   const xmlText = cleanXmlContent.replace(/xmlns="[^"]*"/g, '');
+  console.log('[DEBUG] XML content being parsed (first 500 chars):', xmlText.substring(0, 500));
+  console.log('[DEBUG] XML content lines 10-20:', xmlText.split('\n').slice(9, 20));
   parser.write(xmlText).close();
 
   if (DEBUG_MODE && rootElement) {
@@ -2574,15 +3032,36 @@ function parseXmlDocumentInternal(xmlContent: string): SaxElement | null {
   }
 
   return rootElement;
+  }
+
+  /**
+   * Traverse SAX element tree and build path map for XPath queries
+   */
+  private static traverseForPath(element: SaxElement, parentPath: string, elementsByPath: Map<string, SaxElement[]>): void {
+    const fullPath = element.path; // Use existing path from SAX element
+    
+    if (!elementsByPath.has(fullPath)) {
+      elementsByPath.set(fullPath, []);
+    }
+    elementsByPath.get(fullPath)!.push(element);
+
+    // Also add to partial paths for XPath matching
+    const pathParts = fullPath.split('/').filter(p => p);
+    for (let i = 1; i <= pathParts.length; i++) {
+      const partialPath = pathParts.slice(-i).join('/');
+      if (!elementsByPath.has(partialPath)) {
+        elementsByPath.set(partialPath, []);
+      }
+      elementsByPath.get(partialPath)!.push(element);
+    }
+
+    for (const child of element.children) {
+      this.traverseForPath(child, fullPath, elementsByPath);
+    }
+  }
 }
 
-/**
- * Parse XML document using SAX parser (legacy function, use getCachedParsedXml)
- * @deprecated Use getCachedParsedXml for better performance
- */
-function parseXmlDocument(document: vscode.TextDocument): SaxElement | null {
-  return getCachedParsedXml(document);
-}
+
 
 /**
  * Traverse parsed XML object to find elements matching XPath using SAX elements
@@ -3225,21 +3704,11 @@ async function readTokenValuesFromXml(
           continue;
         }
 
-        const storedSelection = getStoredTokenSelection(document, tokenName);
-        if (storedSelection) {
-          debugLog(`[DEBUG] Using stored selection for ${tokenName}: ${storedSelection}`);
-          value = storedSelection;
-          break;
-        }
-
         debugLog(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
         const options = extractSelectableValues(document, readPath.path, readPath.attribute, xmlContext);
         debugLog(`[DEBUG] Found ${options.length} options:`, options);
         value = await showValueSelectionPick(tokenName, options);
         debugLog(`[DEBUG] User selected: ${value}`);
-        if (value) {
-          rememberTokenSelectionForDocument(document, tokenName, value);
-        }
         break;
     }
 
@@ -3305,6 +3774,9 @@ function generateInjectionReport(results: InjectionResult[], targetFileName: str
   if (generationDetails) {
     report += `Generation Details:\n`;
     report += `${'-'.repeat(70)}\n`;
+    console.log('[DEBUG] generateInjectionReport: generationDetails length:', generationDetails.length);
+    console.log('[DEBUG] generateInjectionReport: generationDetails preview (first 1000 chars):', generationDetails.substring(0, 1000));
+    console.log('[DEBUG] generateInjectionReport: Contains unreplaced tokens?', generationDetails.includes('{$'));
     report += generationDetails;
     report += `\n\n`;
   }
@@ -3546,34 +4018,73 @@ async function selectTargetsFromMultiple(
   return selected.map(s => s.target).filter(t => t !== null);
 }
 
-/**
- * Checks if a section name is configured in the injection paths
- */
-function isSectionConfigured(sectionName: string, injectionPaths: Record<string, string | InjectionPathConfig>): boolean {
-  // Extract key words from section name
-  const genWords = sectionName
-    .toLowerCase()
-    .replace(/extension|supplement|group \d+|default/gi, '')
-    .split(/[-\s]+/)
-    .filter(w => w.length > 2);
+export function buildAttributeDisplayInfo(target: XmlTargetSection): { label?: string; detail?: string } {
+  if (!target.pathSegments || !target.element) {
+    return {};
+  }
 
-  // Check if any configured path name matches
-  for (const configuredName of Object.keys(injectionPaths)) {
-    const configName = configuredName.toLowerCase();
+  const segments = target.pathSegments;
+  const finalIndex = segments.length - 1;
+  const hints = target.attributeDisplayHints || [];
+  const valuesBySegment = new Map<number, string>();
 
-    for (const word of genWords) {
-      // Direct match or plural match
-      if (configName === word ||
-          configName === word + 's' ||
-          configName + 's' === word ||
-          configName.includes(word) ||
-          word.includes(configName)) {
-        return true;
-      }
+  for (const hint of hints) {
+    const elementAtSegment = getElementAtSegment(target.element, finalIndex, hint.segmentIndex);
+    if (!elementAtSegment) {
+      continue;
+    }
+
+    const value = getFirstAttributeValue(elementAtSegment, hint.attributes);
+    if (value && value.trim()) {
+      valuesBySegment.set(hint.segmentIndex, value);
     }
   }
 
-  return false;
+  const detailParts = segments.map((segment, index) => {
+    const base = segment.replace(/\[.*?\]/g, '').trim() || segment;
+    const attrValue = valuesBySegment.get(index);
+    return attrValue ? `${base} (${attrValue})` : base;
+  });
+
+  if (valuesBySegment.size === 0) {
+    return {
+      detail: detailParts.join('/')
+    };
+  }
+
+  const lineInfo = `Line ${target.openTagLine + 1}`;
+  const sortedIndices = Array.from(valuesBySegment.keys()).sort((a, b) => b - a);
+  const preferredValue = valuesBySegment.get(sortedIndices[0]);
+  const label = preferredValue ? `${preferredValue} (${lineInfo})` : undefined;
+
+  return {
+    label,
+    detail: detailParts.join('/')
+  };
+}
+
+function getElementAtSegment(element: SaxElement, finalIndex: number, targetIndex: number): SaxElement | undefined {
+  let current: SaxElement | undefined = element;
+  let steps = finalIndex - targetIndex;
+  while (current && steps > 0) {
+    current = current.parent;
+    steps--;
+  }
+  return steps === 0 ? current : undefined;
+}
+
+function getFirstAttributeValue(element: SaxElement, attributes: string[]): string | undefined {
+  for (const attr of attributes) {
+    const value = element.attributes[attr];
+    if (value && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function isSectionConfigured(sectionName: string, injectionPaths: Record<string, ResolvedInjectionPathConfig>): boolean {
+  return Object.prototype.hasOwnProperty.call(injectionPaths, sectionName);
 }
 
 /**
@@ -3589,35 +4100,26 @@ function matchSectionsToTargets(
   for (const genSection of generatedSections) {
     const allMatches: XmlTargetSection[] = [];
     const normalizedName = genSection.name.toLowerCase();
-
-    // Extract key words from generated section name
-    // e.g., "Extension Attributes - Attributes" -> ["Attributes"]
-    const genWords = genSection.name
-      .toLowerCase()
-      .replace(/extension|supplement|group \d+|default/gi, '')
-      .split(/[-\s]+/)
-      .filter(w => w.length > 2);
+    console.log(`[DEBUG] Matching generated section "${genSection.name}" (normalized: "${normalizedName}")`);
+    const originalName = genSection.name.trim();
+    const normalizedOriginal = originalName.toLowerCase();
 
     for (const targetSection of targetSections) {
       const targetName = targetSection.tagName.toLowerCase();
-      // First preference: direct match against the target section key
-      if (normalizedName.includes(targetName)) {
+      console.log(`[DEBUG] Checking target "${targetSection.tagName}" (normalized: "${targetName}") against "${normalizedName}"`);
+      // Exact match first
+      if (normalizedOriginal === targetName) {
+        console.log(`[DEBUG] Exact match found: "${originalName}" === "${targetSection.tagName}"`);
         allMatches.push(targetSection);
         continue;
       }
-
-      for (const word of genWords) {
-        if (targetName === word ||
-            targetName === word + 's' ||
-            targetName + 's' === word ||
-            targetName.includes(word) ||
-            word.includes(targetName)) {
-          allMatches.push(targetSection);
-          break;
-        }
-      }
     }
 
+    if (allMatches.length === 0) {
+      console.warn(`[KAHUA] No exact target match found for section "${genSection.name}". Available targets: ${targetSections.map(s => s.tagName).join(', ')}`);
+    }
+
+    console.log(`[DEBUG] Final matches for "${genSection.name}": ${allMatches.length} targets`);
     matches.set(genSection.name, allMatches);
   }
 
@@ -4156,20 +4658,790 @@ function processFragmentTemplates(
 /**
  * This function is called when your extension is activated.
  */
-export function activate(context: vscode.ExtensionContext) {
+/**
+ * Common data model for all generation types
+ */
+interface GenerationContext {
+  editor: vscode.TextEditor;
+  documentType: string;
+  fragmentIds: string[];
+  fragmentDefinitions: FragmentDefinition[];
+  tokenDefinitions: TokenNameDefinition[];
+  extractedTokens: Map<string, string>;
+}
+
+interface GenerationData {
+  headerTokens: ParsedToken[];
+  tableTokens: ParsedToken[];
+  extractedTokens: Map<string, string>;
+  selectedFragmentDefs: FragmentDefinition[];
+  templateLines?: string[];
+  defaultRowCount?: number;
+}
+
+/**
+ * Unified generation request - all UI types produce this
+ */
+interface GenerationRequest {
+  fragmentIds: string[];
+  documentType: string;
+  outputTarget: OutputTarget;
+  tokenData: {
+    headerTokens: ParsedToken[];
+    tableTokens: ParsedToken[];
+    extractedTokens: Map<string, string>;
+  };
+  dataRows: Array<Record<string, string>>; // Structured data rows
+  selectedFragmentDefs: FragmentDefinition[];
+  tokenDefinitions: TokenNameDefinition[];
+  sourceUri?: string; // Source XML file URI for injection
+}
+
+/**
+ * Unified generation result - what the generation pipeline produces
+ */
+interface GenerationResult {
+  generatedXml: string;
+  fragmentDefinition: FragmentDefinition;
+  tokenDefinitions: TokenNameDefinition[];
+  extractedTokens: Map<string, string>;
+}
+
+/**
+ * Unified handler for all generation commands - implements consistent prework
+ */
+/**
+ * Common prework for all generation commands
+ */
+async function prepareGenerationContext(generationType: string): Promise<GenerationContext | null> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage('No active editor found.');
+    return null;
+  }
+
+  // Check if current document is a valid Kahua document
+  const docTypeId = detectDocumentTypeId(editor.document);
+  if (!docTypeId) {
+    vscode.window.showWarningMessage('This command is only available in valid Kahua documents.');
+    return null;
+  }
+
+  if (isTemplateDocument(editor.document) || isSnippetDocument(editor.document) || isTableDocument(editor.document)) {
+    vscode.window.showInformationMessage(`Kahua: Generate ${generationType} commands are only available while editing a source XML file.`);
+    return null;
+  }
+
+  const documentType = requireDocumentType(editor.document);
+  const config = getKahuaConfig(currentResource());
+  const tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
+  const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
+
+  if (tokenDefinitions.length === 0) {
+    throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
+  }
+
+  if (fragmentDefinitions.length === 0) {
+    throw new Error('No fragment definitions found. Please configure kahua.fragmentDefinitions in your settings.');
+  }
+
+  const pick = await selectFragments(`Select fragments for ${generationType} generation`, documentType);
+  if (!pick) {
+    return null;
+  }
+
+  // Validate fragment ids are known
+  const unknown = pick.fragments.filter(id => !fragmentDefinitions.some(d => d.id === id));
+  if (unknown.length) {
+    throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
+  }
+
+  // Extract token values from source XML
+  const extractedTokens = new Map<string, string>();
+  const referencedTokenDefs = tokenDefinitions.filter(def =>
+    pick.fragments.some(fragmentId => 
+      fragmentDefinitions.find(frag => frag.id === fragmentId)?.tokenReferences.includes(def.id)
+    )
+  );
+
+  for (const tokenDef of referencedTokenDefs) {
+    if (tokenDef.tokenReadPaths) {
+      try {
+        const values = await readTokenValuesFromXml(editor.document, tokenDef.tokenReadPaths);
+        values.forEach((value, key) => extractedTokens.set(key, value));
+      } catch (tokenError) {
+        // Continue with other tokens even if one fails
+      }
+    }
+  }
+
+  return {
+    editor,
+    documentType,
+    fragmentIds: pick.fragments,
+    fragmentDefinitions,
+    tokenDefinitions,
+    extractedTokens
+  };
+}
+
+/**
+ * Create common generation data from context
+ */
+async function createGenerationData(context: GenerationContext): Promise<GenerationData> {
+  const selectedFragmentDefs = FragmentValidationService.getValidatedFragments(
+    context.fragmentDefinitions,
+    context.fragmentIds,
+    context.documentType
+  );
+  
+  const allTokenReferences = FragmentValidationService.collectTokenReferences(selectedFragmentDefs);
+
+  const { headerTokens, tableTokens } = mergeTokenDefinitions(
+    context.tokenDefinitions,
+    Array.from(allTokenReferences)
+  );
+
+  return {
+    headerTokens,
+    tableTokens,
+    extractedTokens: context.extractedTokens,
+    selectedFragmentDefs
+  };
+}
+
+/**
+ * Show appropriate UI based on generation type - returns GenerationRequest when user completes interaction
+ */
+async function showGenerationUI(generationType: 'template' | 'snippet' | 'table', context: GenerationContext, data: GenerationData): Promise<GenerationRequest | undefined> {
+  switch (generationType) {
+    case 'template':
+      return await showTemplateUI(context, data);
+    case 'snippet':
+      return await showSnippetUI(context, data);
+    case 'table':
+      return await showTableUI(context, data);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Template UI implementation - creates editable template document for user interaction
+ */
+async function showTemplateUI(context: GenerationContext, data: GenerationData): Promise<GenerationRequest | undefined> {
+  const { headerTokens, tableTokens, extractedTokens, selectedFragmentDefs } = data;
+  
+  // Generate template content using unified CSV service
+  const fragmentIds = selectedFragmentDefs.map(f => f.id);
+  const fragmentName = selectedFragmentDefs.map(f => f.name).join(', ');
+  
+  const templateContent = CsvGenerationService.generateCsv({
+    fragmentIds,
+    sourceFile: getWorkspaceRelativePath(context.editor.document.uri),
+    sourceUri: context.editor.document.uri.toString(),
+    headerTokens,
+    tableTokens,
+    extractedTokens,
+    includeDefaultRow: true,
+    snippetMode: false
+  });
+  const document = await vscode.workspace.openTextDocument({
+    content: templateContent,
+    language: 'plaintext'
+  });
+
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  markDocumentAsTemplate(document, context.documentType);
+  
+  vscode.window.showInformationMessage(`Kahua: Token template opened for ${fragmentName.toLowerCase()}. Edit the data and use generation commands.`);
+  
+  // Templates are interactive documents - user will edit and trigger generation later
+  return undefined;
+}
+
+/**
+ * Snippet UI implementation - creates snippet document with VS Code snippet placeholders in new editor
+ */
+async function showSnippetUI(context: GenerationContext, data: GenerationData): Promise<GenerationRequest | undefined> {
+  const { headerTokens, tableTokens, extractedTokens, selectedFragmentDefs } = data;
+  
+  // Get default row count from config
+  const config = getKahuaConfig(currentResource());
+  const defaultRowCount = config.get<number>('defaultSnippetRows') || 3;
+  
+  const fragmentIds = selectedFragmentDefs.map(f => f.id);
+  const fragmentName = selectedFragmentDefs.map(f => f.name).join(', ');
+  
+  // Create multiple rows of snippet data for tab navigation
+  const dataRows = [];
+  for (let i = 0; i < defaultRowCount; i++) {
+    dataRows.push({});
+  }
+  
+  // Generate snippet content using unified CSV service  
+  const snippetContent = CsvGenerationService.generateCsv({
+    fragmentIds,
+    sourceFile: getWorkspaceRelativePath(context.editor.document.uri),
+    sourceUri: context.editor.document.uri.toString(),
+    headerTokens,
+    tableTokens,
+    extractedTokens,
+    dataRows: dataRows,
+    includeDefaultRow: false, // We handle multiple rows via dataRows
+    snippetMode: true,
+    tabStopStartIndex: 1
+  });
+  const document = await vscode.workspace.openTextDocument({
+    content: snippetContent,
+    language: 'plaintext'
+  });
+
+  await vscode.window.showTextDocument(document, { preview: false });
+  markDocumentAsSnippet(document, context.documentType);
+  
+  const rowText = defaultRowCount === 0 
+    ? 'no default rows' 
+    : defaultRowCount === 1 
+      ? '1 default row' 
+      : `${defaultRowCount} default rows`;
+  vscode.window.showInformationMessage(`Kahua: Snippet document opened for ${fragmentName.toLowerCase()} with ${rowText}. Fill in the values and run generation when ready.`);
+  
+  // Snippets create documents - user will trigger generation later via commands
+  // Return undefined to indicate no immediate generation
+  return undefined;
+}
+
+/**
+ * Table UI implementation - creates interactive webview table with data grid functionality
+ */
+async function showTableUI(context: GenerationContext, data: GenerationData): Promise<GenerationRequest | undefined> {
+  const { headerTokens, tableTokens, extractedTokens, selectedFragmentDefs } = data;
+  
+  // Import the TableGenerationPanel
+  const { TableGenerationPanel } = await import('./panels/TableGenerationPanel');
+  
+  // Prepare table data for the webview
+  const fragmentName = selectedFragmentDefs.map(f => f.name).join(', ');
+  const fragmentIds = selectedFragmentDefs.map(f => f.id);
+  
+  // Create headers ONLY from table tokens (header tokens go in separate header fields area)
+  const headers = tableTokens.map(t => t.name);
+  
+  // Create header fields for display (separate from table columns)
+  const headerFields = headerTokens.map(token => ({
+    name: token.name,
+    value: extractedTokens.get(token.name) || token.defaultValue || '',
+    label: token.name.charAt(0).toUpperCase() + token.name.slice(1)
+  }));
+  
+  // Create initial row with defaults ONLY from table tokens
+  const initialRow = tableTokens.map(token => token.defaultValue || '');
+  
+  const tableData = {
+    headers,
+    headerFields,
+    rows: [initialRow],
+    fragmentName,
+    fragmentIds,
+    sourceFile: getWorkspaceRelativePath(context.editor.document.uri),
+    sourceUri: context.editor.document.uri.toString(), // Store full URI
+    documentType: context.documentType,
+    selectedFragmentDefs,
+    headerTokens,
+    tableTokens,
+    tokenDefinitions: context.tokenDefinitions
+  };
+
+  // Show the webview table panel
+  const extensionUri = vscode.extensions.getExtension('Sammy.kahua-attribute-generator')?.extensionUri;
+  if (extensionUri) {
+    TableGenerationPanel.render(extensionUri, tableData);
+  } else {
+    throw new Error('Could not get extension URI for table panel');
+  }
+  
+  // Tables use webview for immediate interaction - return undefined (no immediate generation)
+  return undefined;
+}
+
+/**
+ * Handles generation requests from the table webview
+ */
+async function handleTableGeneration(data: {
+  type: 'newEditor' | 'sourceFile' | 'file';
+  fragmentIds: string[];
+  headerFields: Record<string, string>;
+  tableRows: string[][];
+  selectedFragmentDefs: any[];
+  headerTokens: ParsedToken[];
+  tableTokens: ParsedToken[];
+  tokenDefinitions?: TokenNameDefinition[];
+  documentType: string;
+  sourceFile?: string;
+  sourceUri?: string;
+}): Promise<void> {
+  try {
+    console.log('handleTableGeneration command received with data:', data);
+    console.log('handleTableGeneration started with type:', data.type);
+    console.log('handleTableGeneration sourceUri received:', data.sourceUri);
+
+    const fragmentDefs = (data.selectedFragmentDefs || []) as FragmentDefinition[];
+    const headerTokens = data.headerTokens || [];
+    const tableTokens = data.tableTokens || [];
+    const fragmentIds = (data.fragmentIds && data.fragmentIds.length > 0)
+      ? data.fragmentIds
+      : fragmentDefs.map(def => def.id);
+
+    if (fragmentIds.length === 0 || fragmentDefs.length === 0) {
+      throw new Error('No fragment definitions available for table generation.');
+    }
+
+    const resolveSourceUri = (): vscode.Uri | undefined => {
+      if (data.sourceUri) {
+        return vscode.Uri.parse(data.sourceUri);
+      }
+      if (data.sourceFile) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (workspaceFolder) {
+          return vscode.Uri.joinPath(workspaceFolder.uri, data.sourceFile);
+        }
+      }
+      const currentEditor = vscode.window.activeTextEditor;
+      return currentEditor?.document.uri;
+    };
+
+    let sourceFileUri: vscode.Uri | undefined;
+    let outputTarget: OutputTarget;
+
+    switch (data.type) {
+      case 'sourceFile':
+        sourceFileUri = resolveSourceUri();
+        if (!sourceFileUri) {
+          throw new Error('No source file available for injection');
+        }
+        outputTarget = { type: 'sourceFile', uri: sourceFileUri };
+        break;
+
+      case 'file': {
+        const fileUri = await vscode.window.showSaveDialog({
+          defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+          filters: {
+            'XML Files': ['xml'],
+            'All Files': ['*']
+          },
+          title: 'Select XML File to Inject Into'
+        });
+
+        if (!fileUri) {
+          vscode.window.showInformationMessage('Kahua: File selection cancelled');
+          return;
+        }
+
+        outputTarget = { type: 'selectFile', uri: fileUri };
+        break;
+      }
+
+      default:
+        outputTarget = { type: 'newEditor' };
+    }
+
+    const extractedTokens = new Map<string, string>();
+    Object.entries(data.headerFields || {}).forEach(([key, value]) => {
+      extractedTokens.set(key, value);
+    });
+
+    const headerMissing = collectMissingRequiredTokens(headerTokens, tokenName => {
+      const raw = data.headerFields?.[tokenName] ?? extractedTokens.get(tokenName) ?? '';
+      return raw;
+    });
+    if (headerMissing.length > 0) {
+      throw new Error(`Missing required header values for: ${headerMissing.join(', ')}`);
+    }
+
+    const columnNames = tableTokens.map(token => token.name);
+    const dataRows: Record<string, string>[] = [];
+    const rowErrors: string[] = [];
+
+    const tableRows = data.tableRows || [];
+    for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex++) {
+      const row = tableRows[rowIndex];
+      if (!row || row.length === 0) {
+        continue;
+      }
+
+      const rowObj: Record<string, string> = {};
+      let hasValue = false;
+
+      columnNames.forEach((columnName, index) => {
+        const token = tableTokens[index];
+        const rawValue = row[index];
+        const value = rawValue ?? token?.defaultValue ?? '';
+
+        if (value.trim().length > 0) {
+          hasValue = true;
+        }
+
+        rowObj[columnName] = value;
+      });
+
+      if (!hasValue) {
+        continue;
+      }
+
+      const missingRowTokens = collectMissingRequiredTokens(tableTokens, tokenName => rowObj[tokenName]);
+      if (missingRowTokens.length > 0) {
+        rowErrors.push(`Row ${rowIndex + 1}: ${missingRowTokens.join(', ')}`);
+      }
+
+      dataRows.push(rowObj);
+    }
+
+    if (dataRows.length === 0) {
+      vscode.window.showWarningMessage('Kahua: No table rows with data were provided.');
+      return;
+    }
+
+    if (rowErrors.length > 0) {
+      throw new Error(`Missing required table values:\n${rowErrors.join('\n')}`);
+    }
+
+    const tokenDefinitions =
+      (data.tokenDefinitions as TokenNameDefinition[] | undefined) ??
+      getKahuaConfig(currentResource()).get<TokenNameDefinition[]>('tokenNameDefinitions') ??
+      [];
+
+    const generationRequest: GenerationRequest = {
+      fragmentIds,
+      documentType: data.documentType,
+      outputTarget,
+      tokenData: {
+        headerTokens,
+        tableTokens,
+        extractedTokens
+      },
+      dataRows,
+      selectedFragmentDefs: fragmentDefs,
+      tokenDefinitions,
+      sourceUri: (sourceFileUri ?? resolveSourceUri())?.toString()
+    };
+
+    await executeGeneration(generationRequest);
+    console.log('handleTableGeneration completed successfully');
+  } catch (error: unknown) {
+    console.error('handleTableGeneration error:', error);
+    vscode.window.showErrorMessage(`Table generation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleGenerationCommand(generationType: 'template' | 'snippet' | 'table'): Promise<void> {
+  try {
+    const context = await prepareGenerationContext(generationType);
+    if (!context) return;
+
+    const generationData = await createGenerationData(context);
+    const generationRequest = await showGenerationUI(generationType, context, generationData);
+    
+    if (generationRequest) {
+      await executeGeneration(generationRequest);
+    }
+  } catch (error: unknown) {
+    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Unified generation pipeline - processes GenerationRequest and produces XML
+ */
+async function executeGeneration(request: GenerationRequest): Promise<void> {
+  console.log('[KAHUA] executeGeneration called with request:', {
+    fragmentIds: request.fragmentIds,
+    documentType: request.documentType,
+    targetType: request.outputTarget.type,
+    rowCount: request.dataRows.length
+  });
+
+  const result = await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: "Generating XML fragments...",
+    cancellable: false
+  }, async (progress) => {
+    return await generateXmlFromRequest(request, progress);
+  });
+
+  if (!result) {
+    return;
+  }
+
+  await finalizeGeneratedFragments(request.outputTarget, request.fragmentIds, result);
+}
+
+/**
+ * Core generation engine - converts structured data to XML directly
+ * WITHOUT showing any intermediate documents
+ */
+async function generateXmlFromRequest(
+  request: GenerationRequest, 
+  progress: vscode.Progress<{ message?: string; increment?: number }>
+): Promise<GenerationResult | undefined> {
+  console.log('generateXmlFromRequest: Processing structured data directly');
+  
+  progress.report({ message: 'Generating XML from structured data...' });
+  
+  const fragmentDef = request.selectedFragmentDefs[0];
+  if (!fragmentDef) {
+    throw new Error('No fragment definition available');
+  }
+
+  const config = getKahuaConfig(currentResource());
+  const xmlIndentSize = config.get<number>('xmlIndentSize') || 2;
+  const applyFormatting = config.get<boolean>('formatXmlOutput') === true;
+  const suppressWarnings = config.get<boolean>('suppressInvalidConditionWarnings') || false;
+
+  const rowTokenData = buildRowTokenDataFromRequest(request);
+
+  const renderResult = renderFragmentSectionsFromRows(
+    request.selectedFragmentDefs,
+    rowTokenData,
+    null,
+    applyFormatting,
+    xmlIndentSize,
+    suppressWarnings
+  );
+
+  if (renderResult.warnings.length > 0 && !suppressWarnings) {
+    vscode.window.showWarningMessage(`Kahua: ${renderResult.warnings.join('; ')}`);
+  }
+
+  let generatedXml = renderResult.sections.join('\n\n');
+  if (applyFormatting) {
+    generatedXml = formatXml(generatedXml, xmlIndentSize);
+  }
+
+  return {
+    generatedXml,
+    fragmentDefinition: fragmentDef,
+    tokenDefinitions: request.tokenDefinitions,
+    extractedTokens: request.tokenData.extractedTokens
+  };
+}
+
+/**
+ * Convert structured data back to CSV format for generation pipeline
+ */
+function convertStructuredDataToCsv(
+  headerFields: Record<string, string>,
+  dataRows: Record<string, string>[],
+  fragmentDef: any
+): string {
+  const lines: string[] = [];
+  
+  // Add header comments
+  if (headerFields.entity) {
+    lines.push(`// Entity Context: ${headerFields.entity}`);
+    lines.push('// Generated from table - entity already selected');
+  }
+  if (headerFields.appname) {
+    lines.push(`// Appname Context: ${headerFields.appname}`);
+  }
+  
+  // Add CSV header row (only table columns, not header fields)
+  const tableColumns = fragmentDef.tokenReferences;
+  lines.push(tableColumns.join(','));
+  
+  // Add data rows
+  for (const row of dataRows) {
+    const values = tableColumns.map((col: string) => row[col] || '');
+    lines.push(values.join(','));
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Unified finalization - handles all output targets consistently
+ */
+async function finalizeGeneratedFragments(
+  outputTarget: OutputTarget,
+  fragmentIds: string[],
+  result: GenerationResult
+): Promise<void> {
+  const affectingTokens = result.extractedTokens;
+  
+  // DEBUG: Log what XML we're receiving
+  console.log('[DEBUG] finalizeGeneratedFragments: XML length:', result.generatedXml.length);
+  console.log('[DEBUG] finalizeGeneratedFragments: XML preview (first 500 chars):', result.generatedXml.substring(0, 500));
+  console.log('[DEBUG] finalizeGeneratedFragments: Contains tokens?', result.generatedXml.includes('{$'));
+  console.log('[DEBUG] finalizeGeneratedFragments: affectingTokens:', Array.from(affectingTokens.entries()));
+
+  switch (outputTarget.type) {
+    case 'newEditor': {
+      const newDocument = await vscode.workspace.openTextDocument({
+        content: result.generatedXml,
+        language: 'xml'
+      });
+      await vscode.window.showTextDocument(newDocument, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preview: false
+      });
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
+      );
+      break;
+    }
+
+    case 'sourceFile': {
+      if (!outputTarget.uri) {
+        throw new Error('Source file URI not specified');
+      }
+      const sourceFileResults = await insertXmlIntoFile(
+        outputTarget.uri,
+        result.generatedXml,
+        'smart',
+        result.fragmentDefinition,
+        affectingTokens,
+        result.tokenDefinitions
+      );
+      const sourceFileName = getWorkspaceRelativePath(outputTarget.uri);
+      await openInjectionReport(sourceFileResults, outputTarget.uri, result.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${sourceFileName}`
+      );
+      break;
+    }
+
+    case 'selectFile': {
+      if (!outputTarget.uri) {
+        throw new Error('Target file URI not specified');
+      }
+      const selectFileResults = await insertXmlIntoFile(
+        outputTarget.uri,
+        result.generatedXml,
+        'smart',
+        result.fragmentDefinition,
+        affectingTokens,
+        result.tokenDefinitions
+      );
+      const fileName = getWorkspaceRelativePath(outputTarget.uri);
+      await openInjectionReport(selectFileResults, outputTarget.uri, result.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
+      );
+      break;
+    }
+
+    case 'currentFile': {
+      if (!outputTarget.uri) {
+        throw new Error('Current file URI not specified');
+      }
+      const currentFileResults = await insertXmlIntoFile(
+        outputTarget.uri,
+        result.generatedXml,
+        outputTarget.insertionStrategy || 'smart',
+        result.fragmentDefinition,
+        affectingTokens,
+        result.tokenDefinitions
+      );
+      await openInjectionReport(currentFileResults, outputTarget.uri, result.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
+      );
+      break;
+    }
+
+    case 'clipboard': {
+      await vscode.env.clipboard.writeText(result.generatedXml);
+      vscode.window.showInformationMessage(
+        `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
+      );
+      break;
+    }
+  }
+}
+
+/**
+ * Centralized context manager to prevent menu visibility regressions
+ */
+export class KahuaContextManager {
+  private static instance: KahuaContextManager;
+  
+  static getInstance(): KahuaContextManager {
+    if (!KahuaContextManager.instance) {
+      KahuaContextManager.instance = new KahuaContextManager();
+    }
+    return KahuaContextManager.instance;
+  }
+
+  async initializeContexts(): Promise<void> {
+    debugLog('[KAHUA] Initializing all context variables to defaults');
+    // Note: Do NOT set config.kahua.showInContextMenu - that comes from user settings
+    await vscode.commands.executeCommand('setContext', DOCUMENT_APPLICABLE_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', DOCUMENT_TYPE_CONTEXT_KEY, '');
+    await vscode.commands.executeCommand('setContext', SELECTION_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', SNIPPET_DOCUMENT_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', TEMPLATE_DOCUMENT_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_TEMPLATES_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_SNIPPETS_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_TABLES_CONTEXT_KEY, false);
+    await vscode.commands.executeCommand('setContext', TEMPLATE_KIND_CONTEXT_KEY, '');
+    await vscode.commands.executeCommand('setContext', SNIPPET_KIND_CONTEXT_KEY, '');
+    await vscode.commands.executeCommand('setContext', HAS_SOURCE_FILE_CONTEXT_KEY, false);
+  }
+
+  async setDocumentApplicable(hasApplicable: boolean): Promise<void> {
+    debugLog(`[KAHUA] Setting ${DOCUMENT_APPLICABLE_CONTEXT_KEY} = ${hasApplicable}`);
+    await vscode.commands.executeCommand('setContext', DOCUMENT_APPLICABLE_CONTEXT_KEY, hasApplicable);
+  }
+
+  async setGenerationAvailable(canGenerate: boolean): Promise<void> {
+    debugLog(`[KAHUA] Setting generation contexts = ${canGenerate}`);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_TEMPLATES_CONTEXT_KEY, canGenerate);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_SNIPPETS_CONTEXT_KEY, canGenerate);
+    await vscode.commands.executeCommand('setContext', CAN_GENERATE_TABLES_CONTEXT_KEY, canGenerate);
+  }
+
+  hasKahuaContext(document: vscode.TextDocument): boolean {
+    if (!document || document.languageId !== 'xml') {
+      debugLog(`[KAHUA] hasKahuaContext: false - document=${!!document}, languageId=${document?.languageId}`);
+      return false;
+    }
+    
+    const typeId = detectDocumentTypeId(document);
+    const result = Boolean(typeId);
+    debugLog(`[KAHUA] hasKahuaContext: ${result} - typeId=${typeId}, file=${document.uri.fsPath}`);
+    return result;
+  }
+
+  async updateContextForDocument(document?: vscode.TextDocument): Promise<void> {
+    if (!document) {
+      debugLog('[KAHUA] updateContextForDocument: No document - preserving previous context');
+      // Don't clear contexts immediately - preserve them for better UX
+      // Context will be updated when a new document becomes active
+      return;
+    }
+
+    const hasContext = this.hasKahuaContext(document);
+    debugLog(`[KAHUA] updateContextForDocument: ${document.uri.fsPath} -> hasContext=${hasContext}`);
+    
+    await this.setDocumentApplicable(hasContext);
+    
+    const canGenerate = hasContext && 
+      !isTemplateDocument(document) && 
+      !isSnippetDocument(document) && 
+      !isTableDocument(document);
+    
+    await this.setGenerationAvailable(canGenerate);
+  }
+}
+
+export async function activate(context: vscode.ExtensionContext) {
   debugLog('[KAHUA] activate() called');
-  // Set up context menu visibility
-  vscode.commands.executeCommand('setContext', 'kahua.showInContextMenu', true);
-  vscode.commands.executeCommand('setContext', DOCUMENT_APPLICABLE_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', DOCUMENT_TYPE_CONTEXT_KEY, '');
-  vscode.commands.executeCommand('setContext', SELECTION_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', SNIPPET_DOCUMENT_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', TEMPLATE_DOCUMENT_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', CAN_GENERATE_TEMPLATES_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', CAN_GENERATE_SNIPPETS_CONTEXT_KEY, false);
-  vscode.commands.executeCommand('setContext', TEMPLATE_KIND_CONTEXT_KEY, '');
-  vscode.commands.executeCommand('setContext', SNIPPET_KIND_CONTEXT_KEY, '');
-  vscode.commands.executeCommand('setContext', HAS_SOURCE_FILE_CONTEXT_KEY, false);
+  
+  const contextManager = KahuaContextManager.getInstance();
+  
+  // Initialize all context variables to defaults first
+  await contextManager.initializeContexts();
+  
   generateStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   generateStatusBarItem.text = DEFAULT_STATUS_TEXT;
   generateStatusBarItem.command = 'kahua.generateIntoNewEditor';
@@ -4181,11 +5453,19 @@ export function activate(context: vscode.ExtensionContext) {
   sourceFileStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
   sourceFileStatusBarItem.hide();
   context.subscriptions.push(sourceFileStatusBarItem);
-  void updateDocumentTypeContext(vscode.window.activeTextEditor?.document);
-
+  
+  // Set up event listeners BEFORE setting initial context to prevent race conditions
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(editor => {
-      void updateDocumentTypeContext(editor?.document);
+      debugLog(`[KAHUA] onDidChangeActiveTextEditor: ${editor?.document.fileName || 'none'}`);
+      if (editor?.document) {
+        // Update context for the new active document
+        void contextManager.updateContextForDocument(editor.document);
+        void updateDocumentTypeContext(editor.document);
+      } else {
+        // No active editor - preserve current context for better UX
+        debugLog(`[KAHUA] No active editor - preserving context for webviews/panels`);
+      }
     })
   );
 
@@ -4196,6 +5476,10 @@ export function activate(context: vscode.ExtensionContext) {
       }
     })
   );
+  
+  // NOW set the initial context for any already-open document
+  await contextManager.updateContextForDocument(vscode.window.activeTextEditor?.document);
+  void updateDocumentTypeContext(vscode.window.activeTextEditor?.document);
 
   // Clean up source XML file map when documents are closed
   context.subscriptions.push(
@@ -4212,13 +5496,24 @@ export function activate(context: vscode.ExtensionContext) {
         xmlParseCache.delete(cacheKey);
       }
       
+      // If no more text documents are open, clear contexts
+      const openTextDocuments = vscode.workspace.textDocuments.filter(doc => 
+        doc.uri.scheme === 'file' && !doc.isClosed
+      );
+      if (openTextDocuments.length === 0) {
+        debugLog('[KAHUA] All documents closed - clearing contexts');
+        void contextManager.setDocumentApplicable(false);
+        void contextManager.setGenerationAvailable(false);
+      }
+      
       if (templateDocumentUris.has(key)) {
         unmarkTemplateDocument(document);
       } else if (snippetDocumentUris.has(key)) {
         unmarkSnippetDocument(document);
+      } else if (tableDocumentUris.has(key)) {
+        unmarkTableDocument(document);
       } else {
         documentTypeOverrides.delete(key);
-        selectedTokenValuesByDocument.delete(key);
         injectionAffectingTokens.delete(key);
       }
     })
@@ -4228,6 +5523,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidOpenTextDocument(document => {
       if (document.languageId === 'xml' && isAutoDetectEnabled(document.uri)) {
         void refreshDocumentTypeForDocument(document);
+        // If this is the active document, also update context immediately
+        if (document === vscode.window.activeTextEditor?.document) {
+          void updateDocumentTypeContext(document);
+        }
       }
     })
   );
@@ -4259,53 +5558,18 @@ export function activate(context: vscode.ExtensionContext) {
   // Register new unified generation commands
   context.subscriptions.push(
     vscode.commands.registerCommand('kahua.showTemplateForGeneration', async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage('No active editor found.');
-        return;
-      }
-
-      // Check if current document is a valid Kahua document
-      const docTypeId = detectDocumentTypeId(editor.document);
-      if (!docTypeId) {
-        vscode.window.showWarningMessage('This command is only available in valid Kahua documents.');
-        return;
-      }
-
-      try {
-        const documentType = requireDocumentType(editor.document);
-        const pick = await selectFragments('Select fragments for template generation', documentType);
-        if (pick) {
-          await generateTemplateForFragments(pick.fragments);
-        }
-      } catch (error: unknown) {
-        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-      }
+      await handleGenerationCommand('template');
     }),
     vscode.commands.registerCommand('kahua.showSnippetForGeneration', async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage('No active editor found.');
-        return;
-      }
-
-      // Check if current document is a valid Kahua document  
-      const docTypeId = detectDocumentTypeId(editor.document);
-      if (!docTypeId) {
-        vscode.window.showWarningMessage('This command is only available in valid Kahua documents.');
-        return;
-      }
-
-      try {
-        const documentType = requireDocumentType(editor.document);
-        const pick = await selectFragments('Select fragments for snippet generation', documentType);
-        if (pick) {
-          await generateSnippetForFragments(pick.fragments);
-        }
-      } catch (error: unknown) {
-        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-      }
+      await handleGenerationCommand('snippet');
     }),
+    vscode.commands.registerCommand('kahua.showTableForGeneration', async () => {
+      await handleGenerationCommand('table');
+    }),
+    vscode.commands.registerCommand('kahua.handleTableGeneration', async (data: any) => {
+      await handleTableGeneration(data);
+    }),
+    // Legacy table generation command removed - tables now use document-based approach
     vscode.commands.registerCommand('kahua.generateIntoNewEditor', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || (!isTemplateDocument(editor.document) && !isSnippetDocument(editor.document))) {
@@ -4397,22 +5661,38 @@ export function parseTokenDefinition(tokens: string): ParsedToken[] {
     if (!tokenConfig) continue;
     
     const colonIndex = tokenConfig.indexOf(':');
-    if (colonIndex === -1) {
-      result.push({
-        name: tokenConfig,
-        defaultValue: ''
-      });
-    } else {
-      result.push({
-        name: tokenConfig.slice(0, colonIndex).trim(),
-        defaultValue: tokenConfig.slice(colonIndex + 1).trim()
-      });
-    }
+    const tokenNamePart = (colonIndex === -1 ? tokenConfig : tokenConfig.slice(0, colonIndex)).trim();
+    const isRequired = tokenNamePart.endsWith('!');
+    const cleanName = isRequired ? tokenNamePart.slice(0, -1).trim() : tokenNamePart;
+    const defaultValue = colonIndex === -1 ? '' : tokenConfig.slice(colonIndex + 1).trim();
+
+    result.push({
+      name: cleanName,
+      defaultValue,
+      required: isRequired
+    });
   }
   
   // Performance: Cache the result
   tokenDefinitionCache.set(tokens, result);
   return result;
+}
+
+export function collectMissingRequiredTokens(
+  tokens: ParsedToken[],
+  getValue: (tokenName: string) => string | undefined
+): string[] {
+  const missing: string[] = [];
+  for (const token of tokens) {
+    if (!token.required) {
+      continue;
+    }
+    const value = getValue(token.name);
+    if (!value || value.trim() === '') {
+      missing.push(token.name);
+    }
+  }
+  return missing;
 }
 
 /**
@@ -4449,6 +5729,78 @@ function mergeTokenDefinitions(
   }
 
   return { headerTokens, tableTokens, tokenDefaults };
+}
+
+function resolveInjectionPaths(
+  paths: Record<string, string | InjectionPathConfig>
+): Record<string, ResolvedInjectionPathConfig> {
+  const resolved: Record<string, ResolvedInjectionPathConfig> = {};
+  for (const [sectionName, config] of Object.entries(paths)) {
+    resolved[sectionName] = normalizeInjectionPathConfig(config);
+  }
+  return resolved;
+}
+
+function normalizeInjectionPathConfig(config: string | InjectionPathConfig): ResolvedInjectionPathConfig {
+  if (typeof config === 'string') {
+    const parsed = parseAttributeHintsFromPath(config);
+    return {
+      path: parsed.path,
+      attributeDisplayHints: parsed.hints,
+      pathSegments: parsed.segments
+    };
+  }
+
+  const parsed = parseAttributeHintsFromPath(config.path || '');
+  const combinedHints =
+    config.attributeDisplayHints && config.attributeDisplayHints.length > 0
+      ? config.attributeDisplayHints
+      : parsed.hints;
+
+  return {
+    ...config,
+    path: parsed.path,
+    attributeDisplayHints: combinedHints,
+    pathSegments: parsed.segments
+  };
+}
+
+function parseAttributeHintsFromPath(rawPath: string): {
+  path: string;
+  segments: string[];
+  hints: AttributeDisplayHint[];
+} {
+  const rawSegments = rawPath.split('/').filter(part => part.length > 0);
+  const hints: AttributeDisplayHint[] = [];
+  const sanitizedSegments = rawSegments.map((segment, index) => {
+    const hintMatch = segment.match(/\((?:"[^"]+"(?:\|\"[^"]+\")*)\)\s*$/);
+    if (!hintMatch) {
+      return segment;
+    }
+
+    const hintContent = hintMatch[0];
+    const sanitizedSegment = segment.slice(0, segment.length - hintContent.length);
+    const attrList = hintContent
+      .slice(1, -1)
+      .split('|')
+      .map(attr => attr.replace(/"/g, '').trim())
+      .filter(attr => attr.length > 0);
+
+    if (attrList.length > 0) {
+      hints.push({
+        segmentIndex: index,
+        attributes: attrList
+      });
+    }
+
+    return sanitizedSegment;
+  });
+
+  return {
+    path: sanitizedSegments.join('/'),
+    segments: sanitizedSegments,
+    hints
+  };
 }
 
 /**
@@ -4747,6 +6099,203 @@ function renderTemplate(
   return renderCompiledTemplate(compiled, cleanTokenValues, rawTokenValues, suppressWarnings);
 }
 
+function renderFragmentSectionsFromRows(
+  fragmentDefs: FragmentDefinition[],
+  rowTokenData: RowTokenData[],
+  labelDocument: vscode.TextDocument | null,
+  applyFormatting: boolean,
+  xmlIndentSize: number,
+  suppressWarnings: boolean
+): { sections: string[]; warnings: string[] } {
+  const tableSectionOutputs = new Map<string, { label: string; header?: string; body?: string; footer?: string }>();
+  const groupedSectionOutputs = new Map<string, { label: string; body?: string }>();
+  const warnings: string[] = [];
+
+  const precomputedFragments = new Map<string, {
+    processedFragmentSets: Record<string, Record<string, string>>;
+    conditionalFragmentSets: Record<string, ConditionalFragmentEntry[]>;
+  }>();
+
+  for (const fragmentDef of fragmentDefs) {
+    const { processedFragmentSets, conditionalFragmentSets } = processFragmentTemplates(
+      fragmentDef.fragments,
+      {},
+      {},
+      suppressWarnings
+    );
+    precomputedFragments.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets });
+  }
+
+  for (const row of rowTokenData) {
+    const cleanTokenValues = row.clean;
+    const rawTokenValues = row.raw;
+
+    for (const fragmentDef of fragmentDefs) {
+      const precomputed = precomputedFragments.get(fragmentDef.id);
+      if (!precomputed) {
+        continue;
+      }
+
+      const processedFragmentSets: Record<string, Record<string, string>> = {};
+
+      for (const [setName, fragments] of Object.entries(precomputed.processedFragmentSets)) {
+        processedFragmentSets[setName] = { ...fragments };
+      }
+
+      for (const [setName, conditionalFragments] of Object.entries(precomputed.conditionalFragmentSets)) {
+        if (!processedFragmentSets[setName]) {
+          processedFragmentSets[setName] = {};
+        }
+
+        for (const entry of conditionalFragments) {
+          const { result: keyResult, warnings: keyWarnings } = renderCompiledTemplate(
+            entry.compiledKey,
+            cleanTokenValues,
+            rawTokenValues,
+            suppressWarnings
+          );
+          warnings.push(...keyWarnings);
+          const normalizedKey = keyResult.trim();
+          if (normalizedKey) {
+            processedFragmentSets[setName][normalizedKey] = entry.template;
+          }
+        }
+      }
+
+      const fragmentType = fragmentDef.type || 'grouped';
+      const fragmentLabel = getFragmentDisplayLabel(fragmentDef.name, labelDocument);
+
+      if (fragmentType === 'table') {
+        for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
+          const groupKey = setName === 'default' ? 'default' : setName;
+          const sectionId = `${fragmentLabel}||${groupKey}`;
+          if (!tableSectionOutputs.has(sectionId)) {
+            const label = groupKey === 'default' ? fragmentLabel : `${fragmentLabel} - ${groupKey}`;
+            tableSectionOutputs.set(sectionId, { label });
+          }
+          const section = tableSectionOutputs.get(sectionId)!;
+
+          const headerTemplate = fragments.header;
+          if (headerTemplate && !section.header) {
+            const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+            section.header = rendered.result;
+            warnings.push(...rendered.warnings);
+          }
+
+          const bodyTemplate = fragments.body;
+          if (bodyTemplate) {
+            const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+            section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
+            warnings.push(...rendered.warnings);
+          }
+
+          const footerTemplate = fragments.footer;
+          if (footerTemplate && !section.footer) {
+            const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
+            section.footer = rendered.result;
+            warnings.push(...rendered.warnings);
+          }
+        }
+      } else {
+        for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
+          for (const [key, template] of Object.entries(fragments)) {
+            const fragmentKeyName = setName === 'default' ? key : `${setName}.${key}`;
+            const sectionId = `${fragmentLabel}||${fragmentKeyName}`;
+            if (!groupedSectionOutputs.has(sectionId)) {
+              groupedSectionOutputs.set(sectionId, { label: fragmentKeyName });
+            }
+            const section = groupedSectionOutputs.get(sectionId)!;
+            const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
+            section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
+            warnings.push(...rendered.warnings);
+          }
+        }
+      }
+    }
+  }
+
+  const sections: string[] = [];
+
+  for (const section of tableSectionOutputs.values()) {
+    const parts: string[] = [];
+    if (section.header) parts.push(section.header);
+    if (section.body) parts.push(section.body);
+    if (section.footer) parts.push(section.footer);
+    if (parts.length === 0) {
+      continue;
+    }
+    let body = parts.join('\n');
+    if (applyFormatting) {
+      body = formatXml(body, xmlIndentSize);
+    }
+    sections.push(`\n <!-- ${section.label} -->\n\n${body}`);
+  }
+
+  for (const section of groupedSectionOutputs.values()) {
+    if (!section.body) {
+      continue;
+    }
+    let body = section.body;
+    if (applyFormatting) {
+      body = formatXml(body, xmlIndentSize);
+    }
+    sections.push(`\n <!-- ${section.label} -->\n\n${body}`);
+  }
+
+  return { sections, warnings };
+}
+
+export function buildRowTokenDataFromRequest(request: GenerationRequest): RowTokenData[] {
+  const rows: RowTokenData[] = [];
+  const headerTokenValues = new Map<string, string>();
+
+  for (const headerToken of request.tokenData.headerTokens) {
+    const rawValue = request.tokenData.extractedTokens.get(headerToken.name) || headerToken.defaultValue || '';
+    headerTokenValues.set(headerToken.name, rawValue);
+  }
+
+  const headerMissing = collectMissingRequiredTokens(request.tokenData.headerTokens, tokenName => headerTokenValues.get(tokenName));
+  if (headerMissing.length > 0) {
+    throw new Error(`Missing required header tokens: ${headerMissing.join(', ')}`);
+  }
+
+  for (const dataRow of request.dataRows) {
+    const clean: Record<string, string> = {};
+    const raw: Record<string, string> = {};
+
+    for (const headerToken of request.tokenData.headerTokens) {
+      const value = headerTokenValues.get(headerToken.name) || '';
+      raw[headerToken.name] = value;
+      clean[headerToken.name] = toPascalCase(value || headerToken.defaultValue || '');
+    }
+
+    for (const tableToken of request.tokenData.tableTokens) {
+      const value = dataRow[tableToken.name] ?? tableToken.defaultValue ?? '';
+      raw[tableToken.name] = value;
+      clean[tableToken.name] = toPascalCase(value || tableToken.defaultValue || '');
+    }
+
+    for (const [key, value] of Object.entries(dataRow)) {
+      if (!(key in raw)) {
+        raw[key] = value;
+        clean[key] = toPascalCase(value);
+      }
+    }
+
+    const missingTokens = [
+      ...collectMissingRequiredTokens(request.tokenData.headerTokens, tokenName => raw[tokenName]),
+      ...collectMissingRequiredTokens(request.tokenData.tableTokens, tokenName => raw[tokenName])
+    ];
+    if (missingTokens.length > 0) {
+      throw new Error(`Row ${rows.length + 1}: Missing required tokens (${missingTokens.join(', ')})`);
+    }
+
+    rows.push({ clean, raw });
+  }
+
+  return rows;
+}
+
 /**
  * Shows quickpick for selecting fragments (no filtering - all fragments are equal)
  */
@@ -4754,7 +6303,7 @@ async function selectFragments(
   placeholder: string,
   documentType: string
 ): Promise<{ label: string; fragments: string[] } | undefined> {
-  const config = vscode.workspace.getConfiguration('kahua', undefined);
+  const config = getKahuaConfig(currentResource());
   const fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
 
   if (fragmentDefinitions.length === 0) {
@@ -4762,9 +6311,8 @@ async function selectFragments(
     return undefined;
   }
 
-  const applicableFragments = fragmentDefinitions.filter(def => isFragmentApplicableToDocument(def, documentType));
+  const applicableFragments = FragmentValidationService.getApplicableFragments(fragmentDefinitions, documentType);
   if (applicableFragments.length === 0) {
-    vscode.window.showWarningMessage(`No fragments are configured for document type "${documentType}".`);
     return undefined;
   }
 
@@ -4815,20 +6363,17 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
       throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
     }
 
-    // Find the fragment definitions we need
-    const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
-    if (selectedFragmentDefsRaw.length === 0) {
-      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
-    }
-    const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+    // Find the fragment definitions we need and validate them
+    const selectedFragmentDefs = FragmentValidationService.getValidatedFragments(
+      fragmentDefinitions, 
+      fragmentIds, 
+      documentType
+    );
 
     setGenerationStatus('Preparing fragment generation…', false);
 
     // Collect all unique token references from selected fragments
-    const allTokenReferences = new Set<string>();
-    selectedFragmentDefs.forEach(def => {
-      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
-    });
+    const allTokenReferences = FragmentValidationService.collectTokenReferences(selectedFragmentDefs);
     debugLog(`[DEBUG] All token references:`, Array.from(allTokenReferences));
 
     // Merge token definitions based on references
@@ -5028,6 +6573,35 @@ async function generateSnippetForFragments(fragmentIds: string[]): Promise<void>
 }
 
 /**
+ * Get source XML URI for generation - looks for current XML file or remembered source
+ */
+async function getSourceXmlUriForGeneration(): Promise<vscode.Uri | undefined> {
+  // First check if we have an active XML editor
+  const activeEditor = vscode.window.activeTextEditor;
+  if (activeEditor && activeEditor.document.languageId === 'xml') {
+    return activeEditor.document.uri;
+  }
+
+  // Look for any open XML documents
+  const openXmlDoc = vscode.workspace.textDocuments.find(doc => 
+    doc.languageId === 'xml' && !doc.isUntitled
+  );
+  
+  if (openXmlDoc) {
+    return openXmlDoc.uri;
+  }
+
+  // If no XML documents are open, ask the user to select one
+  const selectedFiles = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    filters: { 'XML Files': ['xml'] },
+    title: 'Select source XML file for injection'
+  });
+  
+  return selectedFiles && selectedFiles.length > 0 ? selectedFiles[0] : undefined;
+}
+
+/**
  * Generates and opens a template for the specified fragment types in a new editor
  */
 async function generateTemplateForFragments(fragmentIds: string[]): Promise<void> {
@@ -5096,18 +6670,15 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
     }
 
-    // Find the fragment definitions we need
-    const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
-    if (selectedFragmentDefsRaw.length === 0) {
-      throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
-    }
-    const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+    // Find the fragment definitions we need and validate them
+    const selectedFragmentDefs = FragmentValidationService.getValidatedFragments(
+      fragmentDefinitions, 
+      fragmentIds, 
+      documentType
+    );
 
     // Collect all unique token references from selected fragments
-    const allTokenReferences = new Set<string>();
-    selectedFragmentDefs.forEach(def => {
-      def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
-    });
+    const allTokenReferences = FragmentValidationService.collectTokenReferences(selectedFragmentDefs);
 
     // Merge token definitions based on references
     const { headerTokens, tableTokens } = mergeTokenDefinitions(
@@ -5152,12 +6723,12 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       token => token.name.toLowerCase() === 'entity'
     );
     debugLog(`[DEBUG] Found entityToken:`, entityToken?.name);
-    let selectedEntity = entityToken ? extractedValues.get(entityToken.name) : undefined;
-    // Don't use stored entity preference - always base selection on template content
-    debugLog(`[DEBUG] selectedEntity:`, selectedEntity, '(not using stored preferences)');
+    let selectedEntity: string | undefined = undefined;
+    // Always prompt for entity selection when generating new templates - don't use extracted values
+    debugLog(`[DEBUG] selectedEntity: undefined (always prompt for new generation)`);
 
     debugLog(`[DEBUG] Entity selection conditions: entityToken=${!!entityToken}, selectedEntity=${selectedEntity}, hasXmlContext=${hasXmlContext}`);
-    if (entityToken && !selectedEntity && sourceXmlDocument) {
+    if (entityToken && sourceXmlDocument) {
       const referencedTokenDefs = tokenDefinitions.filter(def =>
         allTokenReferences.has(def.id)
       );
@@ -5182,7 +6753,6 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
         if (picked) {
           extractedValues.set(entityToken.name, picked);
           selectedEntity = picked;
-          rememberEntitySelectionForDocument(sourceXmlDocument, picked);
         }
       } else {
         debugLog('[DEBUG] No entity options available in source XML document');
@@ -5301,10 +6871,6 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       if (affectingTokens.size > 0) {
         injectionAffectingTokens.set(newDocument.uri.toString(), affectingTokens);
       }
-    }
-
-    if (entityToken && selectedEntity) {
-      rememberEntitySelectionForDocument(newDocument, selectedEntity);
     }
 
     markDocumentAsTemplate(newDocument, documentType);
@@ -5442,22 +7008,50 @@ async function generateFromTemplateOrSnippetAtCursor(): Promise<void> {
  * Infers fragment IDs from a template or snippet document by looking at the header comment
  */
 function inferFragmentIdsFromDocument(document: vscode.TextDocument): string[] {
+  debugLog(`[DEBUG] inferFragmentIdsFromDocument: Processing ${document.lineCount} lines from ${document.uri.fsPath}`);
+  
   for (let i = 0; i < Math.min(10, document.lineCount); i++) {
     const text = document.lineAt(i).text.trim();
+    debugLog(`[DEBUG] Line ${i}: "${text}"`);
+    
     if (!text.startsWith('//')) {
       continue;
     }
 
-    // Look for patterns like "// Kahua Template for attributes" or "// Kahua Snippet for lookups"
-    const match = text.match(/^\/\/\s*(?:kahua\s+)?(?:template|snippet)\s+for\s+(.+)$/i);
+    // Look for patterns like "// Kahua Template for attributes", "// Kahua Snippet for lookups", or "// Kahua Table for attributes"
+    const match = text.match(/^\/\/\s*(?:kahua\s+)?(?:template|snippet|table)\s+for\s+(.+)$/i);
     if (match) {
+      debugLog(`[DEBUG] Found match: "${match[0]}", captured: "${match[1]}"`);
       const fragmentsText = match[1].split(/[,&]/)[0].trim();
-      // For now, return as single fragment - could be enhanced to parse multiple
-      return [fragmentsText.toLowerCase()];
+      debugLog(`[DEBUG] Extracted fragment: "${fragmentsText}"`);
+      const result = [fragmentsText.toLowerCase()];
+      debugLog(`[DEBUG] Returning fragment IDs: ${JSON.stringify(result)}`);
+      return result;
     }
   }
 
-  // Default fallback - could be enhanced to analyze document type and provide defaults
+  debugLog('[DEBUG] No fragment patterns found, checking for fallback indicators');
+  
+  // Enhanced fallback - look for other indicators
+  for (let i = 0; i < Math.min(10, document.lineCount); i++) {
+    const text = document.lineAt(i).text.trim();
+    
+    // Look for CSV headers that might indicate fragment types
+    if (text.includes('name,type') && text.includes(',')) {
+      debugLog('[DEBUG] Found CSV header suggesting attributes fragment');
+      return ['attributes'];
+    }
+    
+    // Look for other comment patterns that might help
+    if (text.match(/\/\/.*(?:attribute|lookup|tag)/i)) {
+      debugLog(`[DEBUG] Found hint in comment: "${text}"`);
+      if (text.match(/attribute/i)) return ['attributes'];
+      if (text.match(/lookup/i)) return ['lookups'];
+      if (text.match(/tag/i)) return ['datatags'];
+    }
+  }
+
+  debugLog('[DEBUG] No fragment IDs could be inferred');
   return [];
 }
 
@@ -5591,7 +7185,21 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
     return;
   }
 
-  await finalizeGeneratedFragments(editor, fragmentIds, generationResult);
+  // Determine output target for old-style generation
+  const currentDocument = editor.document;
+  const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
+  
+  const target: OutputTarget | undefined = rememberedSourceUri
+    ? { type: 'sourceFile', uri: rememberedSourceUri }
+    : await showOutputTargetQuickPick(currentDocument);
+
+  if (!target) {
+    vscode.window.showInformationMessage('Kahua: Generation cancelled');
+    setGenerationStatus('Generation cancelled', true);
+    return;
+  }
+
+  await finalizeGeneratedFragmentsWithTarget(editor, fragmentIds, generationResult, target);
 }
 
 /**
@@ -5684,17 +7292,14 @@ async function handleSelectionInternal(
             throw new Error(`Menu references unknown fragment id(s): ${unknown.join(', ')}. Use FragmentDefinition.id (not 'name').`);
         }
 
-        const selectedFragmentDefsRaw = fragmentDefinitions.filter(def => fragmentIds.includes(def.id));
-        if (selectedFragmentDefsRaw.length === 0) {
-            throw new Error(`No matching fragment definitions found for: ${fragmentIds.join(', ')}`);
-        }
-        const selectedFragmentDefs = enforceFragmentApplicability(selectedFragmentDefsRaw, documentType);
+        const selectedFragmentDefs = FragmentValidationService.getValidatedFragments(
+            fragmentDefinitions, 
+            fragmentIds, 
+            documentType
+        );
         setGenerationStatus('Validating template data…', false);
 
-        const allTokenReferences = new Set<string>();
-        selectedFragmentDefs.forEach(def => {
-            def.tokenReferences.forEach(ref => allTokenReferences.add(ref));
-        });
+        const allTokenReferences = FragmentValidationService.collectTokenReferences(selectedFragmentDefs);
 
         const { headerTokens, tableTokens, tokenDefaults } = mergeTokenDefinitions(
             tokenDefinitions,
@@ -5745,27 +7350,10 @@ async function handleSelectionInternal(
                 throw new Error(`Group ${groupIndex + 1}: No data lines found. Header tokens were processed but no table data rows remain.`);
             }
 
-            const groupTokenData: Array<{ clean: Record<string, string>; raw: Record<string, string> }> = [];
-            const tableSectionOutputs = new Map<string, { label: string; header?: string; body?: string; footer?: string }>();
-            const groupedSectionOutputs = new Map<string, { label: string; body?: string }>();
+            const groupTokenData: RowTokenData[] = [];
 
             progress.report({ message: `Processing group ${groupIndex + 1} rows...`, increment: 30 });
             const groupRenderStart = Date.now();
-
-            const precomputedFragments = new Map<string, {
-                processedFragmentSets: Record<string, Record<string, string>>;
-                conditionalFragmentSets: Record<string, ConditionalFragmentEntry[]>;
-            }>();
-
-            for (const fragmentDef of selectedFragmentDefs) {
-                const { processedFragmentSets, conditionalFragmentSets } = processFragmentTemplates(
-                    fragmentDef.fragments,
-                    {},
-                    {},
-                    suppressWarnings
-                );
-                precomputedFragments.set(fragmentDef.id, { processedFragmentSets, conditionalFragmentSets });
-            }
 
             const BATCH_SIZE = 50;
             const totalRows = dataLines.length;
@@ -5786,85 +7374,13 @@ async function handleSelectionInternal(
 
                     groupTokenData.push({ clean: { ...cleanTokenValues }, raw: { ...rawTokenValues } });
 
-                    for (const fragmentDef of selectedFragmentDefs) {
-                        const precomputed = precomputedFragments.get(fragmentDef.id)!;
-                        const warnings: string[] = [];
-
-                        const processedFragmentSets: Record<string, Record<string, string>> = {};
-
-                        for (const [setName, fragments] of Object.entries(precomputed.processedFragmentSets)) {
-                            processedFragmentSets[setName] = { ...fragments };
-                        }
-
-                        for (const [setName, conditionalFragments] of Object.entries(precomputed.conditionalFragmentSets)) {
-                            if (!processedFragmentSets[setName]) {
-                                processedFragmentSets[setName] = {};
-                            }
-                            for (const entry of conditionalFragments) {
-                                const { result: keyResult, warnings: keyWarnings } = renderCompiledTemplate(
-                                    entry.compiledKey,
-                                    cleanTokenValues,
-                                    rawTokenValues,
-                                    suppressWarnings
-                                );
-                                warnings.push(...keyWarnings);
-                                const normalizedKey = keyResult.trim();
-                                if (normalizedKey) {
-                                    debugLog(`[KAHUA] Row evaluation: ${setName}.${entry.rawKey} -> "${normalizedKey}"`);
-                                    processedFragmentSets[setName][normalizedKey] = entry.template;
-                                }
-                            }
-                        }
-
-                        const fragmentType = fragmentDef.type || 'grouped';
-                        const fragmentLabel = getFragmentDisplayLabel(fragmentDef.name, sourceXmlDocumentForTokens || editor.document);
-
-                        if (fragmentType === 'table') {
-                            for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
-                                const groupKey = setName === 'default' ? 'default' : setName;
-                                const sectionId = `${fragmentLabel}||${groupKey}`;
-                                if (!tableSectionOutputs.has(sectionId)) {
-                                    const label = groupKey === 'default' ? fragmentLabel : `${fragmentLabel} - ${groupKey}`;
-                                    tableSectionOutputs.set(sectionId, { label });
-                                }
-                                const section = tableSectionOutputs.get(sectionId)!;
-
-                                const headerTemplate = fragments.header;
-                                if (headerTemplate && !section.header) {
-                                    const rendered = renderTemplate(headerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    section.header = rendered.result;
-                                    allWarnings.push(...rendered.warnings);
-                                }
-
-                                const bodyTemplate = fragments.body;
-                                if (bodyTemplate) {
-                                    const rendered = renderTemplate(bodyTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
-                                    allWarnings.push(...rendered.warnings);
-                                }
-
-                                const footerTemplate = fragments.footer;
-                                if (footerTemplate && !section.footer) {
-                                    const rendered = renderTemplate(footerTemplate, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    section.footer = rendered.result;
-                                    allWarnings.push(...rendered.warnings);
-                                }
-                            }
-                        } else {
-                            for (const [setName, fragments] of Object.entries(processedFragmentSets)) {
-                                for (const [key, template] of Object.entries(fragments)) {
-                                    const fragmentKeyName = setName === 'default' ? key : `${setName}.${key}`;
-                                    const sectionId = `${fragmentLabel}||${fragmentKeyName}`;
-                                    if (!groupedSectionOutputs.has(sectionId)) {
-                                        groupedSectionOutputs.set(sectionId, { label: fragmentKeyName });
-                                    }
-                                    const section = groupedSectionOutputs.get(sectionId)!;
-                                    const rendered = renderTemplate(template, cleanTokenValues, rawTokenValues, suppressWarnings);
-                                    section.body = section.body ? `${section.body}\n${rendered.result}` : rendered.result;
-                                    allWarnings.push(...rendered.warnings);
-                                }
-                            }
-                        }
+                    const missingTokens = [
+                        ...collectMissingRequiredTokens(headerTokens, tokenName => rawTokenValues[tokenName]),
+                        ...collectMissingRequiredTokens(tableTokens, tokenName => rawTokenValues[tokenName])
+                    ];
+                    if (missingTokens.length > 0) {
+                        const absoluteRow = batchStart + lineIndex + 1;
+                        throw new Error(`Group ${groupIndex + 1}, row ${absoluteRow}: Missing required tokens (${missingTokens.join(', ')})`);
                     }
                 }
 
@@ -5881,39 +7397,16 @@ async function handleSelectionInternal(
             logDuration(`Group ${groupIndex + 1}: token table`, tokenTableStart);
 
             const groupOutputSections: string[] = [tokenTable];
-            const tableFormattingStart = Date.now();
-            debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: emitting table fragments (${tableSectionOutputs.size})`);
-            for (const section of tableSectionOutputs.values()) {
-                const parts: string[] = [];
-                if (section.header) parts.push(section.header);
-                if (section.body) parts.push(section.body);
-                if (section.footer) parts.push(section.footer);
-                if (parts.length === 0) {
-                    continue;
-                }
-                let body = parts.join('\n');
-                if (applyFormatting) {
-                    debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: applying XML formatting to table section "${section.label}"`);
-                    body = formatXml(body, xmlIndentSize);
-                }
-                groupOutputSections.push(`\n <!-- ${section.label} -->\n\n${body}`);
-            }
-            logDuration(`Group ${groupIndex + 1}: table fragment assembly`, tableFormattingStart);
-
-            const groupedFormattingStart = Date.now();
-            debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: emitting grouped fragments (${groupedSectionOutputs.size})`);
-            for (const section of groupedSectionOutputs.values()) {
-                if (!section.body) {
-                    continue;
-                }
-                let body = section.body;
-                if (applyFormatting) {
-                    debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: applying XML formatting to grouped section "${section.label}"`);
-                    body = formatXml(body, xmlIndentSize);
-                }
-                groupOutputSections.push(`\n <!-- ${section.label} -->\n\n${body}`);
-            }
-            logDuration(`Group ${groupIndex + 1}: grouped fragment assembly`, groupedFormattingStart);
+            const renderResult = renderFragmentSectionsFromRows(
+                selectedFragmentDefs,
+                groupTokenData,
+                sourceXmlDocumentForTokens || editor.document,
+                applyFormatting,
+                xmlIndentSize,
+                suppressWarnings
+            );
+            allWarnings.push(...renderResult.warnings);
+            groupOutputSections.push(...renderResult.sections);
 
             outputSections.push(groupOutputSections.join('\n\n'));
         }
@@ -5946,14 +7439,16 @@ async function handleSelectionInternal(
         
         // Extract tokens from template comments (e.g., "// Entity Context: RFI")
         const templateTokens = extractTokensFromTemplateComments(editor.document);
+        console.log('[KAHUA] Template tokens extracted:', templateTokens);
         for (const [tokenName, tokenValue] of templateTokens) {
             // Template values override XML values for injection-affecting tokens
             const affectsInjection = tokenDefinitions.some(tokenDef => 
                 tokenDef.tokenReadPaths?.[tokenName]?.affectsInjection
             );
+            console.log(`[KAHUA] Token ${tokenName}=${tokenValue}, affectsInjection: ${affectsInjection}`);
             if (affectsInjection || tokenName === 'entity') {
                 extractedTokens.set(tokenName, tokenValue);
-                debugLog(`[DEBUG] Extracted injection token from template comments: ${tokenName}=${tokenValue}`);
+                console.log(`[KAHUA] Extracted injection token from template comments: ${tokenName}=${tokenValue}`);
             }
         }
         
@@ -5993,106 +7488,7 @@ async function handleSelectionInternal(
     }
 }
 
-async function finalizeGeneratedFragments(
-  editor: vscode.TextEditor,
-  fragmentIds: string[],
-  generation: GeneratedFragmentResult
-): Promise<void> {
-  const currentDocument = editor.document;
-  const currentFileUri = currentDocument.uri;
-  const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
+// REMOVED: Old finalizeGeneratedFragments function - replaced by unified version
 
-  const target: OutputTarget | undefined = rememberedSourceUri
-    ? { type: 'sourceFile', uri: rememberedSourceUri }
-    : await showOutputTargetQuickPick(currentDocument);
-
-  if (!target) {
-    vscode.window.showInformationMessage('Kahua: Generation cancelled');
-    setGenerationStatus('Generation cancelled', true);
-    return;
-  }
-
-  // Use freshly extracted tokens from generation, not cached ones
-  const affectingTokens = generation.extractedTokens || injectionAffectingTokens.get(currentFileUri.toString());
-
-  switch (target.type) {
-    case 'currentFile': {
-      const currentFileResults = await insertXmlIntoFile(
-        target.uri,
-        generation.generatedXml,
-        target.insertionStrategy,
-        generation.fragmentDefinition,
-        affectingTokens,
-        generation.tokenDefinitions
-      );
-      await openInjectionReport(currentFileResults, target.uri, generation.generatedXml);
-      vscode.window.showInformationMessage(
-        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
-      );
-      setGenerationStatus('Inserted fragments into current file', true);
-      break;
-    }
-
-    case 'sourceFile': {
-      const sourceFileResults = await insertXmlIntoFile(
-        target.uri,
-        generation.generatedXml,
-        'smart',
-        generation.fragmentDefinition,
-        affectingTokens,
-        generation.tokenDefinitions
-      );
-      const sourceFileName = getWorkspaceRelativePath(target.uri);
-      await openInjectionReport(sourceFileResults, target.uri, generation.generatedXml);
-      vscode.window.showInformationMessage(
-        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
-      );
-      setGenerationStatus(`Inserted fragments into ${sourceFileName}`, true);
-      break;
-    }
-
-    case 'selectFile': {
-      const selectFileResults = await insertXmlIntoFile(
-        target.uri,
-        generation.generatedXml,
-        target.insertionStrategy ?? 'smart',
-        generation.fragmentDefinition,
-        affectingTokens,
-        generation.tokenDefinitions
-      );
-      const fileName = getWorkspaceRelativePath(target.uri);
-      await openInjectionReport(selectFileResults, target.uri, generation.generatedXml);
-      vscode.window.showInformationMessage(
-        `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
-      );
-      setGenerationStatus(`Inserted fragments into ${fileName}`, true);
-      break;
-    }
-
-    case 'newEditor': {
-      const newDocument = await vscode.workspace.openTextDocument({
-        content: generation.generatedXml,
-        language: 'xml'
-      });
-      await vscode.window.showTextDocument(newDocument, {
-        viewColumn: vscode.ViewColumn.Beside,
-        preview: false
-      });
-      vscode.window.showInformationMessage(
-        `Kahua: Generated fragments for ${fragmentIds.join(', ')} opened in new editor`
-      );
-      setGenerationStatus('Opened fragments in new editor', true);
-      break;
-    }
-
-    case 'clipboard': {
-      await vscode.env.clipboard.writeText(generation.generatedXml);
-      vscode.window.showInformationMessage(
-        `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
-      );
-      setGenerationStatus('Fragments copied to clipboard', true);
-      break;
-    }
-  }
-}
+// Old function body removed
 

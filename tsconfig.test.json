@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out",
+    "module": "commonjs",
+    "target": "es2022",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node", "mocha", "@types/vscode"]
+  },
+  "include": [
+    "src/extension.ts",
+    "src/panels/**/*",
+    "src/utilities/**/*", 
+    "src/webview/**/*",
+    "src/test/runTest.ts",
+    "src/test/suite/simple.test.ts",
+    "src/test/suite/baseapp-config.test.ts",
+    "src/test/suite/smart-injection.test.ts",
+    "src/test/suite/hierarchical-injection.test.ts",
+    "src/test/suite/document-type-detection.test.ts",
+    "src/test/suite/entity-matching.test.ts"
+  ],
+  "exclude": ["node_modules", "out"]
+}

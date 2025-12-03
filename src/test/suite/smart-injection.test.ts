@@ -161,7 +161,7 @@ suite('Smart Injection Resolution Tests', () => {
         }
       ];
 
-      const extractedValues = {
+      const extractedValues: { [key: string]: string } = {
         appname: 'kahua_aec_rfi_extension',
         entity: 'Field',
         name: 'TestField'

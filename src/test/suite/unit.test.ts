@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { toPascalCase, toTitleCase, parseTokenDefinition, simpleHash, compileTemplate, renderTemplate, evaluateExpression, splitIntoGroups, getTokenValues, applyInjectionPathTemplate } from '../../extension';
+import { toPascalCase, toTitleCase, parseTokenDefinition, simpleHash, compileTemplate, renderTemplate, evaluateExpression, splitIntoGroups, getTokenValues, applyInjectionPathTemplate, collectMissingRequiredTokens, buildRowTokenDataFromRequest, buildAttributeDisplayInfo } from '../../extension';
 
 suite('Kahua Attribute Generator Unit Tests', () => {
 
@@ -80,6 +80,190 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				assert.strictEqual(result[1].name, 'type');
 				assert.strictEqual(result[1].defaultValue, 'TextBox');
 				assert.strictEqual(result[2].name, 'label');
+			});
+
+			test('should mark tokens with ! as required', () => {
+				const result = parseTokenDefinition('name!,type:Text,label');
+				assert.strictEqual(result[0].name, 'name');
+				assert.strictEqual(result[0].required, true);
+				assert.strictEqual(result[1].required, false);
+			});
+		});
+
+		suite('collectMissingRequiredTokens', () => {
+			test('identifies missing values for required tokens', () => {
+				const tokens = parseTokenDefinition('name!,type');
+				const missing = collectMissingRequiredTokens(tokens, tokenName => tokenName === 'name' ? '' : 'value');
+				assert.deepStrictEqual(missing, ['name']);
+			});
+
+			test('returns empty array when all required tokens are provided', () => {
+				const tokens = parseTokenDefinition('name!,type');
+				const missing = collectMissingRequiredTokens(tokens, () => 'value');
+				assert.deepStrictEqual(missing, []);
+			});
+		});
+
+		suite('buildRowTokenDataFromRequest validation', () => {
+			test('throws when required header token is missing', () => {
+				const request: any = {
+					tokenData: {
+						headerTokens: parseTokenDefinition('appname!'),
+						tableTokens: [],
+						extractedTokens: new Map<string, string>()
+					},
+					dataRows: [],
+					selectedFragmentDefs: []
+				};
+
+				assert.throws(
+					() => buildRowTokenDataFromRequest(request),
+					/Missing required header tokens: appname/
+				);
+			});
+
+			test('throws when a row omits a required table token', () => {
+				const request: any = {
+					tokenData: {
+						headerTokens: parseTokenDefinition('appname'),
+						tableTokens: parseTokenDefinition('name!,type'),
+						extractedTokens: new Map<string, string>([['appname', 'TestApp']])
+					},
+					dataRows: [
+						{ name: '', type: 'Text' }
+					],
+					selectedFragmentDefs: []
+				};
+
+				assert.throws(
+					() => buildRowTokenDataFromRequest(request),
+					/Row 1: Missing required tokens/
+				);
+			});
+
+			test('returns row data when all required tokens are present', () => {
+				const request: any = {
+					tokenData: {
+						headerTokens: parseTokenDefinition('appname!'),
+						tableTokens: parseTokenDefinition('name!,type'),
+						extractedTokens: new Map<string, string>([['appname', 'TestApp']])
+					},
+					dataRows: [
+						{ name: 'Field1', type: 'Text' }
+					],
+					selectedFragmentDefs: []
+				};
+
+				const result = buildRowTokenDataFromRequest(request);
+				assert.strictEqual(result.length, 1);
+				assert.strictEqual(result[0].raw.appname, 'TestApp');
+				assert.strictEqual(result[0].raw.name, 'Field1');
+			});
+		});
+
+		suite('buildAttributeDisplayInfo', () => {
+			const hints = [
+				{ segmentIndex: 1, attributes: ['Id'] },
+				{ segmentIndex: 3, attributes: ['Name', 'Id'] }
+			];
+
+			const pathSegments = ['App', 'DataStore', 'Tables', 'Table', 'Columns'];
+
+			function makeElement(tag: string, attributes: Record<string, string>, line: number): any {
+				return {
+					tagName: tag,
+					attributes,
+					line,
+					column: 0,
+					children: [],
+					parent: undefined,
+					path: tag
+				};
+			}
+
+			function buildTarget(dataStoreAttrs: Record<string, string>, tableAttrs: Record<string, string>): any {
+				const app = makeElement('App', {}, 1);
+				const dataStore = makeElement('DataStore', dataStoreAttrs, 2);
+				const tables = makeElement('Tables', {}, 3);
+				const table = makeElement('Table', tableAttrs, 4);
+				const columns = makeElement('Columns', {}, 5);
+
+				app.children.push(dataStore);
+				dataStore.parent = app;
+				dataStore.children.push(tables);
+				tables.parent = dataStore;
+				tables.children.push(table);
+				table.parent = tables;
+				table.children.push(columns);
+				columns.parent = table;
+
+				return {
+					tagName: 'Columns',
+					xmlNodeName: 'Columns',
+					openTagLine: 5,
+					closeTagLine: 5,
+					lastChildLine: 5,
+					indentation: '',
+					isSelfClosing: false,
+					context: '',
+					injectionPath: '',
+					attributes: columns.attributes,
+					nameAttributeValue: undefined,
+					enrichedPath: '',
+					xpathPath: '',
+					element: columns,
+					attributeDisplayHints: hints,
+					pathSegments
+				};
+			}
+
+			test('uses table Name value when available', () => {
+				const target = buildTarget({ Id: 'RFIs' }, { Name: 'kahua_AEC_RFI.RFI' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, 'kahua_AEC_RFI.RFI (Line 6)');
+				assert.strictEqual(info?.detail, 'App/DataStore (RFIs)/Tables/Table (kahua_AEC_RFI.RFI)/Columns');
+			});
+
+			test('omits DataStore when configured attribute missing', () => {
+				const target = buildTarget({ Name: 'RFIs' }, { Name: 'kahua_AEC_RFI.RFI' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, 'kahua_AEC_RFI.RFI (Line 6)');
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table (kahua_AEC_RFI.RFI)/Columns');
+			});
+
+			test('falls back to table attributes when DataStore has none', () => {
+				const target = buildTarget({}, { Name: 'kahua_AEC_RFI.RFI' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, 'kahua_AEC_RFI.RFI (Line 6)');
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table (kahua_AEC_RFI.RFI)/Columns');
+			});
+
+			test('falls back to DataStore value when table lacks required attributes', () => {
+				const target = buildTarget({ Id: 'RFIs' }, { });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, 'RFIs (Line 6)');
+				assert.strictEqual(info?.detail, 'App/DataStore (RFIs)/Tables/Table/Columns');
+			});
+
+			test('falls back to line when no configured attributes exist', () => {
+				const target = buildTarget({ Name: 'RFIs' }, { Label: 'Custom' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
+			});
+
+			test('uses line when table has unsupported attributes but DataStore does not', () => {
+				const target = buildTarget({}, { Label: 'Custom' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
+			});
+
+			test('uses line when no attributes are available anywhere', () => {
+				const target = buildTarget({}, {});
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
 			});
 		});
 	});
@@ -256,6 +440,8 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 	});
 
 	suite('Template Rendering Functions', () => {
+		// TODO: Add template rendering tests
+	});
 
 	suite('Helper Functions', () => {
 		suite('splitIntoGroups', () => {
