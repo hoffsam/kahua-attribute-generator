@@ -111,3 +111,4 @@ function diagnoseIssue() {
 simulateMenuVisibility();
 simulateDefaultDocumentTypes();
 diagnoseIssue();
+

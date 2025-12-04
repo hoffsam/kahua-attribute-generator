@@ -140,3 +140,4 @@ if (allPassed) {
 
 console.log('');
 console.log('Next step: Test in actual VS Code by opening kahua_AEC_RFI.xml and right-clicking');
+

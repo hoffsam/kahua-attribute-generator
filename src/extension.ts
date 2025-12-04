@@ -27,6 +27,7 @@ interface TokenReadPath {
   attribute?: string;
   affectsInjection?: boolean;
   injectionPathTemplate?: string;
+  attributeMatchOrderForInjection?: AppMatchStrategy[];
 }
 
 /**
@@ -493,7 +494,7 @@ interface CompiledTemplate {
 /**
  * Insertion strategy for XML content
  */
-type InsertionStrategy = 'smart' | 'cursor';
+type InsertionStrategy = 'smart';
 
 /**
  * Result of an injection operation
@@ -548,7 +549,8 @@ const DEFAULT_ELEMENT_DISPLAY_CONFIG: ElementDisplayConfig = {
   exclusions: ['App'],
   overrides: {
     Table: ['EntityDefName', 'Name'],
-    ViewDef: ['DisplayName', 'Name']
+    ViewDef: ['DisplayName', 'Name'],
+    Log: ['Label', 'Name']
   }
 };
 
@@ -569,6 +571,58 @@ function getResolvedElementDisplayConfig(): ElementDisplayConfig {
     exclusions: configured.exclusions?.length ? configured.exclusions : defaultClone.exclusions,
     overrides: configured.overrides ? configured.overrides : defaultClone.overrides
   };
+}
+
+type AppMatchStrategy = 'name' | 'extends' | 'any';
+
+interface SmartInjectionResolvedConfig {
+  appMatchOrder: AppMatchStrategy[];
+}
+
+const DEFAULT_SMART_INJECTION_CONFIG: SmartInjectionResolvedConfig = {
+  appMatchOrder: ['name', 'extends', 'any']
+};
+
+let smartInjectionConfigOverride: SmartInjectionResolvedConfig | undefined;
+
+function getSmartInjectionConfig(): SmartInjectionResolvedConfig {
+  if (smartInjectionConfigOverride) {
+    return smartInjectionConfigOverride;
+  }
+
+  const config = getKahuaConfig(currentResource());
+  const tokenDefs = config.get<TokenNameDefinition[]>('tokenNameDefinitions') ?? [];
+  for (const tokenDef of tokenDefs) {
+    if (!tokenDef.tokenReadPaths) {
+      continue;
+    }
+    for (const readPath of Object.values(tokenDef.tokenReadPaths)) {
+      if (!readPath) continue;
+      const order = Array.isArray(readPath.attributeMatchOrderForInjection)
+        ? readPath.attributeMatchOrderForInjection.filter(
+            (value): value is AppMatchStrategy =>
+              value === 'name' || value === 'extends' || value === 'any'
+          )
+        : [];
+      if (order.length > 0) {
+        return { appMatchOrder: order };
+      }
+    }
+  }
+
+  return DEFAULT_SMART_INJECTION_CONFIG;
+}
+
+export function __setSmartInjectionConfigOverride(config?: SmartInjectionResolvedConfig) {
+  smartInjectionConfigOverride = config;
+}
+
+export function __testSmartInjectionResolution(
+  sectionName: string,
+  targets: any[],
+  affectingTokens?: Map<string, string>
+): XmlTargetSection | undefined {
+  return trySmartInjectionResolution(sectionName, targets as XmlTargetSection[], affectingTokens);
 }
 
 function getElementDisplayName(
@@ -1881,7 +1935,7 @@ async function showOutputTargetQuickPick(currentDocument?: vscode.TextDocument):
     items.push({
       label: `$(file) Current File`,
       description: getWorkspaceRelativePath(currentFileUri),
-      detail: 'Insert into the current XML file at cursor position',
+      detail: 'Insert into the current XML file using smart injection',
       alwaysShow: true
     });
   }
@@ -1946,8 +2000,8 @@ async function showOutputTargetQuickPick(currentDocument?: vscode.TextDocument):
 }
 
 /**
- * Inserts XML content into a file with smart section-aware insertion or cursor-based insertion
- * Returns injection results for reporting
+ * Inserts XML content into a file with smart section-aware insertion.
+ * Returns injection results for reporting.
  */
 async function insertXmlIntoFile(
   uri: vscode.Uri,
@@ -1979,23 +2033,6 @@ async function insertXmlIntoFile(
       preserveFocus: false,
       preview: false
     });
-  }
-
-  if (!strategy || strategy === 'cursor') {
-    // Simple insertion at cursor position
-    const position = editor.selection.active;
-    const success = await editor.edit(editBuilder => {
-      editBuilder.insert(position, '\n' + content + '\n');
-    });
-
-    if (!success) {
-      throw new Error(`Kahua: Failed to insert content into ${uri.fsPath}. Please ensure the file is writable and try again.`);
-    }
-
-    const lines = content.split('\n').length;
-    const newPosition = position.translate(lines + 2, 0);
-    editor.selection = new vscode.Selection(newPosition, newPosition);
-    return []; // No tracking for cursor mode
   }
 
   // Smart insertion - get injection paths from the fragment definition
@@ -2084,34 +2121,6 @@ async function insertXmlIntoFile(
   console.log('[DEBUG] Target sections:', targetSections.map(s => s.tagName));
   const matches = matchSectionsToTargets(generatedSections, targetSections);
   console.log('[DEBUG] Section matches:', Array.from(matches.entries()).map(([name, targets]) => ({name, targets: targets.map(t => t.tagName)})));
-
-  // Determine insertion strategy
-  let insertionStrategy: InsertionStrategy;
-
-  if (strategy === 'smart') {
-    // Strategy already determined to be smart (e.g., source file or selected file)
-    insertionStrategy = 'smart';
-  } else {
-    // Prompt user for strategy (e.g., current file where cursor position is an option)
-    const selectedStrategy = await showInsertionStrategyPick(
-      Array.from(matches.values()).some(m => m.length > 0)
-    );
-
-    if (!selectedStrategy) {
-      return []; // User cancelled
-    }
-
-    insertionStrategy = selectedStrategy;
-  }
-
-  if (insertionStrategy === 'cursor') {
-    // Fall back to cursor insertion
-    const position = editor.selection.active;
-    await editor.edit(editBuilder => {
-      editBuilder.insert(position, '\n' + content + '\n');
-    });
-    return [];
-  }
 
   // For sections with multiple targets, prompt user to select which to use
   const selectedTargets = new Map<string, XmlTargetSection[]>();
@@ -2336,10 +2345,24 @@ function parseTargetXmlStructure(
     
     // Use hierarchical XPath matching - respects exact path structure
     let candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+    let effectiveXpath = finalXpath;
+    if (candidates.length === 0 && finalXpath.includes('[')) {
+      const relaxedPath = removeAttributePredicates(finalXpath);
+      if (relaxedPath !== finalXpath) {
+        debugLog(`[DEBUG] No candidates found for ${finalXpath}, relaxing attribute predicates -> ${relaxedPath}`);
+        const relaxedCandidates = findElementsByHierarchicalXPath(xmlContext, relaxedPath, config, document);
+        if (relaxedCandidates.length > 0) {
+          candidates = relaxedCandidates;
+          effectiveXpath = relaxedPath;
+          debugLog(`[DEBUG] Found ${relaxedCandidates.length} candidates after relaxing predicates`);
+        }
+      }
+    }
     if (candidates.length === 0 && templateApplied.applied) {
-      debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath} after template substitution – falling back to original xpath: ${xpath}`);
+      debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath} after template substitution - falling back to original xpath: ${xpath}`);
       finalXpath = xpath;
       candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
+      effectiveXpath = finalXpath;
     }
     debugLog(`[DEBUG] Found ${candidates.length} candidates via hierarchical XPath for section "${sectionName}"`);
     
@@ -2382,7 +2405,7 @@ function parseTargetXmlStructure(
         indentation,
         isSelfClosing,
         context: candidate.pathSoFar,
-        injectionPath: finalXpath,
+        injectionPath: effectiveXpath,
         attributes: element.attributes,
         nameAttributeValue: extractNameAttribute(element, config),
         enrichedPath: candidate.pathSoFar,
@@ -2610,7 +2633,7 @@ async function processHierarchicalInjectionGroups(
         const displayName = container.attributes[groupConfig.groupDisplayAttribute] || container.tagName;
         return {
           label: displayName,
-          detail: `XPath: ${container.enrichedPath}`,
+          detail: `${container.enrichedPath}`,
           container
         };
       });
@@ -3691,7 +3714,16 @@ async function readTokenValuesFromXml(
 
     switch (readPath.type) {
       case 'attribute':
-        value = extractAttributeValue(document, readPath.path, xmlContext);
+        const attributePaths = getAttributeCandidatePaths(
+          readPath.path,
+          readPath.attributeMatchOrderForInjection
+        );
+        for (const candidatePath of attributePaths) {
+          value = extractAttributeValue(document, candidatePath, xmlContext);
+          if (value && value.trim()) {
+            break;
+          }
+        }
         break;
 
       case 'text':
@@ -3827,6 +3859,12 @@ function trySmartInjectionResolution(
 
   const appname = affectingTokens.get('appname');
   const entity = affectingTokens.get('entity');
+  const smartConfig = getSmartInjectionConfig();
+  const matchBuckets: Record<AppMatchStrategy, XmlTargetSection[]> = {
+    name: [],
+    extends: [],
+    any: []
+  };
   
   debugLog(`[DEBUG] Smart injection resolution: section=${sectionName}, appname=${appname}, entity=${entity}, targets=${targets.length}`);
   console.log(`[KAHUA] Smart injection: section="${sectionName}", appname="${appname}", entity="${entity}", ${targets.length} targets`);
@@ -3871,23 +3909,57 @@ function trySmartInjectionResolution(
   // For EntityDef-based injection (like attributes into App structure)
   if (sectionName.toLowerCase().includes('attribute') && entity) {
     for (const target of targets) {
-      // Look for EntityDef with matching Name attribute
-      if (target.injectionPath && target.injectionPath.includes('EntityDef')) {
-        const pathHasEntityName = target.injectionPath.includes(`@Name="${entity}"`) ||
-                                  target.injectionPath.includes(`@Name='${entity}'`) ||
-                                  target.injectionPath.includes(`Name="${entity}"`);
-        
-        if (pathHasEntityName) {
-          debugLog(`[DEBUG] Found matching EntityDef target: ${target.injectionPath}`);
-          return target;
-        }
-        
-        // Check attributes
-        if (target.attributes && target.attributes['Name'] === entity) {
-          debugLog(`[DEBUG] Found matching EntityDef target by attributes: Name=${target.attributes['Name']}`);
-          return target;
-        }
+      if (!target.injectionPath || !target.injectionPath.includes('EntityDef')) {
+        continue;
       }
+
+      const pathHasEntityName =
+        target.injectionPath.includes(`@Name="${entity}"`) ||
+        target.injectionPath.includes(`@Name='${entity}'`) ||
+        target.injectionPath.includes(`Name="${entity}"`);
+
+      const attributeMatches = target.attributes && target.attributes['Name'] === entity;
+      if (!pathHasEntityName && !attributeMatches) {
+        continue;
+      }
+
+      let bucket: AppMatchStrategy | 'skip' = 'any';
+      const rootApp = findRootAppElement(target.element);
+
+      if (appname && rootApp) {
+        const rootName = rootApp.attributes?.['Name'];
+        const rootExtends = rootApp.attributes?.['Extends'];
+
+        if (rootName === appname) {
+          bucket = 'name';
+        } else if (rootExtends === appname) {
+          bucket = 'extends';
+        } else {
+          bucket = 'skip';
+        }
+      } else if (!appname) {
+        bucket = 'any';
+      }
+
+      if (bucket === 'skip') {
+        debugLog(
+          `[DEBUG] Skipping EntityDef target because App root doesn't match (${rootApp?.attributes?.['Name']}/${rootApp?.attributes?.['Extends']} vs ${appname})`
+        );
+        continue;
+      }
+
+      matchBuckets[bucket].push(target);
+    }
+
+    for (const preference of smartConfig.appMatchOrder) {
+      if (matchBuckets[preference].length > 0) {
+        debugLog(`[DEBUG] Selected EntityDef target via preference "${preference}"`);
+        return matchBuckets[preference][0];
+      }
+    }
+
+    if (matchBuckets.any.length > 0 && !smartConfig.appMatchOrder.includes('any')) {
+      debugLog('[DEBUG] EntityDef matches available but filtered out by configuration');
     }
   }
   
@@ -3898,129 +3970,96 @@ function trySmartInjectionResolution(
   return undefined;
 }
 
+function findRootAppElement(element?: SaxElement): SaxElement | undefined {
+  let current = element;
+  while (current && current.parent) {
+    current = current.parent;
+  }
+  return current && current.tagName === 'App' ? current : undefined;
+}
+
 /**
  * Shows a quick pick for selecting target locations when there are multiple matches
  * Returns the selected targets, or undefined if cancelled
  */
+type TargetSelectionItem = vscode.QuickPickItem & {
+  target: XmlTargetSection | null;
+  picked: boolean;
+};
+
 async function selectTargetsFromMultiple(
-  sectionName: string,
-  targets: XmlTargetSection[],
-  affectingTokens?: Map<string, string>
-): Promise<XmlTargetSection[] | undefined> {
-  if (targets.length === 0) {
-    return undefined;
-  }
-
-  if (targets.length === 1) {
-    return targets;
-  }
-
-  // Smart auto-resolution: try to automatically select the correct target
-  // when we have enough information to uniquely identify it
-  const smartSelected = trySmartInjectionResolution(sectionName, targets, affectingTokens);
-  if (smartSelected) {
-    debugLog(`[DEBUG] Smart injection auto-resolved to: ${smartSelected.context} (${smartSelected.injectionPath})`);
-    console.log(`[KAHUA] 🎯 Smart injection: Auto-selected injection target for "${sectionName}" based on template tokens`);
-    return [smartSelected];
-  }
-
-  const items = targets.map((target, index) => {
+    sectionName: string,                                                                                                                                                                                                                                                                                                                                                                                 
+    targets: XmlTargetSection[],                                                                                                                                                                                                                                                                                                                                                                         
+    affectingTokens?: Map<string, string>                                                                                                                                                                                                                                                                                                                                                                
+  ): Promise<XmlTargetSection[] | undefined> {
+    if (targets.length === 0) {                                                                                                                                                                                                                                                                                                                                                                          
+      return undefined;                                                                                                                                                                                                                                                                                                                                                                                  
+    }
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    if (targets.length === 1) {                                                                                                                                                                                                                                                                                                                                                                          
+      return targets;                                                                                                                                                                                                                                                                                                                                                                                    
+    }                                                                                                                                                                                                                                                                                                                                                                                                    
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    const smartSelected = trySmartInjectionResolution(sectionName, targets, affectingTokens);                                                                                                                                                                                                                                                                                                            
+    if (smartSelected) {                                                                                                                                                                                                                                                                                                                                                                                 
+      debugLog(`[DEBUG] Smart injection auto-resolved to: ${smartSelected.context} (${smartSelected.injectionPath})`);                                                                                                                                                                                                                                                                                   
+      console.log(`[KAHUA] Smart injection: Auto-selected injection target for "${sectionName}" based on template tokens`);                                                                                                                                                                                                                                                                              
+      return [smartSelected];                                                                                                                                                                                                                                                                                                                                                                            
+    }                                                                                                                                                                                                                                                                                                                                                                                                    
+                                                                                                                                                                                                                                                                                                                                                                                                         
+  const items: TargetSelectionItem[] = targets.map(target => {
+    const displayInfo = buildAttributeDisplayInfo(target);
     const lineInfo = `Line ${target.openTagLine + 1}`;
-    let label = lineInfo;
-    let description = target.context && target.context !== lineInfo ? target.context : undefined;
-    
-    // Enhanced labeling for better disambiguation
-    if (target.xmlNodeName === 'HubDef' && target.nameAttributeValue) {
-      label = `HubDef: ${target.nameAttributeValue} (${lineInfo})`;
-    } else if (target.nameAttributeValue) {
-      label = `${target.nameAttributeValue} (${lineInfo})`;
-    }
-    
-    // Add path context to label for better identification
-    if (description) {
-      // Extract the most relevant parent context for the label
-      const pathParts = description.split('/');
-      if (pathParts.length > 2) {
-        // For EntityDef paths (correct target for Attributes), highlight prominently
-        if (description.includes('EntityDefs') || description.includes('EntityDef')) {
-          const entityIndex = pathParts.findIndex(part => part.includes('EntityDef'));
-          if (entityIndex >= 0) {
-            const contextPath = pathParts.slice(entityIndex - 1, entityIndex + 2).join('/');
-            label = `🎯 ENTITY: ${contextPath} (${lineInfo}) ← RECOMMENDED`;
-          }
-        }
-        // For DataStore paths, highlight the DataStore context
-        else if (description.includes('DataStore')) {
-          const dataStoreIndex = pathParts.findIndex(part => part.includes('DataStore'));
-          if (dataStoreIndex >= 0 && dataStoreIndex < pathParts.length - 2) {
-            const contextPath = pathParts.slice(dataStoreIndex, dataStoreIndex + 3).join('/');
-            label = `📊 DataStore: ${contextPath} (${lineInfo})`;
-          }
-        }
-        // For Workflow paths, highlight as potentially incorrect
-        else if (description.includes('WorkflowDef')) {
-          const workflowIndex = pathParts.findIndex(part => part.includes('WorkflowDef'));
-          if (workflowIndex >= 0 && workflowIndex < pathParts.length - 2) {
-            const contextPath = pathParts.slice(workflowIndex, workflowIndex + 3).join('/');
-            label = `⚠️  Workflow: ${contextPath} (${lineInfo}) ← LIKELY WRONG`;
-          }
-        }
-        // For DataSources paths, mark as wrong for Attributes
-        else if (description.includes('DataSources') || description.includes('App.DataSources')) {
-          const dataSourceIndex = pathParts.findIndex(part => part.includes('DataSource'));
-          if (dataSourceIndex >= 0) {
-            const contextPath = pathParts.slice(dataSourceIndex - 1, dataSourceIndex + 3).join('/');
-            label = `❌ DataSource: ${contextPath} (${lineInfo}) ← WRONG TARGET`;
-          }
-        }
-        // For other paths, show the last 2-3 relevant parts
-        else {
-          const contextPath = pathParts.slice(-3).join('/');
-          label = `📁 Other: ${contextPath} (${lineInfo})`;
-        }
-      }
-    }
-
-    return {
+    const label = displayInfo.label || lineInfo;
+    const detail = displayInfo.detail || target.injectionPath || target.context;
+    const item: TargetSelectionItem = {
       label,
-      description,
-      detail: target.injectionPath,
-      target: target,
+      description: undefined,
+      detail,
+      target,
       picked: false
     };
+    return item;
   });
-
-  items.push({
-    label: '$(check-all) Select All',
-    description: `Inject into all ${targets.length} locations`,
-    detail: 'Apply to all matching targets',
-    target: null as any,
-    picked: false
-  });
-
-  const selected = await vscode.window.showQuickPick(items, {
-    placeHolder: `Multiple targets found for "${sectionName}". Select target location(s)`,
-    title: 'Kahua: Select Injection Target',
-    canPickMany: true,
-    ignoreFocusOut: true
-  });
-
-  if (!selected || selected.length === 0) {
-    return undefined;
-  }
-
-  const selectAllChosen = selected.some(s => s.label.includes('Select All'));
-
-  if (selectAllChosen) {
-    return targets;
-  }
-
-  return selected.map(s => s.target).filter(t => t !== null);
-}
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    items.push({                                                                                                                                                                                                                                                                                                                                                                                         
+      label: '$(check-all) Select All',                                                                                                                                                                                                                                                                                                                                                                  
+      description: `Inject into all ${targets.length} locations`,                                                                                                                                                                                                                                                                                                                                        
+      detail: 'Apply to all matching targets',                                                                                                                                                                                                                                                                                                                                                           
+      target: null as any,                                                                                                                                                                                                                                                                                                                                                                               
+      picked: false                                                                                                                                                                                                                                                                                                                                                                                      
+    });                                                                                                                                                                                                                                                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    const selected = await vscode.window.showQuickPick(items, {                                                                                                                                                                                                                                                                                                                                          
+      placeHolder: `Multiple targets found for "${sectionName}". Select target location(s)`,                                                                                                                                                                                                                                                                                                             
+      title: 'Kahua: Select Injection Target',                                                                                                                                                                                                                                                                                                                                                           
+      canPickMany: true,                                                                                                                                                                                                                                                                                                                                                                                 
+      ignoreFocusOut: true                                                                                                                                                                                                                                                                                                                                                                               
+    });                                                                                                                                                                                                                                                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    if (!selected || selected.length === 0) {                                                                                                                                                                                                                                                                                                                                                            
+      return undefined;                                                                                                                                                                                                                                                                                                                                                                                  
+    }                                                                                                                                                                                                                                                                                                                                                                                                    
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    const selectAllChosen = selected.some(s => s.label.includes('Select All'));                                                                                                                                                                                                                                                                                                                          
+    if (selectAllChosen) {                                                                                                                                                                                                                                                                                                                                                                               
+      return targets;                                                                                                                                                                                                                                                                                                                                                                                    
+    }                                                                                                                                                                                                                                                                                                                                                                                                    
+                                                                                                                                                                                                                                                                                                                                                                                                         
+    return selected.map(s => s.target).filter(t => t !== null);                                                                                                                                                                                                                                                                                                                                          
+  }                                                                    
 
 export function buildAttributeDisplayInfo(target: XmlTargetSection): { label?: string; detail?: string } {
+  const lineInfo = `Line ${target.openTagLine + 1}`;
+
   if (!target.pathSegments || !target.element) {
-    return {};
+    const fallbackLabel = target.nameAttributeValue
+      ? `${target.nameAttributeValue} (${lineInfo})`
+      : lineInfo;
+    return {
+      label: fallbackLabel,
+      detail: target.context || target.injectionPath
+    };
   }
 
   const segments = target.pathSegments;
@@ -4046,20 +4085,27 @@ export function buildAttributeDisplayInfo(target: XmlTargetSection): { label?: s
     return attrValue ? `${base} (${attrValue})` : base;
   });
 
+  const detailText = detailParts.length > 0
+    ? detailParts.join('/')
+    : (target.context || target.injectionPath);
+
   if (valuesBySegment.size === 0) {
+    const fallbackLabel = target.nameAttributeValue
+      ? `${target.nameAttributeValue} (${lineInfo})`
+      : lineInfo;
     return {
-      detail: detailParts.join('/')
+      label: fallbackLabel,
+      detail: detailText
     };
   }
 
-  const lineInfo = `Line ${target.openTagLine + 1}`;
   const sortedIndices = Array.from(valuesBySegment.keys()).sort((a, b) => b - a);
   const preferredValue = valuesBySegment.get(sortedIndices[0]);
   const label = preferredValue ? `${preferredValue} (${lineInfo})` : undefined;
 
   return {
     label,
-    detail: detailParts.join('/')
+    detail: detailText
   };
 }
 
@@ -4124,42 +4170,6 @@ function matchSectionsToTargets(
   }
 
   return matches;
-}
-
-/**
- * Shows a quick pick menu for selecting insertion strategy
- */
-async function showInsertionStrategyPick(
-  hasMatchableSections: boolean
-): Promise<InsertionStrategy | undefined> {
-  if (!hasMatchableSections) {
-    // No smart options available, just use cursor
-    return 'cursor';
-  }
-
-  const items: vscode.QuickPickItem[] = [
-    {
-      label: `$(symbol-method) Smart Insertion`,
-      detail: 'Automatically insert fragments into matching XML sections',
-      alwaysShow: true
-    },
-    {
-      label: `$(edit) Cursor Position`,
-      detail: 'Insert all content at current cursor position',
-      alwaysShow: true
-    }
-  ];
-
-  const selected = await vscode.window.showQuickPick(items, {
-    placeHolder: 'How would you like to insert the XML?',
-    title: 'Kahua: Choose Insertion Method'
-  });
-
-  if (!selected) {
-    return undefined;
-  }
-
-  return selected.label.includes('Smart') ? 'smart' : 'cursor';
 }
 
 /**
@@ -5583,13 +5593,6 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
       }
     }),
-    vscode.commands.registerCommand('kahua.generateAtCursor', async () => {
-      try {
-        await generateFromTemplateOrSnippetAtCursor();
-      } catch (error: unknown) {
-        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-      }
-    }),
     vscode.commands.registerCommand('kahua.injectIntoSourceFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || (!isTemplateDocument(editor.document) && !isSnippetDocument(editor.document))) {
@@ -5773,13 +5776,15 @@ function parseAttributeHintsFromPath(rawPath: string): {
   const rawSegments = rawPath.split('/').filter(part => part.length > 0);
   const hints: AttributeDisplayHint[] = [];
   const sanitizedSegments = rawSegments.map((segment, index) => {
-    const hintMatch = segment.match(/\((?:"[^"]+"(?:\|\"[^"]+\")*)\)\s*$/);
+    // Config strings may contain escaped quotes (\"), so normalize before parsing
+    const normalizedSegment = segment.replace(/\\"/g, '"');
+    const hintMatch = normalizedSegment.match(/\((?:"[^"]+"(?:\|"[^"]+")*)\)\s*$/);
     if (!hintMatch) {
-      return segment;
+      return normalizedSegment;
     }
 
     const hintContent = hintMatch[0];
-    const sanitizedSegment = segment.slice(0, segment.length - hintContent.length);
+    const sanitizedSegment = normalizedSegment.slice(0, normalizedSegment.length - hintContent.length);
     const attrList = hintContent
       .slice(1, -1)
       .split('|')
@@ -5801,6 +5806,55 @@ function parseAttributeHintsFromPath(rawPath: string): {
     segments: sanitizedSegments,
     hints
   };
+}
+
+export function removeAttributePredicates(path: string): string {
+  return path.replace(/\[.*?\]/g, '');
+}
+
+export function getAttributeCandidatePaths(
+  path: string,
+  matchOrder?: string[]
+): string[] {
+  const attrIndex = path.lastIndexOf('/@');
+  if (attrIndex === -1 || !matchOrder || matchOrder.length === 0) {
+    return [path];
+  }
+
+  const basePath = path.slice(0, attrIndex);
+  const defaultAttribute = path.slice(attrIndex + 2);
+  const normalizedOrder = matchOrder.filter(entry => typeof entry === 'string' && entry.trim().length > 0);
+  const candidates: string[] = [];
+  const seenAttributes = new Set<string>();
+
+  for (const raw of normalizedOrder) {
+    const entry = raw.trim();
+    if (entry.toLowerCase() === 'any') {
+      if (!seenAttributes.has(defaultAttribute)) {
+        candidates.push(`${basePath}/@${defaultAttribute}`);
+        seenAttributes.add(defaultAttribute);
+      }
+      continue;
+    }
+
+    if (seenAttributes.has(entry)) {
+      continue;
+    }
+
+    candidates.push(`${basePath}/@${entry}`);
+    seenAttributes.add(entry);
+  }
+
+  if (!seenAttributes.has(defaultAttribute)) {
+    candidates.push(path);
+  }
+
+  return candidates;
+}
+
+// Exposed for unit testing of attribute display parsing
+export function parseAttributeHintMetadata(path: string) {
+  return parseAttributeHintsFromPath(path);
 }
 
 /**
@@ -6924,87 +6978,6 @@ async function generateFromTemplateOrSnippet(target: OutputTarget): Promise<void
 }
 
 /**
- * Generates from template/snippet at cursor in any document
- */
-async function generateFromTemplateOrSnippetAtCursor(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    throw new Error('No active editor found.');
-  }
-
-  // Check if current document is a template/snippet
-  if (isTemplateDocument(editor.document) || isSnippetDocument(editor.document)) {
-    // Generate from current template/snippet at cursor
-    await generateFromTemplateOrSnippet({ type: 'currentFile', uri: editor.document.uri, insertionStrategy: 'cursor' });
-    return;
-  }
-
-  // Check if we have any open template/snippet documents
-  const openTemplateOrSnippet = vscode.workspace.textDocuments.find(doc => 
-    isTemplateDocument(doc) || isSnippetDocument(doc)
-  );
-
-  if (!openTemplateOrSnippet) {
-    vscode.window.showErrorMessage('No template or snippet document is currently open.');
-    return;
-  }
-
-  // If multiple template/snippet documents are open, let user select
-  const allTemplatesAndSnippets = vscode.workspace.textDocuments.filter(doc => 
-    isTemplateDocument(doc) || isSnippetDocument(doc)
-  );
-
-  let selectedDocument = openTemplateOrSnippet;
-  if (allTemplatesAndSnippets.length > 1) {
-    const items = allTemplatesAndSnippets.map(doc => ({
-      label: `${isTemplateDocument(doc) ? 'Template' : 'Snippet'}: ${doc.fileName}`,
-      description: getWorkspaceRelativePath(doc.uri),
-      document: doc
-    }));
-
-    const selected = await vscode.window.showQuickPick(items, {
-      placeHolder: 'Select template or snippet to generate from',
-      title: 'Kahua: Select Source'
-    });
-
-    if (!selected) {
-      return;
-    }
-
-    selectedDocument = selected.document;
-  }
-
-  // Generate from selected template/snippet into current document at cursor
-  const fragmentIds = inferFragmentIdsFromDocument(selectedDocument);
-  if (fragmentIds.length === 0) {
-    throw new Error('Could not determine which fragments the selected template/snippet uses.');
-  }
-
-  const tempEditor = await vscode.window.showTextDocument(selectedDocument, { preview: true, preserveFocus: true });
-  
-  const generationResult = await vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    title: "Generating XML fragments...",
-    cancellable: false
-  }, async (progress) => {
-    return await handleSelectionInternal(fragmentIds, tempEditor, progress);
-  });
-
-  if (!generationResult) {
-    return;
-  }
-
-  await finalizeGeneratedFragmentsWithTarget(tempEditor, fragmentIds, generationResult, { 
-    type: 'currentFile', 
-    uri: editor.document.uri, 
-    insertionStrategy: 'cursor' 
-  });
-
-  // Switch back to original editor
-  await vscode.window.showTextDocument(editor.document);
-}
-
-/**
  * Infers fragment IDs from a template or snippet document by looking at the header comment
  */
 function inferFragmentIdsFromDocument(document: vscode.TextDocument): string[] {
@@ -7187,11 +7160,7 @@ async function handleSelection(fragmentIds: string[]): Promise<void> {
 
   // Determine output target for old-style generation
   const currentDocument = editor.document;
-  const rememberedSourceUri = getRememberedSourceXmlUri(currentDocument);
-  
-  const target: OutputTarget | undefined = rememberedSourceUri
-    ? { type: 'sourceFile', uri: rememberedSourceUri }
-    : await showOutputTargetQuickPick(currentDocument);
+  const target = await showOutputTargetQuickPick(currentDocument);
 
   if (!target) {
     vscode.window.showInformationMessage('Kahua: Generation cancelled');
@@ -7492,3 +7461,7 @@ async function handleSelectionInternal(
 
 // Old function body removed
 
+
+export function parseXmlStringForTests(xml: string): SaxElement | null {
+  return XmlParsingService.parseXmlDocumentInternal(xml);
+}

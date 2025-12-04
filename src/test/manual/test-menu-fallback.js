@@ -109,3 +109,4 @@ console.log('- Shows menu for ANY XML file with <App> root element');
 console.log('- Works even if full document type detection fails');
 console.log('- Prevents menu regression when XML parsing has issues');
 console.log('- Lightweight regex check, no full XML parsing required');
+

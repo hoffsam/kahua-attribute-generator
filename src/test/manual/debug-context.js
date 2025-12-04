@@ -26,3 +26,4 @@ console.log('- Base App (App + !Extends + !App.Supplements):', hasAppRoot && !ha
 console.log('- Supplement (App + App.Supplements):', hasAppRoot && hasSupplements);
 
 console.log('\nShould detect as: Base App');
+

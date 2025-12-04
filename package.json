@@ -25,11 +25,10 @@
     "test": "npm run test:unit",
     "test:unit": "npm run test:smart-injection && npm run test:baseapp-config && npm run test:hierarchical && npm run test:menu-visibility && npm run test:unit-functions",
     "test:unit-functions": "echo 'Unit tests need VS Code environment - skipping for now. Use test:integration for full test coverage.'",
-    "test:smart-injection": "npx tsc src/test/suite/smart-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/smart-injection.test.js",
-    "test:baseapp-config": "npx tsc src/test/suite/baseapp-config.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/baseapp-config.test.js",
-    "test:hierarchical": "npx tsc src/test/suite/hierarchical-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --ui tdd out/test/suite/hierarchical-injection.test.js",
+    "test:smart-injection": "npx tsc src/test/suite/smart-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --require ./src/test/shims/vscode.js --ui tdd out/test/suite/smart-injection.test.js",
+    "test:baseapp-config": "npx tsc src/test/suite/baseapp-config.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --require ./src/test/shims/vscode.js --ui tdd out/test/suite/baseapp-config.test.js",
+    "test:hierarchical": "npx tsc src/test/suite/hierarchical-injection.test.ts --outDir out/test/suite --module commonjs --target es2022 --skipLibCheck --lib es2022,dom && npx mocha --require ./src/test/shims/vscode.js --ui tdd out/test/suite/hierarchical-injection.test.js",
     "test:menu-visibility": "echo 'Menu visibility tests require VS Code environment. Use npm run test:integration for full context tests.'",
-
     "test:menu-context": "node test-menu-context.js",
     "test:hierarchical-integration": "node src/test/hierarchical-integration.test.js",
     "test:integration": "npm run compile-tests && node ./out/test/runTest.js",
@@ -96,18 +95,13 @@
           "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         },
         {
-          "command": "kahua.generateAtCursor",
-          "group": "kahua@5",
-          "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
-        },
-        {
           "command": "kahua.injectIntoSourceFile",
-          "group": "kahua@6",
+          "group": "kahua@5",
           "when": "(kahua.isTemplateDocument || kahua.isSnippetDocument) && kahua.hasSourceFile"
         },
         {
           "command": "kahua.injectIntoFile",
-          "group": "kahua@7",
+          "group": "kahua@6",
           "when": "kahua.isTemplateDocument || kahua.isSnippetDocument"
         }
       ]
@@ -134,10 +128,6 @@
       {
         "command": "kahua.generateIntoNewEditor",
         "title": "Kahua: Generate into New Editor"
-      },
-      {
-        "command": "kahua.generateAtCursor",
-        "title": "Kahua: Generate at Cursor"
       },
       {
         "command": "kahua.injectIntoSourceFile",
@@ -334,7 +324,12 @@
               "tokenReadPaths": {
                 "appname": {
                   "type": "attribute",
-                  "path": "App/@Name"
+                  "path": "App/@Name",
+                  "attributeMatchOrderForInjection": [
+                    "Name",
+                    "Extends",
+                    "any"
+                  ]
                 },
                 "entity": {
                   "type": "selection",
@@ -417,6 +412,13 @@
                     "injectionPathTemplate": {
                       "type": "string",
                       "description": "Template for dynamic injection path. Use {value} as placeholder for the selected token value (e.g., 'EntityDefs/EntityDef[@Name='{value}']/Attributes')"
+                    },
+                    "attributeMatchOrderForInjection": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Optional list of attribute names to try (in order) when reading this value from XML. Useful when documents may use either Name or Extends; include \"any\" to fall back to the attribute specified in 'path'."
                     }
                   },
                   "required": [
@@ -456,10 +458,10 @@
                 "DataTags": "App/DataTags",
                 "LookupLists": "App/LookupLists",
                 "LookupList": "App/LookupLists",
-                "LogFields": "App/App.HubDefs/HubDef/HubDef.Logs/Log/Log.Fields",
+                "LogFields": "App/App.HubDefs/HubDef/HubDef.Logs/Log(\"Label\"|\"Name\")/Log.Fields",
                 "FieldDefs": "App/App.HubDefs/HubDef/HubDef.LogDef/LogDef.FieldDefs",
-                "DataStore": "App/DataStore(\\\"Id\\\")/Tables/Table[@EntityDefName='{appname}.{entity}'](\\\"Name\\\"|\\\"Id\\\")/Columns",  
-                "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef/ImportDef.Sheets/Sheet/Sheet.Columns"
+                "DataStore": "App/DataStore(\\\"Id\\\")/Tables/Table[@EntityDefName='{appname}.{entity}'](\"EntityDefName\"|\"Name\")/Columns",
+                "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef(\"Name\")/ImportDef.Sheets/Sheet(\"Name\")/Sheet.Columns"
               },
               "hierarchicalInjectionGroups": {
                 "HubDef": {

@@ -94,3 +94,4 @@ function testDocumentTypeDetection() {
 }
 
 testDocumentTypeDetection();
+

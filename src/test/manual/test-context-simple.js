@@ -83,3 +83,4 @@ if (hasAppRoot) {
 
 console.log(`Expected document type: ${expectedType}`);
 console.log(`Should show Kahua menu: ${expectedType !== null}`);
+

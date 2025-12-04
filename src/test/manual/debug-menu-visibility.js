@@ -54,3 +54,4 @@ console.log('   - Check extension activation timing');
 console.log('   - Verify context variables are being set correctly');
 console.log('   - Add debug logging to context detection functions');
 console.log('   - Test manual context variable setting');
+

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { toPascalCase, toTitleCase, parseTokenDefinition, simpleHash, compileTemplate, renderTemplate, evaluateExpression, splitIntoGroups, getTokenValues, applyInjectionPathTemplate, collectMissingRequiredTokens, buildRowTokenDataFromRequest, buildAttributeDisplayInfo } from '../../extension';
+import { toPascalCase, toTitleCase, parseTokenDefinition, simpleHash, compileTemplate, renderTemplate, evaluateExpression, splitIntoGroups, getTokenValues, applyInjectionPathTemplate, collectMissingRequiredTokens, buildRowTokenDataFromRequest, buildAttributeDisplayInfo, parseAttributeHintMetadata, getAttributeCandidatePaths } from '../../extension';
 
 suite('Kahua Attribute Generator Unit Tests', () => {
 
@@ -181,7 +181,11 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				};
 			}
 
-			function buildTarget(dataStoreAttrs: Record<string, string>, tableAttrs: Record<string, string>): any {
+			function buildTarget(
+				dataStoreAttrs: Record<string, string>,
+				tableAttrs: Record<string, string>,
+				columnName?: string
+			): any {
 				const app = makeElement('App', {}, 1);
 				const dataStore = makeElement('DataStore', dataStoreAttrs, 2);
 				const tables = makeElement('Tables', {}, 3);
@@ -208,7 +212,7 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 					context: '',
 					injectionPath: '',
 					attributes: columns.attributes,
-					nameAttributeValue: undefined,
+					nameAttributeValue: columnName,
 					enrichedPath: '',
 					xpathPath: '',
 					element: columns,
@@ -248,22 +252,116 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 			test('falls back to line when no configured attributes exist', () => {
 				const target = buildTarget({ Name: 'RFIs' }, { Label: 'Custom' });
 				const info = buildAttributeDisplayInfo(target);
-				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.label, 'Line 6');
 				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
 			});
 
 			test('uses line when table has unsupported attributes but DataStore does not', () => {
 				const target = buildTarget({}, { Label: 'Custom' });
 				const info = buildAttributeDisplayInfo(target);
-				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.label, 'Line 6');
 				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
 			});
 
 			test('uses line when no attributes are available anywhere', () => {
 				const target = buildTarget({}, {});
 				const info = buildAttributeDisplayInfo(target);
-				assert.strictEqual(info?.label, undefined);
+				assert.strictEqual(info?.label, 'Line 6');
 				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
+			});
+
+			test('uses element name attribute when provided and no hints match', () => {
+				const target = buildTarget({}, {}, 'ColumnsBlock');
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, 'ColumnsBlock (Line 6)');
+				assert.strictEqual(info?.detail, 'App/DataStore/Tables/Table/Columns');
+			});
+
+			function buildLogTarget(logAttrs: Record<string, string>): any {
+				const app = makeElement('App', {}, 1);
+				const hubDefs = makeElement('App.HubDefs', {}, 2);
+				const hubDef = makeElement('HubDef', {}, 3);
+				const logs = makeElement('HubDef.Logs', {}, 4);
+				const log = makeElement('Log', logAttrs, 5);
+				const logFields = makeElement('Log.Fields', {}, 6);
+
+				app.children.push(hubDefs);
+				hubDefs.parent = app;
+				hubDefs.children.push(hubDef);
+				hubDef.parent = hubDefs;
+				hubDef.children.push(logs);
+				logs.parent = hubDef;
+				logs.children.push(log);
+				log.parent = logs;
+				log.children.push(logFields);
+				logFields.parent = log;
+
+				return {
+					tagName: 'Log.Fields',
+					xmlNodeName: 'Log.Fields',
+					openTagLine: logFields.line,
+					closeTagLine: logFields.line,
+					lastChildLine: logFields.line,
+					indentation: '',
+					isSelfClosing: false,
+					context: '',
+					injectionPath: '',
+					attributes: logFields.attributes,
+					nameAttributeValue: undefined,
+					enrichedPath: '',
+					xpathPath: '',
+					element: logFields,
+					attributeDisplayHints: [
+						{ segmentIndex: 4, attributes: ['Label', 'Name'] }
+					],
+					pathSegments: ['App', 'App.HubDefs', 'HubDef', 'HubDef.Logs', 'Log', 'Log.Fields']
+				};
+			}
+
+			test('prefers log label from attribute hints even when placeholder values', () => {
+				const target = buildLogTarget({ Label: '[DataViewAllLabel]' });
+				const info = buildAttributeDisplayInfo(target);
+				assert.strictEqual(info?.label, '[DataViewAllLabel] (Line 7)');
+				assert.strictEqual(info?.detail, 'App/App.HubDefs/HubDef/HubDef.Logs/Log ([DataViewAllLabel])/Log.Fields');
+			});
+		});
+
+		suite('parseAttributeHintMetadata', () => {
+			test('parses escaped quotes from JSON defaults', () => {
+				const rawPath = 'App/DataStore(\\"Id\\")/Tables/Table[@EntityDefName=\'{appname}.{entity}\'](\\"Name\\"|\\"Id\\")/Columns';
+				const parsed = parseAttributeHintMetadata(rawPath);
+
+				assert.strictEqual(
+					parsed.path,
+					"App/DataStore/Tables/Table[@EntityDefName='{appname}.{entity}']/Columns"
+				);
+				assert.deepStrictEqual(parsed.segments, [
+					'App',
+					'DataStore',
+					'Tables',
+					"Table[@EntityDefName='{appname}.{entity}']",
+					'Columns'
+				]);
+				assert.strictEqual(parsed.hints.length, 2);
+				assert.deepStrictEqual(parsed.hints[0], { segmentIndex: 1, attributes: ['Id'] });
+				assert.deepStrictEqual(parsed.hints[1], { segmentIndex: 3, attributes: ['Name', 'Id'] });
+			});
+		});
+
+		suite('getAttributeCandidatePaths', () => {
+			test('uses configured attributes first', () => {
+				const candidates = getAttributeCandidatePaths('App/@Name', ['Extends', 'DisplayName']);
+				assert.deepStrictEqual(candidates, ['App/@Extends', 'App/@DisplayName', 'App/@Name']);
+			});
+
+			test('handles "any" keyword', () => {
+				const candidates = getAttributeCandidatePaths('App/@Name', ['Extends', 'any']);
+				assert.deepStrictEqual(candidates, ['App/@Extends', 'App/@Name']);
+			});
+
+			test('falls back to original path when no order specified', () => {
+				const candidates = getAttributeCandidatePaths('App/@Name');
+				assert.deepStrictEqual(candidates, ['App/@Name']);
 			});
 		});
 	});

@@ -16,3 +16,4 @@ console.log('\nExpected debug logs:');
 console.log('[KAHUA] updateDocumentTypeContext: Document detected as type: attributes');
 console.log('[KAHUA] Setting kahua.hasApplicableDocument = true');
 console.log('[KAHUA] setDocumentTypeContext: attributes');
+

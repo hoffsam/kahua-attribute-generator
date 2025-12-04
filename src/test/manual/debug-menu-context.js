@@ -72,3 +72,4 @@ console.log('> Developer: Set Context Key');
 console.log('Key: kahua.hasApplicableDocument');
 console.log('Value: true');
 console.log('Then right-click to see if menu appears');
+

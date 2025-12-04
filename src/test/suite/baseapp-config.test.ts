@@ -2,6 +2,37 @@ import * as assert from 'assert';
 import * as path from 'path';
 import * as fs from 'fs';
 
+function parseHintsForTest(rawPath: string) {
+  const segments = rawPath.split('/').filter(part => part.length > 0);
+  const hints: Array<{ segmentIndex: number; attributes: string[] }> = [];
+  const sanitizedSegments = segments.map((segment, index) => {
+    const normalizedSegment = segment.replace(/\\"/g, '"');
+    const hintMatch = normalizedSegment.match(/\((?:"[^"]+"(?:\|"[^"]+")*)\)\s*$/);
+    if (!hintMatch) {
+      return normalizedSegment;
+    }
+
+    const hintContent = hintMatch[0];
+    const sanitizedSegment = normalizedSegment.slice(0, normalizedSegment.length - hintContent.length);
+    const attributes = hintContent
+      .slice(1, -1)
+      .split('|')
+      .map(attr => attr.replace(/"/g, '').trim())
+      .filter(Boolean);
+
+    if (attributes.length > 0) {
+      hints.push({ segmentIndex: index, attributes });
+    }
+
+    return sanitizedSegment;
+  });
+
+  return {
+    path: sanitizedSegments.join('/'),
+    hints
+  };
+}
+
 suite('Extension vs Base App Display Tests', () => {
   
   suite('Configuration Validation', () => {
@@ -41,9 +72,19 @@ suite('Extension vs Base App Display Tests', () => {
       
       assert.ok(attributesFragment, 'Should find attributes fragment definition');
       assert.ok(attributesFragment.injectionPaths.DataStore, 'Should have DataStore injection path');
-      assert.strictEqual(attributesFragment.injectionPaths.DataStore, 
-        'App/DataStore/Tables/Table[@EntityDefName=\'{appname}.{entity}\']/Columns',
-        'DataStore injection should use token substitution for smart resolution');
+      const rawPath = attributesFragment.injectionPaths.DataStore as string;
+      assert.ok(rawPath.includes('{appname}.{entity}'), 'Path should include entity token substitution');
+
+      const parsed = parseHintsForTest(rawPath);
+      assert.strictEqual(
+        parsed.path,
+        "App/DataStore/Tables/Table[@EntityDefName='{appname}.{entity}']/Columns",
+        'DataStore injection should normalize to token-aware path'
+      );
+      assert.deepStrictEqual(parsed.hints, [
+        { segmentIndex: 1, attributes: ['Id'] },
+        { segmentIndex: 3, attributes: ['EntityDefName', 'Name'] }
+      ]);
     });
   });
 });

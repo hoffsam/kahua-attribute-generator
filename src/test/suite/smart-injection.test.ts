@@ -1,5 +1,8 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { __setSmartInjectionConfigOverride, __testSmartInjectionResolution, parseAttributeHintMetadata, buildAttributeDisplayInfo, removeAttributePredicates, parseXmlStringForTests } from '../../extension';
 
 // Mock implementation of injection path template logic for testing
 function mockApplyMultiTokenTemplate(template: string, currentTokenName: string, currentTokenValue: string, allTokens: Map<string, string>): string {
@@ -94,6 +97,9 @@ function mockApplyInjectionPathTemplate(xpath: string, affectingTokens: Map<stri
 }
 
 suite('Smart Injection Resolution Tests', () => {
+  teardown(() => {
+    __setSmartInjectionConfigOverride(undefined);
+  });
   
   suite('Token Extraction from Templates', () => {
     test('should extract appname and entity tokens from header line', () => {
@@ -190,6 +196,43 @@ suite('Smart Injection Resolution Tests', () => {
   });
 
   suite('Smart Injection Target Resolution', () => {
+    function createEntityTarget(
+      name: string,
+      appAttributes?: { Name?: string; Extends?: string }
+    ): any {
+      const appElement: any = {
+        tagName: 'App',
+        attributes: { ...(appAttributes || {}) },
+        parent: undefined
+      };
+      const entityDefElement: any = {
+        tagName: 'EntityDef',
+        attributes: { Name: name },
+        parent: appElement
+      };
+      const attributesElement: any = {
+        tagName: 'Attributes',
+        attributes: {},
+        parent: entityDefElement
+      };
+
+      return {
+        tagName: 'Attributes',
+        xmlNodeName: 'Attributes',
+        openTagLine: 1,
+        closeTagLine: 1,
+        indentation: '',
+        isSelfClosing: false,
+        lastChildLine: 1,
+        context: '',
+        injectionPath: `App/EntityDefs/EntityDef[@Name="${name}"]/Attributes`,
+        attributes: { Name: name },
+        nameAttributeValue: name,
+        enrichedPath: '',
+        element: attributesElement
+      };
+    }
+
     test('should auto-resolve Table with matching EntityDefName', () => {
       const mockTargets = [
         {
@@ -273,6 +316,47 @@ suite('Smart Injection Resolution Tests', () => {
       console.log('✅ Smart injection target resolution works correctly');
       console.log(`   Selected: ${selectedTarget?.attributes?.EntityDefName} at line ${selectedTarget?.openTagLine + 1}`);
     });
+
+    test('respects configurable App match order', () => {
+      const nameMatch = createEntityTarget('Field', { Name: 'BaseApp' });
+      const extendsMatch = createEntityTarget('Field', { Extends: 'BaseApp' });
+      const tokens = new Map([
+        ['appname', 'BaseApp'],
+        ['entity', 'Field']
+      ]);
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
+      let result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens);
+      assert.strictEqual(result, nameMatch, 'Should prefer App Name matches when configured first');
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['extends', 'name'] });
+      result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens);
+      assert.strictEqual(result, extendsMatch, 'Should prefer App Extends matches when configured first');
+    });
+
+    test('skips matches not allowed by configuration', () => {
+      const extendsMatch = createEntityTarget('Field', { Extends: 'BaseApp' });
+      const tokens = new Map([
+        ['appname', 'BaseApp'],
+        ['entity', 'Field']
+      ]);
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name'] });
+      const result = __testSmartInjectionResolution('Attributes', [extendsMatch], tokens);
+      assert.strictEqual(result, undefined, 'Should not auto-select Extends matches when not configured');
+    });
+
+    test('allows generic fallback when "any" preference is set', () => {
+      const genericMatch = createEntityTarget('Field');
+      const tokens = new Map([
+        ['entity', 'Field']
+      ]);
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
+      const result = __testSmartInjectionResolution('Attributes', [genericMatch], tokens);
+      assert.strictEqual(result, genericMatch, 'Should fall back to generic matches when allowed');
+    });
+
 
     test('should handle multi-token template substitution', () => {
       const template = 'DataStore/Tables/Table[@EntityDefName=\'{appname}.{entity}\']';
@@ -459,7 +543,7 @@ Priority,Text,TextBox,Priority Label`;
     });
   });
 
-  suite('Configuration Validation', () => {
+suite('Configuration Validation', () => {
     test('should validate injection path templates in configuration', () => {
       const mockConfig = {
         tokenDefinitions: [
@@ -579,5 +663,126 @@ Priority,Text,TextBox,Priority Label`;
         'App/EntityDefs/EntityDef[@Name=\'Field\']/Attributes',
         'Should still work correctly for EntityDef paths');
     });
+  });
+});
+
+function findFirstElement(root: any, predicate: (element: any) => boolean): any | undefined {
+  if (!root) {
+    return undefined;
+  }
+  if (predicate(root)) {
+    return root;
+  }
+  if (Array.isArray(root.children)) {
+    for (const child of root.children) {
+      const found = findFirstElement(child, predicate);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+function collectElements(root: any, predicate: (element: any) => boolean, acc: any[] = []): any[] {
+  if (!root) {
+    return acc;
+  }
+  if (predicate(root)) {
+    acc.push(root);
+  }
+  if (Array.isArray(root.children)) {
+    for (const child of root.children) {
+      collectElements(child, predicate, acc);
+    }
+  }
+  return acc;
+}
+
+function hasAncestor(element: any, tagName: string): boolean {
+  let current = element?.parent;
+  while (current) {
+    if (current.tagName === tagName) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function buildTargetFromElement(
+  element: any,
+  pathSegments: string[],
+  hints: Array<{ segmentIndex: number; attributes: string[] }>
+): any {
+  return {
+    tagName: pathSegments[pathSegments.length - 1],
+    xmlNodeName: element.tagName,
+    openTagLine: element.line ?? 0,
+    closeTagLine: element.line ?? 0,
+    lastChildLine: element.line ?? 0,
+    indentation: '',
+    isSelfClosing: false,
+    context: '',
+    injectionPath: pathSegments.join('/'),
+    attributes: element.attributes,
+    nameAttributeValue: element.attributes?.Name,
+    enrichedPath: '',
+    xpathPath: '',
+    element,
+    attributeDisplayHints: hints,
+    pathSegments
+  };
+}
+
+suite('Kahua sample XML scenarios', () => {
+  const samplePath = path.resolve(__dirname, '../../../kahua_AEC_RFI.xml');
+  const sampleExists = fs.existsSync(samplePath);
+
+  if (!sampleExists) {
+    test('Kahua sample XML missing', function () {
+      this.skip();
+    });
+    return;
+  }
+
+  const sampleXml = fs.readFileSync(samplePath, 'utf8');
+  const rootElement = parseXmlStringForTests(sampleXml);
+
+  if (!rootElement) {
+    test('Kahua sample XML could not be parsed', function () {
+      this.skip();
+    });
+    return;
+  }
+
+  test('LogFields placeholder label surfaces in quick pick info', () => {
+    const logFields = findFirstElement(rootElement, el => el.tagName === 'Log.Fields');
+    assert.ok(logFields, 'Log.Fields element not found in sample XML');
+    const meta = parseAttributeHintMetadata('App/App.HubDefs/HubDef/HubDef.Logs/Log("Label"|"Name")/Log.Fields');
+    const target = buildTargetFromElement(logFields, meta.segments, meta.hints);
+    const info = buildAttributeDisplayInfo(target);
+    assert.ok(info?.label?.includes('[DataViewAllLabel]'), `Unexpected label: ${info?.label}`);
+  });
+
+  test('DataStore columns remain selectable when attribute predicate fails', () => {
+    const columns = collectElements(
+      rootElement,
+      el => el.tagName === 'Columns' && hasAncestor(el, 'DataStore')
+    );
+    assert.ok(columns.length > 0, 'No DataStore columns were found in sample XML');
+
+    const meta = parseAttributeHintMetadata(
+      'App/DataStore/Tables/Table[@EntityDefName=\'{appname}.{entity}\']("EntityDefName"|"Name")/Columns'
+    );
+    const target = buildTargetFromElement(columns[0], meta.segments, meta.hints);
+    const info = buildAttributeDisplayInfo(target);
+    assert.ok(info?.label?.toLowerCase().includes('kahua_aec_rfi'), `Unexpected label: ${info?.label}`);
+
+    const relaxed = removeAttributePredicates(
+      "App/DataStore/Tables/Table[@EntityDefName='missing']/Columns"
+    );
+    assert.strictEqual(relaxed, 'App/DataStore/Tables/Table/Columns');
+    assert.ok(columns.length >= 2, 'Expected multiple DataStore tables to present as options');
   });
 });
