@@ -2,7 +2,6 @@ node_modules/
 *.txt
 out/
 CLAUDE.md
-*.xml
 *.vsix
 .vscode-test/
 .claude/settings.local.json

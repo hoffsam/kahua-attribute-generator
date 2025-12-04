@@ -736,8 +736,12 @@ function buildTargetFromElement(
 }
 
 suite('Kahua sample XML scenarios', () => {
-  const samplePath = path.resolve(__dirname, '../../../kahua_AEC_RFI.xml');
-  const sampleExists = fs.existsSync(samplePath);
+  const candidatePaths = [
+    path.resolve(__dirname, '../../../example_files/kahua_AEC_RFI.xml'),
+    path.resolve(__dirname, '../../../example_files/example_xml/kahua_aec_rfi_extension.xml')
+  ];
+  const samplePath = candidatePaths.find(fs.existsSync);
+  const sampleExists = Boolean(samplePath);
 
   if (!sampleExists) {
     test('Kahua sample XML missing', function () {
@@ -746,7 +750,7 @@ suite('Kahua sample XML scenarios', () => {
     return;
   }
 
-  const sampleXml = fs.readFileSync(samplePath, 'utf8');
+  const sampleXml = fs.readFileSync(samplePath!, 'utf8');
   const rootElement = parseXmlStringForTests(sampleXml);
 
   if (!rootElement) {
