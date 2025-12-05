@@ -4,10 +4,12 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 ## Features
 
-* **Two generation modes** via Command Palette or context menu:
+* **Multiple generation entry points** via Command Palette, context menu, or dedicated commands:
 
-  * **`Kahua: Generate Extension Attributes from Selection`** – Uses `kahua.defaultPrefix.extension` setting
-  * **`Kahua: Generate Supplement Attributes from Selection`** – Uses `kahua.defaultPrefix.supplement` setting
+  * Selection-based commands for quick inline generation (`Generate Extension/Supplement Attributes`)
+  * **`Kahua: Show Template for Generation`** – opens an editable CSV template linked to the source XML
+  * **`Kahua: Show Snippet for Generation`** – creates a VS Code snippet with tab stops for rapid entry
+  * **`Kahua: Show Table for Generation`** – launches an interactive webview for header/table data with validation
 
 * **Configurable token system** – Define your own token names and default values via `kahua.tokenNameDefinitions`
 
@@ -21,11 +23,11 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 * **Advanced token syntax** – Support for `{$token}` prefixing and conditional expressions (`{$condition ? 'value' : 'fallback'}`)
 
-* **Multiple output options** – Copy to clipboard or open in new editor window
+* **Multiple output options** - Inject into the remembered source file, browse to any XML, open a combined report/editor, or copy to clipboard
 
-* **Comprehensive validation** – Clear error messages for configuration and input issues
+* **Comprehensive validation** - Required-token enforcement, per-row skipping with report details, and smart injection prompts
 
-* **Token value table** – Shows token assignments for each processed line in output
+* **Generation reports** - Every run produces a report showing token tables, skipped rows, and (when applicable) injection results
 
 ## Usage
 
@@ -50,6 +52,16 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 4. The generated XML is either copied to your clipboard or opened in a new editor window (configurable via `kahua.outputTarget`).
 
+### Interactive Generation Commands
+
+When you need more than ad-hoc selection output, use the dedicated commands:
+
+* **`Kahua: Show Template for Generation`** – Creates a tokenized CSV template that stays associated with the source XML and remembers injection tokens. Fill in the rows, then use the injection commands (Inject into Source File/File/New Editor/Clipboard) from that template tab.
+* **`Kahua: Show Snippet for Generation`** – Opens a new editor with VS Code snippet tab-stops so you can tab through required columns. The snippet window remembers the source XML and the injection token context.
+* **`Kahua: Show Table for Generation`** – Launches an interactive webview with header fields, table rows, default values, and required-field indicators. You can inject directly into the source file, browse to any XML file, or open the combined report/editor from the webview buttons.
+
+All three interactive flows emit the same generation report as selection-based commands, so downstream behavior is consistent regardless of how the data was entered.
+
 ## Configuration
 
 You can override the following settings in your workspace or user `settings.json`:
@@ -61,6 +73,8 @@ You can override the following settings in your workspace or user `settings.json
 | `kahua.tokenNameDefinitions`             | Array of token definitions    | Define token sets with ID, name, type, and token list                              |
 | `kahua.suppressInvalidConditionWarnings` | `false`                       | Suppress error notifications when conditional expressions reference invalid tokens |
 | `kahua.fragmentDefinitions`              | Array of fragment definitions | Define reusable fragment templates with conditional support                        |
+| `kahua.defaultSnippetRows`               | `3`                           | Number of rows created when generating a snippet                                   |
+| `kahua.defaultSnippetTableRows`          | `0`                           | Initial number of rows the table webview populates before prompting                |
 
 ## Token Configuration
 
@@ -122,6 +136,26 @@ Use the format `tokenName:defaultValue` in token definition strings:
 | `FieldA,MyEntity,Integer` | `name=FieldA, entity=MyEntity, type=Integer, label=, visualtype=TextBox, category=Standard` |
 | `FieldA,MyEntity,,Custom Label` | `name=FieldA, entity=MyEntity, type=Text, label=Custom Label, visualtype=TextBox, category=Standard` |
 | `FieldA,MyEntity,Lookup,Field A,ComboBox,Advanced` | `name=FieldA, entity=MyEntity, type=Lookup, label=Field A, visualtype=ComboBox, category=Advanced` |
+
+### Required Tokens
+
+Append `!` to any token name in `kahua.tokenNameDefinitions` to mark it as required:
+
+```json
+{
+  "id": "attributes",
+  "name": "Attribute Tokens",
+  "type": "table",
+  "tokens": "name!,entity,type:Text,label,visualtype:TextBox"
+}
+```
+
+Effects:
+
+* Templates/snippets label required columns (e.g., `name (Required)`)
+* The table webview shows a red asterisk next to required header fields and table columns
+* Rows missing required values are skipped and listed in the generation report instead of aborting the run
+* Injection commands refuse to proceed until all required tokens are satisfied
 
 #### Conditional Interaction
 

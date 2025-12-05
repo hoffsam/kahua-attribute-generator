@@ -452,7 +452,7 @@
                 "attributes"
               ],
               "injectionPaths": {
-                "Attributes": "App/EntityDefs/EntityDef/Attributes",
+                "Attributes": "App/EntityDefs/EntityDef(\"Name\")/Attributes",
                 "Labels": "App/Cultures/Culture[@Code='en']/Labels",
                 "LookupListLabels": "App/Cultures/Culture[@Code='en']/Labels",
                 "DataTags": "App/DataTags",
@@ -461,7 +461,7 @@
                 "LogFields": "App/App.HubDefs/HubDef/HubDef.Logs/Log(\"Label\"|\"Name\")/Log.Fields",
                 "FieldDefs": "App/App.HubDefs/HubDef/HubDef.LogDef/LogDef.FieldDefs",
                 "DataStore": "App/DataStore(\\\"Id\\\")/Tables/Table[@EntityDefName='{appname}.{entity}'](\"EntityDefName\"|\"Name\")/Columns",
-                "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef(\"Name\")/ImportDef.Sheets/Sheet(\"Name\")/Sheet.Columns"
+                "ImportDefs": "App/App.HubDefs/HubDef/HubDef.ImportDefs/ImportDef[@EntityDefName='{appname}.{entity}'](\"EntityDefName\"|\"Name\")/ImportDef.Sheets/Sheet(\"Name\")/Sheet.Columns"
               },
               "hierarchicalInjectionGroups": {
                 "HubDef": {

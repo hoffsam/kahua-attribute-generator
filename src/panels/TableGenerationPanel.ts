@@ -8,7 +8,7 @@ import { getNonce } from "../utilities/getNonce";
  */
 export interface TableData {
   headers: string[];
-  headerFields?: Array<{name: string, value: string, label: string}>;
+  headerFields?: Array<{name: string, value: string, label: string, required?: boolean}>;
   rows: string[][];
   fragmentName: string;
   fragmentIds?: string[];
@@ -164,15 +164,25 @@ export class TableGenerationPanel {
     // Create header info section HTML
     // Build header columns display with values
     const headerColumnsDisplay = this._tableData.headerFields && this._tableData.headerFields.length > 0
-      ? this._tableData.headerFields.map(field => `${field.name}:${field.value}`).join(', ')
+      ? this._tableData.headerFields.map(field => {
+          const label = field.label || field.name;
+          const requiredText = field.required ? ' (Required)' : '';
+          return `${label}${requiredText}:${field.value}`;
+        }).join(', ')
       : 'None';
     
     // Build table columns display with defaults indicated
-    const tableColumnsDisplay = this._tableData.headers.map((header, index) => {
+    const tableColumnsDisplay = this._tableData.headers.map((header) => {
       const token = this._tableData.tableTokens?.find(t => t.name === header);
+      const label = token ? token.name : header;
+      const requiredText = token?.required ? ' (Required)' : '';
       const defaultValue = token?.defaultValue;
-      return defaultValue ? `${header}:${defaultValue}*` : header;
+      return defaultValue ? `${label}${requiredText}:${defaultValue}*` : `${label}${requiredText}`;
     }).join(', ');
+
+    const hasRequiredFields =
+      (this._tableData.headerFields?.some(field => field.required) ?? false) ||
+      (this._tableData.tableTokens?.some(token => token.required) ?? false);
 
     const headerInfo = `
       <div class="header-info">
@@ -182,6 +192,7 @@ export class TableGenerationPanel {
         <p><strong>Header Columns:</strong> ${headerColumnsDisplay}</p>
         <p><strong>Table Columns:</strong> ${tableColumnsDisplay}</p>
         ${this._tableData.tableTokens?.some(t => t.defaultValue) ? '<p><em>* = Default value will be applied to new rows</em></p>' : ''}
+        ${hasRequiredFields ? '<p><span class="required-indicator" title="Required">*</span> Required field</p>' : ''}
       </div>
     `;
 
@@ -192,7 +203,7 @@ export class TableGenerationPanel {
         <div class="header-fields-grid">
           ${this._tableData.headerFields.map(field => `
             <div class="header-field">
-              <label for="header-${field.name}">${field.label}:</label>
+              <label for="header-${field.name}">${field.label}${field.required ? '<span class="required-indicator" title="Required">*</span>' : ''}:</label>
               <input type="text" id="header-${field.name}" class="header-input" 
                      data-field="${field.name}" value="${field.value}" />
             </div>
@@ -338,6 +349,11 @@ export class TableGenerationPanel {
             .btn-secondary:hover {
               background-color: var(--vscode-button-secondaryHoverBackground);
             }
+            .required-indicator {
+              color: var(--vscode-editorWarning-foreground, #d16969);
+              margin-left: 4px;
+              font-weight: bold;
+            }
           </style>
         </head>
         <body>
@@ -361,7 +377,11 @@ export class TableGenerationPanel {
               <thead>
                 <tr>
                   <th><input type="checkbox" id="selectAll" class="row-checkbox"></th>
-                  ${this._tableData.headers.map(header => `<th>${header}</th>`).join('')}
+                  ${this._tableData.headers.map(header => {
+                    const token = this._tableData.tableTokens?.find(t => t.name === header);
+                    const indicator = token?.required ? '<span class="required-indicator" title="Required">*</span>' : '';
+                    return `<th>${header}${indicator}</th>`;
+                  }).join('')}
                 </tr>
               </thead>
               <tbody id="tableBody">

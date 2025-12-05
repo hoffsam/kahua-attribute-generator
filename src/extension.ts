@@ -281,7 +281,8 @@ class CsvGenerationService {
       const headerColumnsDisplay = options.headerTokens.map(token => {
         const extractedValue = options.extractedTokens.get(token.name);
         const value = extractedValue || token.defaultValue || token.name;
-        return `${token.name}:${value}`;
+        const nameDisplay = token.required ? `${token.name} (Required)` : token.name;
+        return `${nameDisplay}:${value}`;
       }).join(', ');
       lines.push(`// Header Columns: ${headerColumnsDisplay}`);
     }
@@ -289,7 +290,8 @@ class CsvGenerationService {
     // Add table columns information with defaults
     if (options.tableTokens.length > 0) {
       const tableColumnsDisplay = options.tableTokens.map(token => {
-        return token.defaultValue ? `${token.name}:${token.defaultValue}*` : token.name;
+        const nameDisplay = token.required ? `${token.name} (Required)` : token.name;
+        return token.defaultValue ? `${nameDisplay}:${token.defaultValue}*` : nameDisplay;
       }).join(', ');
       lines.push(`// Table Columns: ${tableColumnsDisplay}`);
       
@@ -505,11 +507,14 @@ interface InjectionResult {
   reason?: 'not-configured' | 'not-found';
 }
 
-interface GeneratedFragmentResult {
+export interface GeneratedFragmentResult {
   generatedXml: string;
   fragmentDefinition: FragmentDefinition;
   tokenDefinitions: TokenNameDefinition[];
   extractedTokens?: Map<string, string>; // Token values extracted from template content
+  generationDetails?: string;
+  skippedRows?: string[];
+  sourceUri?: string;
 }
 
 interface RowTokenData {
@@ -596,6 +601,13 @@ function getSmartInjectionConfig(): SmartInjectionResolvedConfig {
     if (!tokenDef.tokenReadPaths) {
       continue;
     }
+
+    if (
+      options.headerTokens.some(token => token.required) ||
+      options.tableTokens.some(token => token.required)
+    ) {
+      lines.push('// Columns marked (Required) must be populated before generation');
+    }
     for (const readPath of Object.values(tokenDef.tokenReadPaths)) {
       if (!readPath) continue;
       const order = Array.isArray(readPath.attributeMatchOrderForInjection)
@@ -623,6 +635,93 @@ export function __testSmartInjectionResolution(
   affectingTokens?: Map<string, string>
 ): XmlTargetSection | undefined {
   return trySmartInjectionResolution(sectionName, targets as XmlTargetSection[], affectingTokens);
+}
+
+function resolveAppNameCandidates(
+  appnameToken: string | undefined,
+  targets: XmlTargetSection[],
+  smartConfig: SmartInjectionResolvedConfig
+): Array<{ value: string; strategy: AppMatchStrategy }> {
+  const candidates: Array<{ value: string; strategy: AppMatchStrategy }> = [];
+  const seen = new Set<string>();
+  const rootApp = targets
+    .map(target => findRootAppElement(target.element))
+    .find((element): element is SaxElement => !!element);
+  const rootName = rootApp?.attributes?.['Name'];
+  const rootExtends = rootApp?.attributes?.['Extends'];
+
+  const addCandidate = (value: string | undefined, strategy: AppMatchStrategy) => {
+    if (!value || !value.trim()) {
+      return;
+    }
+    const trimmed = value.trim();
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push({ value: trimmed, strategy });
+  };
+
+  for (const preference of smartConfig.appMatchOrder) {
+    switch (preference) {
+      case 'name':
+        addCandidate(appnameToken, 'name');
+        addCandidate(rootName, 'name');
+        break;
+      case 'extends':
+        addCandidate(rootExtends, 'extends');
+        break;
+      case 'any':
+        addCandidate(appnameToken, 'any');
+        addCandidate(rootName, 'any');
+        addCandidate(rootExtends, 'any');
+        break;
+    }
+  }
+
+  if (candidates.length === 0) {
+    addCandidate(appnameToken ?? rootName ?? rootExtends, 'any');
+  }
+
+  return candidates;
+}
+
+function targetMatchesEntityDefName(target: XmlTargetSection, expectedEntityDefName: string): boolean {
+  if (!expectedEntityDefName || !target) {
+    return false;
+  }
+
+  const attributeMatches =
+    target.attributes?.['EntityDefName'] === expectedEntityDefName ||
+    target.element?.attributes?.['EntityDefName'] === expectedEntityDefName;
+
+  if (attributeMatches) {
+    return true;
+  }
+
+  const tableAncestor = findAncestorByTag(target.element, 'Table');
+  if (tableAncestor?.attributes?.['EntityDefName'] === expectedEntityDefName) {
+    return true;
+  }
+
+  if (target.injectionPath && target.injectionPath.includes(expectedEntityDefName)) {
+    return true;
+  }
+
+  if (target.context && target.context.includes(expectedEntityDefName)) {
+    return true;
+  }
+
+  if (target.enrichedPath && target.enrichedPath.includes(expectedEntityDefName)) {
+    return true;
+  }
+
+  if (target.xpathPath && target.xpathPath.includes(expectedEntityDefName)) {
+    return true;
+  }
+
+  return false;
 }
 
 function getElementDisplayName(
@@ -1847,6 +1946,36 @@ function rememberSourceXmlMapping(documentUri: vscode.Uri, sourceUri: vscode.Uri
   }
 }
 
+function storeInjectionTokensForDocument(
+  documentUri: vscode.Uri,
+  tokenDefinitions: TokenNameDefinition[] | undefined,
+  extractedTokens: Map<string, string>
+): void {
+  if (!tokenDefinitions || tokenDefinitions.length === 0) {
+    return;
+  }
+
+  const affectingTokens = new Map<string, string>();
+  for (const tokenDef of tokenDefinitions) {
+    if (!tokenDef.tokenReadPaths) {
+      continue;
+    }
+    for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+      if (readPath.affectsInjection && extractedTokens.has(tokenName)) {
+        affectingTokens.set(tokenName, extractedTokens.get(tokenName)!);
+      }
+    }
+  }
+
+  if (!affectingTokens.has('entity') && extractedTokens.has('entity')) {
+    affectingTokens.set('entity', extractedTokens.get('entity')!);
+  }
+
+  if (affectingTokens.size > 0) {
+    injectionAffectingTokens.set(documentUri.toString(), affectingTokens);
+  }
+}
+
 function getRememberedSourceXmlUri(document?: vscode.TextDocument): vscode.Uri | undefined {
   if (!document) {
     return undefined;
@@ -2036,22 +2165,20 @@ async function insertXmlIntoFile(
   }
 
   // Smart insertion - get injection paths from the fragment definition
-  let injectionPaths: Record<string, ResolvedInjectionPathConfig> = resolveInjectionPaths(fragmentDefinition?.injectionPaths || {});
+  let rawInjectionPaths: Record<string, string | InjectionPathConfig> = fragmentDefinition?.injectionPaths || {};
   
   // Handle hierarchical injection groups (e.g., HubDef containers)
   if (fragmentDefinition?.hierarchicalInjectionGroups && xmlContext) {
-    const hierarchicalInput = Object.fromEntries(
-      Object.entries(injectionPaths).map(([name, cfg]) => [name, cfg.path])
-    );
-    const hierarchicalResult = await processHierarchicalInjectionGroups(
-      hierarchicalInput, 
+    rawInjectionPaths = await processHierarchicalInjectionGroups(
+      rawInjectionPaths, 
       fragmentDefinition.hierarchicalInjectionGroups, 
       xmlContext,
       affectingTokens,
       tokenDefinitions
     );
-    injectionPaths = resolveInjectionPaths(hierarchicalResult);
   }
+  
+  let injectionPaths: Record<string, ResolvedInjectionPathConfig> = resolveInjectionPaths(rawInjectionPaths);
   
   const results: InjectionResult[] = [];
 
@@ -2061,36 +2188,14 @@ async function insertXmlIntoFile(
 
     for (const [sectionName, pathConfig] of Object.entries(injectionPaths)) {
       const xpath = pathConfig.path;
-      const displayAttribute = pathConfig.displayAttribute;
-      let modifiedXPath = xpath;
-
-      // Check each token definition for injection path templates
-      for (const tokenDef of tokenDefinitions) {
-        if (tokenDef.tokenReadPaths) {
-          for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
-            if (readPath.affectsInjection && readPath.injectionPathTemplate && affectingTokens.has(tokenName)) {
-              // Only apply template if the original xpath matches the pattern that the template is for
-              // Extract the base path from the template (everything before the filter)
-              const templateBasePath = readPath.injectionPathTemplate.split('[')[0];
-
-              // Check if the original xpath starts with or contains the same base path structure
-              if (xpath.includes('EntityDef') || xpath === templateBasePath || 
-                  (templateBasePath.includes('DataStore/Tables/Table') && xpath.includes('DataStore') && xpath.includes('Tables') && xpath.includes('Table'))) {
-                const tokenValue = affectingTokens.get(tokenName)!;
-                modifiedXPath = applyMultiTokenTemplate(readPath.injectionPathTemplate, tokenName, tokenValue, affectingTokens);
-                debugLog(`[DEBUG] Applied injection path template to "${sectionName}": ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
-              } else {
-                debugLog(`[DEBUG] Skipping injection path template for "${sectionName}" - path "${xpath}" doesn't match template pattern`);
-              }
-            }
-          }
-        }
+      const templateResult = applyInjectionPathTemplate(xpath, affectingTokens, tokenDefinitions);
+      const modifiedXPath = templateResult.result;
+      if (templateResult.applied && modifiedXPath !== xpath) {
+        debugLog(`[DEBUG] Injection path template applied for "${sectionName}": ${xpath} -> ${modifiedXPath}`);
       }
-
       modifiedPaths[sectionName] = {
         ...pathConfig,
-        path: modifiedXPath,
-        displayAttribute
+        path: modifiedXPath
       };
     }
 
@@ -3755,7 +3860,12 @@ async function readTokenValuesFromXml(
 /**
  * Generates a report text from injection results
  */
-function generateInjectionReport(results: InjectionResult[], targetFileName: string, generationDetails?: string): string {
+function buildGenerationReport(
+  results: InjectionResult[],
+  targetFileName: string,
+  generationDetails?: string,
+  skippedRows?: string[]
+): string {
   const injected = results.filter(r => r.status === 'injected');
   const skipped = results.filter(r => r.status === 'skipped');
 
@@ -3803,6 +3913,15 @@ function generateInjectionReport(results: InjectionResult[], targetFileName: str
     report += `\n`;
   }
 
+  if (skippedRows && skippedRows.length > 0) {
+    report += `Skipped Rows (Missing Required Values):\n`;
+    report += `${'-'.repeat(70)}\n`;
+    for (const message of skippedRows) {
+      report += `  • ${message}\n`;
+    }
+    report += `\n`;
+  }
+
   if (generationDetails) {
     report += `Generation Details:\n`;
     report += `${'-'.repeat(70)}\n`;
@@ -3822,13 +3941,18 @@ function generateInjectionReport(results: InjectionResult[], targetFileName: str
 /**
  * Opens a new editor tab with the injection report
  */
-async function openInjectionReport(results: InjectionResult[], targetFileUri: vscode.Uri, generationDetails?: string): Promise<void> {
-  if (results.length === 0 && generationDetails == undefined) {
+async function openGenerationReport(
+  results: InjectionResult[],
+  targetFileUri?: vscode.Uri,
+  generationDetails?: string,
+  skippedRows?: string[]
+): Promise<void> {
+  if (results.length === 0 && generationDetails == undefined && (!skippedRows || skippedRows.length === 0)) {
     return;
   }
 
-  const targetFileName = getWorkspaceRelativePath(targetFileUri);
-  const reportText = generateInjectionReport(results, targetFileName, generationDetails);
+  const targetFileName = targetFileUri ? getWorkspaceRelativePath(targetFileUri) : '(Not Applicable)';
+  const reportText = buildGenerationReport(results, targetFileName, generationDetails, skippedRows);
 
   const reportDocument = await vscode.workspace.openTextDocument({
     content: reportText,
@@ -3865,44 +3989,55 @@ function trySmartInjectionResolution(
     extends: [],
     any: []
   };
-  
+  const normalizedSection = sectionName.toLowerCase();
+  const looksLikeColumnsSection =
+    normalizedSection.includes('column') ||
+    targets.some(target => {
+      const xmlNode = target.xmlNodeName?.toLowerCase() || '';
+      const injectionPath = target.injectionPath?.toLowerCase() || '';
+      const xpathPath = target.xpathPath?.toLowerCase() || '';
+      return (
+        xmlNode === 'columns' ||
+        injectionPath.includes('/columns') ||
+        xpathPath.includes('/columns')
+      );
+    });
+
   debugLog(`[DEBUG] Smart injection resolution: section=${sectionName}, appname=${appname}, entity=${entity}, targets=${targets.length}`);
   console.log(`[KAHUA] Smart injection: section="${sectionName}", appname="${appname}", entity="${entity}", ${targets.length} targets`);
 
   // For DataStore/Table injection (like columns), look for Table with matching EntityDefName
-  if (sectionName.toLowerCase().includes('column') || sectionName.toLowerCase() === 'columns') {
-    if (appname && entity) {
-      const expectedEntityDefName = `${appname}.${entity}`;
-      debugLog(`[DEBUG] Looking for Table with EntityDefName="${expectedEntityDefName}"`);
-      
-      for (const target of targets) {
-        // Check if this target is under a Table with the right EntityDefName
-        if (target.injectionPath && target.injectionPath.includes('Table')) {
-          // Look for EntityDefName attribute in the injection path or context
-          const pathHasEntityDefName = target.injectionPath.includes(`@EntityDefName="${expectedEntityDefName}"`) ||
-                                       target.injectionPath.includes(`@EntityDefName='${expectedEntityDefName}'`) ||
-                                       target.injectionPath.includes(`EntityDefName="${expectedEntityDefName}"`);
-          
-          if (pathHasEntityDefName) {
-            debugLog(`[DEBUG] Found matching Table target: ${target.injectionPath}`);
-            return target;
-          }
-          
-          // Also check if the context contains the expected EntityDefName
-          if (target.context && target.context.includes(expectedEntityDefName)) {
-            debugLog(`[DEBUG] Found matching Table target by context: ${target.context}`);
-            return target;
-          }
-          
-          // Check attributes if available
-          if (target.attributes && target.attributes['EntityDefName'] === expectedEntityDefName) {
-            debugLog(`[DEBUG] Found matching Table target by attributes: EntityDefName=${target.attributes['EntityDefName']}`);
+  if (looksLikeColumnsSection) {
+    if (entity) {
+      const appCandidates = resolveAppNameCandidates(appname, targets, smartConfig);
+      for (const candidate of appCandidates) {
+        const expectedEntityDefName = `${candidate.value}.${entity}`;
+        debugLog(
+          `[DEBUG] Looking for Table with EntityDefName="${expectedEntityDefName}" using ${candidate.strategy} candidate`
+        );
+
+        for (const target of targets) {
+          if (targetMatchesEntityDefName(target, expectedEntityDefName)) {
+            debugLog(
+              `[DEBUG] Found matching Table target (${candidate.strategy}): ${
+                target.injectionPath || target.context || target.enrichedPath
+              }`
+            );
             return target;
           }
         }
       }
       
-      debugLog(`[DEBUG] No Table found with EntityDefName="${expectedEntityDefName}"`);
+      debugLog(
+        `[DEBUG] No Table found for entity "${entity}" using candidates: ${appCandidates
+          .map(candidate => `${candidate.strategy}:${candidate.value}`)
+          .join(', ')}`
+      );
+
+      if (smartConfig.appMatchOrder.includes('any') && targets.length === 1) {
+        debugLog('[DEBUG] Falling back to single-target "any" selection for DataStore columns');
+        return targets[0];
+      }
     }
   }
   
@@ -3976,6 +4111,18 @@ function findRootAppElement(element?: SaxElement): SaxElement | undefined {
     current = current.parent;
   }
   return current && current.tagName === 'App' ? current : undefined;
+}
+
+function findAncestorByTag(element: SaxElement | undefined, tagName: string): SaxElement | undefined {
+  let current = element?.parent;
+  const targetTag = tagName.toLowerCase();
+  while (current) {
+    if (current.tagName.toLowerCase() === targetTag) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return undefined;
 }
 
 /**
@@ -4671,7 +4818,7 @@ function processFragmentTemplates(
 /**
  * Common data model for all generation types
  */
-interface GenerationContext {
+export interface GenerationContext {
   editor: vscode.TextEditor;
   documentType: string;
   fragmentIds: string[];
@@ -4692,7 +4839,7 @@ interface GenerationData {
 /**
  * Unified generation request - all UI types produce this
  */
-interface GenerationRequest {
+export interface GenerationRequest {
   fragmentIds: string[];
   documentType: string;
   outputTarget: OutputTarget;
@@ -4705,6 +4852,7 @@ interface GenerationRequest {
   selectedFragmentDefs: FragmentDefinition[];
   tokenDefinitions: TokenNameDefinition[];
   sourceUri?: string; // Source XML file URI for injection
+  skippedRows?: string[];
 }
 
 /**
@@ -4715,6 +4863,9 @@ interface GenerationResult {
   fragmentDefinition: FragmentDefinition;
   tokenDefinitions: TokenNameDefinition[];
   extractedTokens: Map<string, string>;
+  generationDetails?: string;
+  skippedRows?: string[];
+  sourceUri?: string;
 }
 
 /**
@@ -4862,12 +5013,30 @@ async function showTemplateUI(context: GenerationContext, data: GenerationData):
   });
 
   const editor = await vscode.window.showTextDocument(document, { preview: false });
+  focusTemplateEditorOnLastRow(editor);
+  rememberSourceXmlMapping(document.uri, context.editor.document.uri);
+  storeInjectionTokensForDocument(document.uri, context.tokenDefinitions, extractedTokens);
   markDocumentAsTemplate(document, context.documentType);
   
   vscode.window.showInformationMessage(`Kahua: Token template opened for ${fragmentName.toLowerCase()}. Edit the data and use generation commands.`);
   
   // Templates are interactive documents - user will edit and trigger generation later
   return undefined;
+}
+
+function focusTemplateEditorOnLastRow(editor: vscode.TextEditor) {
+  const document = editor.document;
+  for (let line = document.lineCount - 1; line >= 0; line--) {
+    const text = document.lineAt(line).text;
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.startsWith('//')) {
+      continue;
+    }
+    const position = new vscode.Position(line, 0);
+    editor.selection = new vscode.Selection(position, position);
+    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.Default);
+    break;
+  }
 }
 
 /**
@@ -4902,12 +5071,11 @@ async function showSnippetUI(context: GenerationContext, data: GenerationData): 
     snippetMode: true,
     tabStopStartIndex: 1
   });
-  const document = await vscode.workspace.openTextDocument({
-    content: snippetContent,
-    language: 'plaintext'
-  });
-
-  await vscode.window.showTextDocument(document, { preview: false });
+  const document = await vscode.workspace.openTextDocument({ language: 'plaintext' });
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  await editor.insertSnippet(new vscode.SnippetString(snippetContent), new vscode.Position(0, 0));
+  rememberSourceXmlMapping(document.uri, context.editor.document.uri);
+  storeInjectionTokensForDocument(document.uri, context.tokenDefinitions, extractedTokens);
   markDocumentAsSnippet(document, context.documentType);
   
   const rowText = defaultRowCount === 0 
@@ -4942,7 +5110,8 @@ async function showTableUI(context: GenerationContext, data: GenerationData): Pr
   const headerFields = headerTokens.map(token => ({
     name: token.name,
     value: extractedTokens.get(token.name) || token.defaultValue || '',
-    label: token.name.charAt(0).toUpperCase() + token.name.slice(1)
+    label: token.name.charAt(0).toUpperCase() + token.name.slice(1),
+    required: token.required === true
   }));
   
   // Create initial row with defaults ONLY from table tokens
@@ -5034,8 +5203,10 @@ async function handleTableGeneration(data: {
         break;
 
       case 'file': {
-        const fileUri = await vscode.window.showSaveDialog({
-          defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          canSelectFiles: true,
+          canSelectFolders: false,
           filters: {
             'XML Files': ['xml'],
             'All Files': ['*']
@@ -5043,12 +5214,12 @@ async function handleTableGeneration(data: {
           title: 'Select XML File to Inject Into'
         });
 
-        if (!fileUri) {
+        if (!picked || picked.length === 0) {
           vscode.window.showInformationMessage('Kahua: File selection cancelled');
           return;
         }
 
-        outputTarget = { type: 'selectFile', uri: fileUri };
+        outputTarget = { type: 'selectFile', uri: picked[0] };
         break;
       }
 
@@ -5071,7 +5242,7 @@ async function handleTableGeneration(data: {
 
     const columnNames = tableTokens.map(token => token.name);
     const dataRows: Record<string, string>[] = [];
-    const rowErrors: string[] = [];
+    const skippedRowMessages: string[] = [];
 
     const tableRows = data.tableRows || [];
     for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex++) {
@@ -5101,19 +5272,19 @@ async function handleTableGeneration(data: {
 
       const missingRowTokens = collectMissingRequiredTokens(tableTokens, tokenName => rowObj[tokenName]);
       if (missingRowTokens.length > 0) {
-        rowErrors.push(`Row ${rowIndex + 1}: ${missingRowTokens.join(', ')}`);
+        skippedRowMessages.push(`Row ${rowIndex + 1}: ${missingRowTokens.join(', ')}`);
+        continue;
       }
 
       dataRows.push(rowObj);
     }
 
     if (dataRows.length === 0) {
-      vscode.window.showWarningMessage('Kahua: No table rows with data were provided.');
+      const message = skippedRowMessages.length > 0
+        ? 'Kahua: All rows were skipped because required values were missing.'
+        : 'Kahua: No table rows with data were provided.';
+      vscode.window.showWarningMessage(message);
       return;
-    }
-
-    if (rowErrors.length > 0) {
-      throw new Error(`Missing required table values:\n${rowErrors.join('\n')}`);
     }
 
     const tokenDefinitions =
@@ -5133,6 +5304,7 @@ async function handleTableGeneration(data: {
       dataRows,
       selectedFragmentDefs: fragmentDefs,
       tokenDefinitions,
+      skippedRows: skippedRowMessages,
       sourceUri: (sourceFileUri ?? resolveSourceUri())?.toString()
     };
 
@@ -5228,11 +5400,43 @@ async function generateXmlFromRequest(
     generatedXml = formatXml(generatedXml, xmlIndentSize);
   }
 
+  let generationDetails: string | undefined;
+  try {
+    if (request.dataRows && request.dataRows.length > 0) {
+      let sourceFileDisplay: string | undefined;
+      if (request.sourceUri) {
+        try {
+          const parsedSource = vscode.Uri.parse(request.sourceUri);
+          sourceFileDisplay = getWorkspaceRelativePath(parsedSource);
+        } catch (uriError) {
+          debugLog('[DEBUG] Failed to resolve workspace-relative source path:', uriError);
+        }
+      }
+
+      generationDetails = CsvGenerationService.generateCsv({
+        fragmentIds: request.fragmentIds,
+        sourceFile: sourceFileDisplay,
+        sourceUri: request.sourceUri,
+        headerTokens: request.tokenData.headerTokens,
+        tableTokens: request.tokenData.tableTokens,
+        extractedTokens: request.tokenData.extractedTokens,
+        dataRows: request.dataRows,
+        includeDefaultRow: false,
+        snippetMode: false
+      });
+    }
+  } catch (detailsError) {
+    debugLog('[DEBUG] Unable to build generation details for table injection:', detailsError);
+  }
+
   return {
     generatedXml,
     fragmentDefinition: fragmentDef,
     tokenDefinitions: request.tokenDefinitions,
-    extractedTokens: request.tokenData.extractedTokens
+    extractedTokens: request.tokenData.extractedTokens,
+    generationDetails,
+    skippedRows: request.skippedRows,
+    sourceUri: request.sourceUri
   };
 }
 
@@ -5277,6 +5481,7 @@ async function finalizeGeneratedFragments(
   result: GenerationResult
 ): Promise<void> {
   const affectingTokens = result.extractedTokens;
+  const derivedSourceUri = result.sourceUri ? vscode.Uri.parse(result.sourceUri) : undefined;
   
   // DEBUG: Log what XML we're receiving
   console.log('[DEBUG] finalizeGeneratedFragments: XML length:', result.generatedXml.length);
@@ -5286,9 +5491,16 @@ async function finalizeGeneratedFragments(
 
   switch (outputTarget.type) {
     case 'newEditor': {
+      const report = buildGenerationReport(
+        [],
+        derivedSourceUri ? getWorkspaceRelativePath(derivedSourceUri) : '(Not Applicable)',
+        result.generationDetails,
+        result.skippedRows
+      );
+      const combinedContent = `${report}\n\nGenerated Fragments:\n${'-'.repeat(70)}\n\n${result.generatedXml}`;
       const newDocument = await vscode.workspace.openTextDocument({
-        content: result.generatedXml,
-        language: 'xml'
+        content: combinedContent,
+        language: 'plaintext'
       });
       await vscode.window.showTextDocument(newDocument, {
         viewColumn: vscode.ViewColumn.Beside,
@@ -5313,7 +5525,12 @@ async function finalizeGeneratedFragments(
         result.tokenDefinitions
       );
       const sourceFileName = getWorkspaceRelativePath(outputTarget.uri);
-      await openInjectionReport(sourceFileResults, outputTarget.uri, result.generatedXml);
+      await openGenerationReport(
+        sourceFileResults,
+        outputTarget.uri,
+        result.generationDetails ?? result.generatedXml,
+        result.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${sourceFileName}`
       );
@@ -5333,7 +5550,12 @@ async function finalizeGeneratedFragments(
         result.tokenDefinitions
       );
       const fileName = getWorkspaceRelativePath(outputTarget.uri);
-      await openInjectionReport(selectFileResults, outputTarget.uri, result.generatedXml);
+      await openGenerationReport(
+        selectFileResults,
+        outputTarget.uri,
+        result.generationDetails ?? result.generatedXml,
+        result.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
       );
@@ -5352,7 +5574,12 @@ async function finalizeGeneratedFragments(
         affectingTokens,
         result.tokenDefinitions
       );
-      await openInjectionReport(currentFileResults, outputTarget.uri, result.generatedXml);
+      await openGenerationReport(
+        currentFileResults,
+        outputTarget.uri,
+        result.generationDetails ?? result.generatedXml,
+        result.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
       );
@@ -5364,6 +5591,9 @@ async function finalizeGeneratedFragments(
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
       );
+      if (result.generationDetails) {
+        await openGenerationReport([], derivedSourceUri, result.generationDetails, result.skippedRows);
+      }
       break;
     }
   }
@@ -6967,7 +7197,13 @@ async function generateFromTemplateOrSnippet(target: OutputTarget): Promise<void
     title: "Generating XML fragments...",
     cancellable: false
   }, async (progress) => {
-    return await handleSelectionInternal(fragmentIds, editor, progress);
+    const selectionOptions: SelectionHandlingOptions = {
+      targetType: target.type,
+      targetUri: target.type === 'sourceFile' || target.type === 'currentFile' || target.type === 'selectFile'
+        ? target.uri
+        : undefined
+    };
+    return await handleSelectionInternal(fragmentIds, editor, progress, selectionOptions);
   });
 
   if (!generationResult) {
@@ -7041,6 +7277,7 @@ async function finalizeGeneratedFragmentsWithTarget(
   const currentFileUri = currentDocument.uri;
   // Use freshly extracted tokens from generation, not cached ones
   const affectingTokens = generation.extractedTokens || injectionAffectingTokens.get(currentFileUri.toString());
+  const derivedSourceUri = generation.sourceUri ? vscode.Uri.parse(generation.sourceUri) : undefined;
 
   switch (target.type) {
     case 'currentFile': {
@@ -7052,7 +7289,12 @@ async function finalizeGeneratedFragmentsWithTarget(
         affectingTokens,
         generation.tokenDefinitions
       );
-      await openInjectionReport(currentFileResults, target.uri, generation.generatedXml);
+      await openGenerationReport(
+        currentFileResults,
+        target.uri,
+        generation.generationDetails ?? generation.generatedXml,
+        generation.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
       );
@@ -7070,7 +7312,12 @@ async function finalizeGeneratedFragmentsWithTarget(
         generation.tokenDefinitions
       );
       const sourceFileName = getWorkspaceRelativePath(target.uri);
-      await openInjectionReport(sourceFileResults, target.uri, generation.generatedXml);
+      await openGenerationReport(
+        sourceFileResults,
+        target.uri,
+        generation.generationDetails ?? generation.generatedXml,
+        generation.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
       );
@@ -7088,7 +7335,12 @@ async function finalizeGeneratedFragmentsWithTarget(
         generation.tokenDefinitions
       );
       const fileName = getWorkspaceRelativePath(target.uri);
-      await openInjectionReport(selectFileResults, target.uri, generation.generatedXml);
+      await openGenerationReport(
+        selectFileResults,
+        target.uri,
+        generation.generationDetails ?? generation.generatedXml,
+        generation.skippedRows
+      );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
       );
@@ -7097,9 +7349,16 @@ async function finalizeGeneratedFragmentsWithTarget(
     }
 
     case 'newEditor': {
+      const report = buildGenerationReport(
+        [],
+        derivedSourceUri ? getWorkspaceRelativePath(derivedSourceUri) : '(Not Applicable)',
+        generation.generationDetails ?? generation.generatedXml,
+        generation.skippedRows
+      );
+      const combinedContent = `${report}\n\nGenerated Fragments:\n${'-'.repeat(70)}\n\n${generation.generatedXml}`;
       const newDocument = await vscode.workspace.openTextDocument({
-        content: generation.generatedXml,
-        language: 'xml'
+        content: combinedContent,
+        language: 'plaintext'
       });
       await vscode.window.showTextDocument(newDocument, {
         viewColumn: vscode.ViewColumn.Beside,
@@ -7118,6 +7377,9 @@ async function finalizeGeneratedFragmentsWithTarget(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
       );
       setGenerationStatus('Fragments copied to clipboard', true);
+      if (generation.generationDetails) {
+        await openGenerationReport([], derivedSourceUri, generation.generationDetails, generation.skippedRows);
+      }
       break;
     }
   }
@@ -7206,10 +7468,16 @@ function getTokenValues(
     return { cleanTokenValues, rawTokenValues };
 }
 
+type SelectionHandlingOptions = {
+    targetType?: OutputTarget['type'];
+    targetUri?: vscode.Uri;
+};
+
 async function handleSelectionInternal(
     fragmentIds: string[],
     editor: vscode.TextEditor,
-    progress: vscode.Progress<{ message?: string; increment?: number }>
+    progress: vscode.Progress<{ message?: string; increment?: number }>,
+    options?: SelectionHandlingOptions
 ): Promise<GeneratedFragmentResult | undefined> {
     try {
         progress.report({ message: "Loading configuration...", increment: 10 });
@@ -7219,11 +7487,24 @@ async function handleSelectionInternal(
         const isSnippet = isSnippetDocument(editor.document);
         const isTemplateOrSnippet = isTemplate || isSnippet;
         
-        // If we're in a template/snippet, we need to get the source XML document for token reading
+        // If we're in a template/snippet, determine which XML file should supply token context
         let sourceXmlDocumentForTokens: vscode.TextDocument | undefined;
         if (isTemplateOrSnippet) {
-            sourceXmlDocumentForTokens = await getXmlDocumentForContext(editor.document);
-            debugLog(`[DEBUG] handleSelectionInternal: Using source XML for token reading: ${sourceXmlDocumentForTokens?.uri.fsPath}`);
+            const targetType = options?.targetType;
+            if (targetType === 'newEditor' || targetType === 'clipboard') {
+                debugLog('[DEBUG] handleSelectionInternal: Skipping token context lookup (output does not inject)');
+            } else if (options?.targetUri) {
+                try {
+                    sourceXmlDocumentForTokens = await vscode.workspace.openTextDocument(options.targetUri);
+                    debugLog(`[DEBUG] handleSelectionInternal: Using target URI for token reading: ${options.targetUri.fsPath}`);
+                } catch (openError) {
+                    debugLog('[DEBUG] handleSelectionInternal: Failed to open target URI, falling back to remembered source', openError);
+                    sourceXmlDocumentForTokens = await getXmlDocumentForContext(editor.document);
+                }
+            } else {
+                sourceXmlDocumentForTokens = await getXmlDocumentForContext(editor.document);
+            }
+            debugLog(`[DEBUG] handleSelectionInternal: Token context document: ${sourceXmlDocumentForTokens?.uri.fsPath ?? 'none'}`);
         }
         
         const documentType = requireDocumentType(editor.document);
@@ -7308,6 +7589,9 @@ async function handleSelectionInternal(
         setGenerationStatus(`Detected ${groups.length} group${groups.length === 1 ? '' : 's'} - preparing…`, false);
         const allWarnings: string[] = [];
         const outputSections: string[] = [];
+        const reportSections: string[] = [];
+        const skippedRowMessages: string[] = [];
+        const reportSections: string[] = [];
 
         for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
             const group = groups[groupIndex];
@@ -7341,16 +7625,17 @@ async function handleSelectionInternal(
                     const line = batch[lineIndex];
                     const { cleanTokenValues, rawTokenValues } = getTokenValues(headerTokens, tableTokens, headerLine, line);
 
-                    groupTokenData.push({ clean: { ...cleanTokenValues }, raw: { ...rawTokenValues } });
-
                     const missingTokens = [
                         ...collectMissingRequiredTokens(headerTokens, tokenName => rawTokenValues[tokenName]),
                         ...collectMissingRequiredTokens(tableTokens, tokenName => rawTokenValues[tokenName])
                     ];
                     if (missingTokens.length > 0) {
                         const absoluteRow = batchStart + lineIndex + 1;
-                        throw new Error(`Group ${groupIndex + 1}, row ${absoluteRow}: Missing required tokens (${missingTokens.join(', ')})`);
+                        skippedRowMessages.push(`Group ${groupIndex + 1}, row ${absoluteRow}: ${missingTokens.join(', ')}`);
+                        continue;
                     }
+
+                    groupTokenData.push({ clean: { ...cleanTokenValues }, raw: { ...rawTokenValues } });
                 }
 
                 if (batchEnd < totalRows) {
@@ -7359,13 +7644,17 @@ async function handleSelectionInternal(
             }
             logDuration(`Group ${groupIndex + 1}: fragment rendering`, groupRenderStart);
 
+            if (groupTokenData.length === 0) {
+                continue;
+            }
+
             const allTokenNames = [...headerTokens.map(t => t.name), ...tableTokens.map(t => t.name)];
             debugLog(`[KAHUA] Formatting group ${groupIndex + 1}: preparing token table for ${groupTokenData.length} rows`);
             const tokenTableStart = Date.now();
             const tokenTable = createFormattedTokenTable(allTokenNames, groupTokenData, tokenDefaults, groupIndex + 1);
             logDuration(`Group ${groupIndex + 1}: token table`, tokenTableStart);
 
-            const groupOutputSections: string[] = [tokenTable];
+            reportSections.push(tokenTable);
             const renderResult = renderFragmentSectionsFromRows(
                 selectedFragmentDefs,
                 groupTokenData,
@@ -7375,9 +7664,9 @@ async function handleSelectionInternal(
                 suppressWarnings
             );
             allWarnings.push(...renderResult.warnings);
-            groupOutputSections.push(...renderResult.sections);
-
-            outputSections.push(groupOutputSections.join('\n\n'));
+            if (renderResult.sections.length > 0) {
+                outputSections.push(renderResult.sections.join('\n\n'));
+            }
         }
 
         setGenerationStatus('Formatting generated XML…', false);
@@ -7442,11 +7731,16 @@ async function handleSelectionInternal(
             }
         }
 
+        const generationDetails = reportSections.join('\n\n').trim();
+
         return {
             generatedXml,
             fragmentDefinition: selectedFragmentDefs[0],
             tokenDefinitions,
-            extractedTokens
+            extractedTokens,
+            generationDetails: generationDetails.length > 0 ? generationDetails : undefined,
+            skippedRows: skippedRowMessages.length > 0 ? skippedRowMessages : undefined,
+            sourceUri: sourceXmlDocumentForTokens?.uri?.toString() ?? editor.document.uri.toString()
         };
 
     } catch (error) {
@@ -7465,3 +7759,24 @@ async function handleSelectionInternal(
 export function parseXmlStringForTests(xml: string): SaxElement | null {
   return XmlParsingService.parseXmlDocumentInternal(xml);
 }
+
+export async function __testGenerateXmlFromRequest(
+  request: GenerationRequest
+): Promise<GenerationResult | undefined> {
+  const progressStub = {
+    report: () => {}
+  } as vscode.Progress<{ message?: string; increment?: number }>;
+  return generateXmlFromRequest(request, progressStub);
+}
+
+export function __testStoreInjectionTokensForDocument(
+  documentUri: vscode.Uri,
+  tokenDefinitions: TokenNameDefinition[],
+  extractedTokens: Map<string, string>
+): Map<string, string> | undefined {
+  storeInjectionTokensForDocument(documentUri, tokenDefinitions, extractedTokens);
+  const stored = injectionAffectingTokens.get(documentUri.toString());
+  injectionAffectingTokens.delete(documentUri.toString());
+  return stored;
+}
+

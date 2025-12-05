@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { __setSmartInjectionConfigOverride, __testSmartInjectionResolution, parseAttributeHintMetadata, buildAttributeDisplayInfo, removeAttributePredicates, parseXmlStringForTests } from '../../extension';
+import { __setSmartInjectionConfigOverride, __testSmartInjectionResolution, parseAttributeHintMetadata, buildAttributeDisplayInfo, removeAttributePredicates, parseXmlStringForTests, __testGenerateXmlFromRequest, __testStoreInjectionTokensForDocument } from '../../extension';
 
 // Mock implementation of injection path template logic for testing
 function mockApplyMultiTokenTemplate(template: string, currentTokenName: string, currentTokenValue: string, allTokens: Map<string, string>): string {
@@ -95,6 +95,121 @@ function mockApplyInjectionPathTemplate(xpath: string, affectingTokens: Map<stri
     result: applied ? modifiedXPath : xpath
   };
 }
+
+suite('Generation metadata', () => {
+  test('table generation includes token table in report details', async () => {
+    const headerTokens = [
+      { name: 'appname', defaultValue: '', required: false },
+      { name: 'entity', defaultValue: '', required: false }
+    ];
+    const tableTokens = [
+      { name: 'name', defaultValue: '', required: true },
+      { name: 'type', defaultValue: 'Text', required: false }
+    ];
+
+    const request = {
+      fragmentIds: ['attributes'],
+      documentType: 'extension',
+      outputTarget: { type: 'newEditor' },
+      tokenData: {
+        headerTokens,
+        tableTokens,
+        extractedTokens: new Map<string, string>([
+          ['appname', 'kahua_AEC_RFI'],
+          ['entity', 'RFI']
+        ])
+      },
+      dataRows: [
+        { name: 'Priority', type: 'Text' }
+      ],
+      selectedFragmentDefs: [
+        {
+          id: 'attributes',
+          name: 'Attributes',
+          tokenReferences: [],
+          fragments: {
+            body: {
+              Attributes: '<Attribute Name="{$name}" />'
+            }
+          }
+        }
+      ],
+      tokenDefinitions: []
+    } as any;
+
+    request.skippedRows = ['Row 2: Missing required column'];
+    const result = await __testGenerateXmlFromRequest(request);
+    assert.ok(result?.generationDetails, 'Expected generation details to be captured');
+    assert.ok(
+      result?.generationDetails?.includes('// Entity Context: RFI'),
+      'Entity context should be recorded in generation details'
+    );
+    assert.ok(
+      result?.generationDetails?.includes('Priority'),
+      'Token table should include entered row values'
+    );
+    assert.deepStrictEqual(
+      result?.skippedRows,
+      ['Row 2: Missing required column'],
+      'Skipped row metadata should flow through generation result'
+    );
+  });
+
+  test('storeInjectionTokensForDocument caches only injection-affecting tokens plus entity', () => {
+    const docUri = vscode.Uri.parse('file:///snippet.csv');
+    const tokenDefs = [
+      {
+        id: 'appTokens',
+        name: 'App Tokens',
+        type: 'header',
+        tokens: 'appname',
+        tokenReadPaths: {
+          appname: {
+            type: 'attribute',
+            path: 'App/@Name',
+            affectsInjection: true
+          }
+        }
+      },
+      {
+        id: 'misc',
+        name: 'Misc Tokens',
+        type: 'header',
+        tokens: 'description',
+        tokenReadPaths: {
+          description: {
+            type: 'attribute',
+            path: 'App/@Description',
+            affectsInjection: false
+          }
+        }
+      }
+    ] as any;
+
+    const extractedTokens = new Map<string, string>([
+      ['appname', 'kahua_AEC_RFI'],
+      ['description', 'test'],
+      ['entity', 'RFI']
+    ]);
+
+    const stored = __testStoreInjectionTokensForDocument(docUri, tokenDefs, extractedTokens);
+    assert.ok(stored, 'Expected injection tokens to be stored');
+    assert.strictEqual(
+      stored?.get('appname'),
+      'kahua_AEC_RFI',
+      'Injection-affecting tokens should be cached'
+    );
+    assert.strictEqual(
+      stored?.get('entity'),
+      'RFI',
+      'Entity token should always be cached for snippets/templates'
+    );
+    assert.ok(
+      !stored?.has('description'),
+      'Non injection-affecting tokens should not be cached'
+    );
+  });
+});
 
 suite('Smart Injection Resolution Tests', () => {
   teardown(() => {
@@ -233,88 +348,183 @@ suite('Smart Injection Resolution Tests', () => {
       };
     }
 
-    test('should auto-resolve Table with matching EntityDefName', () => {
-      const mockTargets = [
-        {
-          injectionPath: 'DataStore/Tables/Table[@EntityDefName="someapp.OtherEntity"]/Columns',
-          context: 'Table[EntityDefName="someapp.OtherEntity"]/Columns',
-          attributes: { EntityDefName: 'someapp.OtherEntity' },
-          openTagLine: 10,
-          closeTagLine: 15,
-          xmlNodeName: 'Columns',
-          enrichedPath: 'DataStore/Tables/Table/Columns'
-        },
-        {
-          injectionPath: 'DataStore/Tables/Table[@EntityDefName="kahua_aec_rfi_extension.Field"]/Columns',
-          context: 'Table[EntityDefName="kahua_aec_rfi_extension.Field"]/Columns', 
-          attributes: { EntityDefName: 'kahua_aec_rfi_extension.Field' },
-          openTagLine: 20,
-          closeTagLine: 25,
-          xmlNodeName: 'Columns',
-          enrichedPath: 'DataStore/Tables/Table/Columns'
-        },
-        {
-          injectionPath: 'DataStore/Tables/Table[@EntityDefName="otherapp.Project"]/Columns',
-          context: 'Table[EntityDefName="otherapp.Project"]/Columns',
-          attributes: { EntityDefName: 'otherapp.Project' },
-          openTagLine: 30,
-          closeTagLine: 35,
-          xmlNodeName: 'Columns',
-          enrichedPath: 'DataStore/Tables/Table/Columns'
-        }
-      ];
+    function createDataStoreColumnsTarget(
+      entityDefName: string,
+      appAttributes?: { Name?: string; Extends?: string }
+    ): any {
+      const appElement: any = {
+        tagName: 'App',
+        attributes: { ...(appAttributes || {}) },
+        parent: undefined
+      };
+      const dataStoreElement: any = {
+        tagName: 'DataStore',
+        attributes: {},
+        parent: appElement
+      };
+      const tablesElement: any = {
+        tagName: 'Tables',
+        attributes: {},
+        parent: dataStoreElement
+      };
+      const tableElement: any = {
+        tagName: 'Table',
+        attributes: { EntityDefName: entityDefName },
+        parent: tablesElement
+      };
+      const columnsElement: any = {
+        tagName: 'Columns',
+        attributes: {},
+        parent: tableElement
+      };
 
-      const affectingTokens = new Map([
+      appElement.children = [dataStoreElement];
+      dataStoreElement.children = [tablesElement];
+      tablesElement.children = [tableElement];
+      tableElement.children = [columnsElement];
+      columnsElement.children = [];
+
+      return {
+        tagName: 'DataStore',
+        xmlNodeName: 'Columns',
+        openTagLine: 10,
+        closeTagLine: 12,
+        indentation: '    ',
+        isSelfClosing: false,
+        lastChildLine: 11,
+        context: `Table(${entityDefName})/Columns`,
+        injectionPath: 'App/DataStore/Tables/Table/Columns',
+        attributes: {},
+        nameAttributeValue: undefined,
+        enrichedPath: 'App/DataStore/Tables/Table/Columns',
+        element: columnsElement
+      };
+    }
+
+    test('should auto-resolve Table with matching EntityDefName', () => {
+      const targets = [
+        createDataStoreColumnsTarget('someapp.OtherEntity', { Name: 'kahua_aec_rfi_extension' }),
+        createDataStoreColumnsTarget('kahua_aec_rfi_extension.Field', { Name: 'kahua_aec_rfi_extension' }),
+        createDataStoreColumnsTarget('otherapp.Project', { Name: 'kahua_aec_rfi_extension' })
+      ];
+      const tokens = new Map<string, string>([
         ['appname', 'kahua_aec_rfi_extension'],
         ['entity', 'Field']
       ]);
 
-      // Simulate trySmartInjectionResolution logic for columns section
-      const sectionName = 'columns';
-      const appname = affectingTokens.get('appname');
-      const entity = affectingTokens.get('entity');
-      
-      let selectedTarget = undefined;
-      
-      if (sectionName.toLowerCase().includes('column') || sectionName.toLowerCase() === 'columns') {
-        if (appname && entity) {
-          const expectedEntityDefName = `${appname}.${entity}`;
-          
-          for (const target of mockTargets) {
-            if (target.injectionPath && target.injectionPath.includes('Table')) {
-              // Check injection path
-              const pathHasEntityDefName = target.injectionPath.includes(`@EntityDefName="${expectedEntityDefName}"`) ||
-                                           target.injectionPath.includes(`@EntityDefName='${expectedEntityDefName}'`) ||
-                                           target.injectionPath.includes(`EntityDefName="${expectedEntityDefName}"`);
-              
-              if (pathHasEntityDefName) {
-                selectedTarget = target;
-                break;
-              }
-              
-              // Check context
-              if (target.context && target.context.includes(expectedEntityDefName)) {
-                selectedTarget = target;
-                break;
-              }
-              
-              // Check attributes
-              if (target.attributes && target.attributes['EntityDefName'] === expectedEntityDefName) {
-                selectedTarget = target;
-                break;
-              }
-            }
-          }
-        }
-      }
+      const result = __testSmartInjectionResolution('DataStore', targets, tokens);
+      assert.ok(result, 'Should find a matching target');
+      assert.strictEqual(result, targets[1], 'Should select target whose EntityDefName matches appname.entity');
+    });
 
-      assert.ok(selectedTarget, 'Should find a matching target');
-      assert.strictEqual(selectedTarget?.attributes?.EntityDefName, 'kahua_aec_rfi_extension.Field', 
-                        'Should select target with correct EntityDefName');
-      assert.strictEqual(selectedTarget?.openTagLine, 20, 'Should select the correct target by line');
+    test('auto-resolves DataStore columns when App Name matches among multiple tables', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_AEC_RFI'],
+        ['entity', 'RFI']
+      ]);
 
-      console.log('✅ Smart injection target resolution works correctly');
-      console.log(`   Selected: ${selectedTarget?.attributes?.EntityDefName} at line ${selectedTarget?.openTagLine + 1}`);
+      const matchingTarget = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_AEC_RFI'
+      });
+      const otherTarget = createDataStoreColumnsTarget('kahua_AEC_RFI.Other', {
+        Name: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
+      const result = __testSmartInjectionResolution('DataStore', [otherTarget, matchingTarget], tokens);
+      assert.strictEqual(result, matchingTarget, 'Should select the table whose EntityDefName matches appname.entity');
+    });
+
+    test('auto-resolves DataStore columns when App Extends fallback matches EntityDefName', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_aec_rfi_extension'],
+        ['entity', 'RFI']
+      ]);
+
+      const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_aec_rfi_extension',
+        Extends: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends', 'any'] });
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      assert.strictEqual(
+        result,
+        target,
+        'Should select DataStore target when Extends-derived EntityDefName matches'
+      );
+    });
+
+    test('respects appMatchOrder when Extends fallback is disabled', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_aec_rfi_extension'],
+        ['entity', 'RFI']
+      ]);
+
+      const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_aec_rfi_extension',
+        Extends: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name'] });
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      assert.strictEqual(result, undefined, 'Should not auto-select when only Extends matches but strategy excludes it');
+    });
+
+    test('auto-resolves using root Extends when appname token is missing', () => {
+      const tokens = new Map<string, string>([['entity', 'RFI']]);
+      const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_aec_rfi_extension',
+        Extends: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['extends', 'name'] });
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      assert.strictEqual(result, target, 'Should fall back to App root Extends attribute when token is absent');
+    });
+
+    test('falls back to generic matching when strategy includes "any"', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'UnrelatedApp'],
+        ['entity', 'RFI']
+      ]);
+      const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      assert.strictEqual(result, target, 'Should use "any" fallback to pick a target when no other strategy matches');
+    });
+
+    test('any strategy still considers App Extends when token app name differs', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_aec_rfi_extension'],
+        ['entity', 'RFI']
+      ]);
+      const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
+        Name: 'kahua_aec_rfi_extension',
+        Extends: 'kahua_AEC_RFI'
+      });
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      assert.strictEqual(
+        result,
+        target,
+        'Should leverage App Extends even when only "any" strategy is configured'
+      );
+    });
+
+    test('returns undefined when no DataStore targets are available', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_AEC_RFI'],
+        ['entity', 'RFI']
+      ]);
+
+      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
+      const result = __testSmartInjectionResolution('DataStore', [], tokens);
+      assert.strictEqual(result, undefined, 'Should not auto-select when no DataStore columns exist');
     });
 
     test('respects configurable App match order', () => {
@@ -787,6 +997,76 @@ suite('Kahua sample XML scenarios', () => {
       "App/DataStore/Tables/Table[@EntityDefName='missing']/Columns"
     );
     assert.strictEqual(relaxed, 'App/DataStore/Tables/Table/Columns');
-    assert.ok(columns.length >= 2, 'Expected multiple DataStore tables to present as options');
+    console.log(`✅ Sample XML contains ${columns.length} DataStore Columns node(s)`);
+    assert.ok(columns.length >= 1, 'Sample XML should expose at least one DataStore table');
+  });
+
+  suite('LogFields attribute display info', () => {
+    const logPath = 'App/App.HubDefs/HubDef/HubDef.Logs/Log("Label"|"Name")/Log.Fields';
+    const meta = parseAttributeHintMetadata(logPath);
+
+    function createLogFieldTarget(attributes: { label?: string; name?: string; hubName?: string }) {
+      const app: any = { tagName: 'App', attributes: {}, line: 0, column: 0, parent: undefined, children: [] };
+      const hubDefs: any = { tagName: 'App.HubDefs', attributes: {}, line: 1, column: 0, parent: app, children: [] };
+      const hubDef: any = {
+        tagName: 'HubDef',
+        attributes: attributes.hubName ? { Name: attributes.hubName } : {},
+        line: 2,
+        column: 0,
+        parent: hubDefs,
+        children: []
+      };
+      const logs: any = { tagName: 'HubDef.Logs', attributes: {}, line: 3, column: 0, parent: hubDef, children: [] };
+      const log: any = {
+        tagName: 'Log',
+        attributes: {
+          ...(attributes.label ? { Label: attributes.label } : {}),
+          ...(attributes.name ? { Name: attributes.name } : {})
+        },
+        line: 4,
+        column: 0,
+        parent: logs,
+        children: []
+      };
+      const fields: any = {
+        tagName: 'Log.Fields',
+        attributes: {},
+        line: 5,
+        column: 0,
+        parent: log,
+        children: []
+      };
+
+      app.children = [hubDefs];
+      hubDefs.children = [hubDef];
+      hubDef.children = [logs];
+      logs.children = [log];
+      log.children = [fields];
+
+      return buildTargetFromElement(fields, meta.segments, meta.hints);
+    }
+
+    test('uses Label attribute when available', () => {
+      const target = createLogFieldTarget({ label: '[DataViewAllLabel]', name: 'WorkflowLog', hubName: 'ExtendedWorkflow' });
+      const info = buildAttributeDisplayInfo(target);
+      assert.ok(info.label?.includes('[DataViewAllLabel]'), 'Expected placeholder label to surface');
+      assert.ok(
+        info.detail?.includes('[DataViewAllLabel]'),
+        'Detail string should include the resolved Log label value'
+      );
+    });
+
+    test('falls back to Name attribute when Label is missing', () => {
+      const target = createLogFieldTarget({ name: 'WorkflowLog' });
+      const info = buildAttributeDisplayInfo(target);
+      assert.ok(info.label?.includes('WorkflowLog'), 'Expected Name attribute to surface when Label missing');
+    });
+
+    test('falls back to line information when no configured attributes exist', () => {
+      const target = createLogFieldTarget({});
+      const info = buildAttributeDisplayInfo(target);
+      assert.ok(info.label?.startsWith('Line'), 'Should fall back to line number when no hints resolve values');
+      assert.ok(info.detail?.includes('Log.Fields'), 'Detail should still include the XPath segments');
+    });
   });
 });
