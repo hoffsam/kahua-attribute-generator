@@ -4002,21 +4002,20 @@ async function openGenerationReport(
 
 /**
  * Check if a target exactly matches a specific token using configuration-based fallbacks
+ * Returns the index of the matching injection path (0 = first/best match), or -1 if no match
  */
 function tokenMatchesTarget(
   target: XmlTargetSection,
   tokenName: string,
   tokenValue: string,
-  tokenDefinitions?: TokenNameDefinition[],
-  allTokens?: Map<string, string>
-): boolean {
+  tokenDefinitions?: TokenNameDefinition[]
+): number {
   if (!tokenValue) {
-    return false;
+    return -1;
   }
 
   // Get the token's configuration
   let injectionMatchPaths: string[] = [];
-  let injectionPathTemplate: string | undefined;
   
   if (tokenDefinitions) {
     for (const tokenDef of tokenDefinitions) {
@@ -4027,165 +4026,36 @@ function tokenMatchesTarget(
         if (readPath.injectionmatchpaths && readPath.injectionmatchpaths.length > 0) {
           injectionMatchPaths = readPath.injectionmatchpaths;
         }
-        
-        injectionPathTemplate = readPath.injectionPathTemplate;
         break;
       }
-    }
-  }
-
-  // If this token has an injection path template, validate it matches
-  if (injectionPathTemplate && allTokens) {
-    debugLog(`[DEBUG] Token ${tokenName}: Validating injection path template: ${injectionPathTemplate}`);
-    
-    // Extract all token placeholders from the template
-    const placeholders = [...injectionPathTemplate.matchAll(/\{([^}]+)\}/g)].map(m => m[1]);
-    
-    // For each placeholder that's not 'value', we need to try all its injection match paths
-    // and find a combination that makes the template match the target
-    
-    // Build a map of placeholder → possible values
-    const possibleValues = new Map<string, string[]>();
-    
-    for (const placeholder of placeholders) {
-      if (placeholder === 'value') {
-        possibleValues.set('value', [tokenValue]);
-        continue;
-      }
-      
-      // This is another token - get its injection match paths
-      const otherTokenValue = allTokens.get(placeholder);
-      if (!otherTokenValue) {
-        debugLog(`[DEBUG] Token ${tokenName}: Template references token '${placeholder}' which is not available`);
-        // Template can't be validated - fall through to regular matching
-        break;
-      }
-      
-      // Get the injection match paths for this token
-      let otherTokenPaths: string[] = [];
-      if (tokenDefinitions) {
-        for (const tokenDef of tokenDefinitions) {
-          if (tokenDef.tokenReadPaths?.[placeholder]) {
-            const readPath = tokenDef.tokenReadPaths[placeholder];
-            if (readPath.injectionmatchpaths && readPath.injectionmatchpaths.length > 0) {
-              otherTokenPaths = readPath.injectionmatchpaths;
-            }
-            break;
-          }
-        }
-      }
-      
-      // For each injection match path, extract the target's attribute value
-      // and use it to build the template pattern
-      const values: string[] = [];
-      for (const matchPath of otherTokenPaths) {
-        if (matchPath.endsWith('/@*')) {
-          // Wildcard - check if ANY attribute on the element equals the token value
-          const elementPath = matchPath.substring(0, matchPath.length - 3);
-          const element = findAncestorByTag(target.element, elementPath);
-          if (element && element.attributes) {
-            for (const [attrName, attrValue] of Object.entries(element.attributes)) {
-              if (attrValue) {
-                values.push(attrValue);
-              }
-            }
-          }
-          continue;
-        }
-        
-        const pathMatch = matchPath.match(/^(.+)\/@(\w+)$/);
-        if (!pathMatch) continue;
-        
-        const elementPath = pathMatch[1];
-        const attributeName = pathMatch[2];
-        
-        const element = findAncestorByTag(target.element, elementPath);
-        if (element && element.attributes) {
-          const matchingKey = Object.keys(element.attributes).find(
-            k => k.toLowerCase() === attributeName.toLowerCase()
-          );
-          const attrValue = matchingKey ? element.attributes[matchingKey] : undefined;
-          if (attrValue) {
-            values.push(attrValue);
-          }
-        }
-      }
-      
-      if (values.length === 0) {
-        debugLog(`[DEBUG] Token ${tokenName}: No values found for placeholder '${placeholder}'`);
-        // Template can't be validated - fall through to regular matching
-        break;
-      }
-      
-      possibleValues.set(placeholder, values);
-    }
-    
-    // Only attempt template matching if we got values for all placeholders
-    if (possibleValues.size === placeholders.length) {
-      // Now try all combinations to see if any match the target
-      const tryResolve = (placeholderIndex: number, currentResolved: string): boolean => {
-        if (placeholderIndex >= placeholders.length) {
-          // All placeholders resolved - check if it matches
-          debugLog(`[DEBUG] Token ${tokenName}: Trying resolved template: ${currentResolved}`);
-          debugLog(`[DEBUG] Token ${tokenName}: Target injection path: ${target.injectionPath}`);
-          
-          const templateMatch = currentResolved.match(/@\w+=['"']([^'"']+)['"']/);
-          const targetMatch = target.injectionPath?.match(/@\w+=['"']([^'"']+)['"']/);
-          
-          debugLog(`[DEBUG] Token ${tokenName}: Template extracted: ${templateMatch?.[1]}, Target extracted: ${targetMatch?.[1]}`);
-          
-          if (templateMatch && targetMatch) {
-            const expectedValue = templateMatch[1];
-            const actualValue = targetMatch[1];
-            
-            if (expectedValue === actualValue) {
-              debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via injection path template`);
-              return true;
-            }
-          }
-          return false;
-        }
-        
-        const placeholder = placeholders[placeholderIndex];
-        const values = possibleValues.get(placeholder) || [];
-        
-        for (const value of values) {
-          const resolved = currentResolved.replace(`{${placeholder}}`, value);
-          if (tryResolve(placeholderIndex + 1, resolved)) {
-            return true;
-          }
-        }
-        
-        return false;
-      };
-      
-      if (tryResolve(0, injectionPathTemplate)) {
-        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} MATCHED via template!`);
-        return true;
-      } else {
-        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} template did not match - trying fallback matching`);
-        // Fall through to regular injection match path logic below
-      }
-    } else {
-      debugLog(`[DEBUG] Token ${tokenName}: Template validation skipped - not all placeholders resolved`);
-      // Fall through to regular injection match path logic below
     }
   }
 
   // Try each injection match path in order (stop at first match)
-  for (const matchPath of injectionMatchPaths) {
+  for (let i = 0; i < injectionMatchPaths.length; i++) {
+    const matchPath = injectionMatchPaths[i];
     // Check for wildcard: "App/@*" means match ANY attribute on App
     if (matchPath.endsWith('/@*')) {
       const elementPath = matchPath.substring(0, matchPath.length - 3);  // Remove "/@*"
       const element = findAncestorByTag(target.element, elementPath);
       if (element && element.attributes) {
+        // Special case: if token value is 'any', match any target with this element
+        if (tokenValue.toLowerCase() === 'any') {
+          debugLog(`[DEBUG] Token ${tokenName}=any matched via ${matchPath} (universal match) at priority ${i}`);
+          return i;
+        }
+        
         // Check if ANY attribute equals the token value
         for (const [attrName, attrValue] of Object.entries(element.attributes)) {
           if (attrValue === tokenValue) {
-            debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath} (${attrName})`);
-            return true;
+            debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath} (${attrName}) at priority ${i}`);
+            return i;
           }
         }
+      } else if (element && tokenValue.toLowerCase() === 'any') {
+        // Element exists but has no attributes, still match if token is 'any'
+        debugLog(`[DEBUG] Token ${tokenName}=any matched via ${matchPath} (element exists, universal match) at priority ${i}`);
+        return i;
       }
       continue;
     }
@@ -4211,8 +4081,8 @@ function tokenMatchesTarget(
       const attrValue = matchingKey ? element.attributes[matchingKey] : undefined;
       
       if (attrValue === tokenValue) {
-        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath}`);
-        return true;
+        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath} at priority ${i}`);
+        return i;
       }
     }
   }
@@ -4221,41 +4091,45 @@ function tokenMatchesTarget(
   // This is important for tokens like 'entity' that may not have injectionMatchPaths
   if (injectionMatchPaths.length === 0 && injectionPathContainsValue(target.injectionPath, tokenValue)) {
     debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in injection path`);
-    return true;
+    return 0; // Default priority
   }
 
   // Check xpath path and context as well (fallback)
   if (injectionMatchPaths.length === 0) {
     if (target.xpathPath && injectionPathContainsValue(target.xpathPath, tokenValue)) {
       debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in xpath path`);
-      return true;
+      return 0; // Default priority
     }
 
     if (target.context && injectionPathContainsValue(target.context, tokenValue)) {
       debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in context`);
-      return true;
+      return 0; // Default priority
     }
   }
 
   debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} did NOT match target`);
-  return false;
+  return -1;
 }
 
 /**
  * Check if a target exactly matches ALL tokens
+ * Returns the total match score (sum of priorities), or -1 if any token doesn't match
  */
 function targetExactlyMatchesAllTokens(
   target: XmlTargetSection,
   tokens: Map<string, string>,
   tokenDefinitions?: TokenNameDefinition[]
-): boolean {
+): number {
+  let totalScore = 0;
   // Every token must match
   for (const [tokenName, tokenValue] of tokens.entries()) {
-    if (!tokenMatchesTarget(target, tokenName, tokenValue, tokenDefinitions, tokens)) {
-      return false; // Any token fails → target doesn't match
+    const score = tokenMatchesTarget(target, tokenName, tokenValue, tokenDefinitions);
+    if (score < 0) {
+      return -1; // Any token fails → target doesn't match
     }
+    totalScore += score;
   }
-  return true; // All tokens matched
+  return totalScore; // All tokens matched - return cumulative score (lower is better)
 }
 
 /**
@@ -4289,16 +4163,17 @@ function trySmartInjectionResolution(
       .join(', ')}, targets=${targets.length}`
   );
 
-  // Find targets that exactly match ALL tokens
-  const exactMatches: XmlTargetSection[] = [];
+  // Find targets that exactly match ALL tokens with their scores
+  const exactMatches: Array<{ target: XmlTargetSection; score: number }> = [];
   
   for (const target of targets) {
     const tokensMap = new Map(candidateTokens.map(t => [t.tokenName, t.value]));
     
-    if (targetExactlyMatchesAllTokens(target, tokensMap, tokenDefinitions)) {
-      exactMatches.push(target);
+    const score = targetExactlyMatchesAllTokens(target, tokensMap, tokenDefinitions);
+    if (score >= 0) {
+      exactMatches.push({ target, score });
       debugLog(
-        `[DEBUG] Target ${target.context || target.injectionPath} EXACTLY matches all tokens`
+        `[DEBUG] Target ${target.context || target.injectionPath} EXACTLY matches all tokens (score: ${score})`
       );
     } else {
       debugLog(
@@ -4307,24 +4182,30 @@ function trySmartInjectionResolution(
     }
   }
 
-  // Only auto-inject if exactly ONE target matches all tokens exactly
-  if (exactMatches.length === 1) {
+  // If we have matches, pick the one with the best (lowest) score
+  if (exactMatches.length > 0) {
+    // Sort by score (lowest first)
+    exactMatches.sort((a, b) => a.score - b.score);
+    
+    const bestMatch = exactMatches[0];
+    
+    // If there are multiple matches with the same score, don't auto-inject (ambiguous)
+    if (exactMatches.length > 1 && exactMatches[1].score === bestMatch.score) {
+      debugLog(
+        `[DEBUG] Multiple targets have the same score (${bestMatch.score}) - cannot auto-inject (ambiguous)`
+      );
+      return undefined;
+    }
+    
     debugLog(
       `[DEBUG] Smart injection selected ${
-        exactMatches[0].context || exactMatches[0].injectionPath || exactMatches[0].tagName
-      } for section "${sectionName}" (exact match)`
+        bestMatch.target.context || bestMatch.target.injectionPath || bestMatch.target.tagName
+      } for section "${sectionName}" (exact match with score ${bestMatch.score})`
     );
-    return exactMatches[0];
+    return bestMatch.target;
   }
 
-  if (exactMatches.length > 1) {
-    debugLog(
-      `[DEBUG] Multiple targets (${exactMatches.length}) exactly match all tokens for section "${sectionName}" - falling back to manual selection`
-    );
-  } else {
-    debugLog(`[DEBUG] No targets exactly match all tokens for section "${sectionName}"`);
-  }
-
+  debugLog(`[DEBUG] No targets exactly match all tokens for section "${sectionName}"`);
   return undefined;
 }
 

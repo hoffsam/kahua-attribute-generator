@@ -642,7 +642,10 @@ suite('Smart Injection Resolution Tests', () => {
       const nameOnlyTokenDefs = [{
         ...smartTokenDefinitions[0],
         tokenReadPaths: {
-          appname: { ...smartTokenDefinitions[0].tokenReadPaths.appname },
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@Name']  // ONLY Name, no Extends
+          },
           entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
         }
       }];
