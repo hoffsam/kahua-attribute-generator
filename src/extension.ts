@@ -4087,27 +4087,13 @@ function tokenMatchesTarget(
     }
   }
 
-  // Also check if value appears as complete token in injection path
-  // This is important for tokens like 'entity' that may not have injectionMatchPaths
-  if (injectionMatchPaths.length === 0 && injectionPathContainsValue(target.injectionPath, tokenValue)) {
-    debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in injection path`);
-    return 0; // Default priority
-  }
-
-  // Check xpath path and context as well (fallback)
+  // If no injection match paths configured for this token, it cannot participate in exact matching
   if (injectionMatchPaths.length === 0) {
-    if (target.xpathPath && injectionPathContainsValue(target.xpathPath, tokenValue)) {
-      debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in xpath path`);
-      return 0; // Default priority
-    }
-
-    if (target.context && injectionPathContainsValue(target.context, tokenValue)) {
-      debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in context`);
-      return 0; // Default priority
-    }
+    debugLog(`[DEBUG] Token ${tokenName} has no injectionMatchPaths configured - cannot match target`);
+    return -1;
   }
 
-  debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} did NOT match target`);
+  debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} did NOT match target with any configured path`);
   return -1;
 }
 
@@ -4121,14 +4107,94 @@ function targetExactlyMatchesAllTokens(
   tokenDefinitions?: TokenNameDefinition[]
 ): number {
   let totalScore = 0;
-  // Every token must match
+  const unmatchedTokens = new Set(tokens.keys());
+  
+  // First, try to match each token individually
   for (const [tokenName, tokenValue] of tokens.entries()) {
     const score = tokenMatchesTarget(target, tokenName, tokenValue, tokenDefinitions);
-    if (score < 0) {
-      return -1; // Any token fails → target doesn't match
+    if (score >= 0) {
+      totalScore += score;
+      unmatchedTokens.delete(tokenName);
     }
-    totalScore += score;
   }
+  
+  // If all tokens matched individually, we're done
+  if (unmatchedTokens.size === 0) {
+    return totalScore;
+  }
+  
+  // Try composite matching for remaining tokens
+  // Check if entity + appname together form EntityDefName (for DataStore Tables)
+  if (unmatchedTokens.has('entity') && tokens.has('appname')) {
+    const entity = tokens.get('entity')!;
+    const appname = tokens.get('appname')!;
+    
+    // Get the configured injection match paths for appname to know which attributes to try
+    let appnameMatchPaths: string[] = [];
+    if (tokenDefinitions) {
+      for (const tokenDef of tokenDefinitions) {
+        if (tokenDef.tokenReadPaths?.['appname']) {
+          const readPath = tokenDef.tokenReadPaths['appname'];
+          if (readPath.injectionmatchpaths && readPath.injectionmatchpaths.length > 0) {
+            appnameMatchPaths = readPath.injectionmatchpaths;
+          }
+          break;
+        }
+      }
+    }
+    
+    // Check if target has Table element with EntityDefName attribute (DataStore context)
+    const tableElement = findAncestorByTag(target.element, 'Table');
+    if (tableElement?.attributes?.['EntityDefName']) {
+      const entityDefName = tableElement.attributes['EntityDefName'];
+      const appElement = findAncestorByTag(target.element, 'App');
+      
+      // Try each configured match path in priority order
+      for (let i = 0; i < appnameMatchPaths.length; i++) {
+        const matchPath = appnameMatchPaths[i];
+        
+        if (matchPath === 'App/@Name' || matchPath === 'App/@*') {
+          // Try matching with Name attribute
+          const nameValue = appElement?.attributes?.['Name'];
+          if (nameValue && entityDefName === `${nameValue}.${entity}`) {
+            debugLog(`[DEBUG] Composite match: EntityDefName=${entityDefName} matches ${nameValue}.${entity}`);
+            unmatchedTokens.delete('entity');
+            totalScore += i; // Use priority from match path order
+            break;
+          }
+        }
+        
+        if (matchPath === 'App/@Extends' || matchPath === 'App/@*') {
+          // Try matching with Extends attribute
+          const extendsValue = appElement?.attributes?.['Extends'];
+          if (extendsValue && entityDefName === `${extendsValue}.${entity}`) {
+            debugLog(`[DEBUG] Composite match via Extends: EntityDefName=${entityDefName} matches ${extendsValue}.${entity}`);
+            unmatchedTokens.delete('entity');
+            totalScore += i; // Use priority from match path order
+            break;
+          }
+        }
+      }
+    }
+  }
+  
+  // Check if entity token matches EntityDef[@Name] (for EntityDef contexts)
+  if (unmatchedTokens.has('entity')) {
+    const entity = tokens.get('entity')!;
+    const entityDefElement = findAncestorByTag(target.element, 'EntityDef');
+    if (entityDefElement?.attributes?.['Name'] === entity) {
+      debugLog(`[DEBUG] Entity token ${entity} matched EntityDef[@Name="${entity}"]`);
+      unmatchedTokens.delete('entity');
+      // Entity match doesn't add to score as it's required, not prioritized
+    }
+  }
+  
+  // If any tokens still unmatched, this target doesn't match
+  if (unmatchedTokens.size > 0) {
+    debugLog(`[DEBUG] Unmatched tokens: ${Array.from(unmatchedTokens).join(', ')}`);
+    return -1;
+  }
+  
   return totalScore; // All tokens matched - return cumulative score (lower is better)
 }
 
