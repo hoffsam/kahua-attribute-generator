@@ -2,7 +2,7 @@
   "name": "kahua-attribute-generator",
   "displayName": "Kahua XML Generator",
   "description": "Generate XML for Kahua AppDefs : attributes, labels, DataTags, Data Store Columns, FieldDefs, etc from selected lines of comma seperated values.",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "publisher": "Sammy",
   "engines": {
     "vscode": "^1.85.0"
