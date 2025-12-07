@@ -2457,32 +2457,54 @@ function parseTargetXmlStructure(
     
     debugLog(`[DEBUG] Processing section "${sectionName}" with xpath: ${xpath}`);
 
-    const templateApplied = applyInjectionPathTemplate(xpath, affectingTokens || new Map(), tokenDefinitions);
-    let finalXpath = templateApplied.result;
-    debugLog(`[DEBUG] Final xpath after template application: ${finalXpath}`);
+    const templateApplied = applyInjectionPathTemplate(xpath, affectingTokens || new Map(), tokenDefinitions, xmlContext);
+    const possibleXpaths = templateApplied.results || [templateApplied.result];
+    debugLog(`[DEBUG] Generated ${possibleXpaths.length} possible XPath(s) after template application`);
     
-    // Use hierarchical XPath matching - respects exact path structure
-    let candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
-    let effectiveXpath = finalXpath;
-    if (candidates.length === 0 && finalXpath.includes('[')) {
-      const relaxedPath = removeAttributePredicates(finalXpath);
-      if (relaxedPath !== finalXpath) {
-        debugLog(`[DEBUG] No candidates found for ${finalXpath}, relaxing attribute predicates -> ${relaxedPath}`);
-        const relaxedCandidates = findElementsByHierarchicalXPath(xmlContext, relaxedPath, config, document);
-        if (relaxedCandidates.length > 0) {
-          candidates = relaxedCandidates;
-          effectiveXpath = relaxedPath;
-          debugLog(`[DEBUG] Found ${relaxedCandidates.length} candidates after relaxing predicates`);
+    // Try each possible XPath (based on different injectionMatchPaths) until we find matches
+    let candidates: any[] = [];
+    let effectiveXpath = xpath;
+    let finalXpath = xpath;
+    
+    for (const tryXpath of possibleXpaths) {
+      debugLog(`[DEBUG] Trying XPath: ${tryXpath}`);
+      
+      // Use hierarchical XPath matching - respects exact path structure
+      candidates = findElementsByHierarchicalXPath(xmlContext, tryXpath, config, document);
+      
+      if (candidates.length > 0) {
+        finalXpath = tryXpath;
+        effectiveXpath = tryXpath;
+        debugLog(`[DEBUG] Found ${candidates.length} candidate(s) with XPath: ${tryXpath}`);
+        break; // Stop at first successful match
+      }
+      
+      // Try relaxing attribute predicates if no matches
+      if (tryXpath.includes('[')) {
+        const relaxedPath = removeAttributePredicates(tryXpath);
+        if (relaxedPath !== tryXpath) {
+          debugLog(`[DEBUG] No candidates found for ${tryXpath}, trying relaxed: ${relaxedPath}`);
+          const relaxedCandidates = findElementsByHierarchicalXPath(xmlContext, relaxedPath, config, document);
+          if (relaxedCandidates.length > 0) {
+            candidates = relaxedCandidates;
+            finalXpath = relaxedPath;
+            effectiveXpath = relaxedPath;
+            debugLog(`[DEBUG] Found ${relaxedCandidates.length} candidates after relaxing predicates`);
+            break;
+          }
         }
       }
     }
+    
+    // If still no candidates and template was applied, try original xpath as last resort
     if (candidates.length === 0 && templateApplied.applied) {
-      debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath} after template substitution - falling back to original xpath: ${xpath}`);
+      debugLog(`[DEBUG] No candidates found with any template possibility - falling back to original xpath: ${xpath}`);
       finalXpath = xpath;
       candidates = findElementsByHierarchicalXPath(xmlContext, finalXpath, config, document);
       effectiveXpath = finalXpath;
     }
-    debugLog(`[DEBUG] Found ${candidates.length} candidates via hierarchical XPath for section "${sectionName}"`);
+    
+    debugLog(`[DEBUG] Final result: ${candidates.length} candidates via hierarchical XPath for section "${sectionName}"`);
     
     if (candidates.length === 0) {
       debugLog(`[DEBUG] No candidates found for xpath: ${finalXpath}`);
@@ -2551,32 +2573,136 @@ export function extractTokensFromTemplateComments(document: vscode.TextDocument)
 }
 
 /**
+ * Extract attribute value from SAX context using a path like "App/@Name" or "App/@Extends"
+ */
+function extractAttributeValueFromContext(context: ParsedXmlContext, path: string): string {
+  const parts = path.split('/@');
+  if (parts.length !== 2) {
+    throw new Error(`Invalid attribute path: ${path}`);
+  }
+  
+  const elementPath = parts[0];
+  const attributeName = parts[1];
+  
+  // Find element at path
+  const elements = findElementsByXPath(context, elementPath);
+  if (elements.length === 0) {
+    throw new Error(`No elements found at path: ${elementPath}`);
+  }
+  
+  // Get attribute value from first element
+  const value = elements[0].attributes[attributeName];
+  if (!value) {
+    throw new Error(`Attribute ${attributeName} not found on element at ${elementPath}`);
+  }
+  
+  return value;
+}
+
+/**
  * Enhanced template replacement that handles multiple token substitutions
+ * Generates multiple possible values when tokens have multiple injection match paths
  * @param template Template string like "Table[@EntityDefName='{appname}.{entity}']"
  * @param currentTokenName The token being processed (e.g., "entity")
  * @param currentTokenValue The value of the current token (e.g., "Field")
  * @param allTokens Map of all available token values
+ * @param tokenDefinitions Token definitions to get injection match paths
+ * @param saxContext SAX context for value extraction
+ * @returns Array of possible resolved template values (one for each match path combination)
  */
 function applyMultiTokenTemplate(
   template: string,
   currentTokenName: string,
   currentTokenValue: string,
-  allTokens: Map<string, string>
-): string {
-  let result = template;
+  allTokens: Map<string, string>,
+  tokenDefinitions: TokenNameDefinition[] = [],
+  saxContext?: ParsedXmlContext
+): string[] {
+  // Find tokens that appear in the template
+  const tokenReferences = template.match(/\{(\w+)\}/g);
+  if (!tokenReferences) {
+    return [template];
+  }
+
+  const tokensInTemplate = new Set(
+    tokenReferences.map(ref => ref.slice(1, -1)) // Remove { and }
+  );
+
+  // For each token in template, collect possible values based on injectionMatchPaths
+  const tokenPossibilities: Map<string, string[]> = new Map();
   
-  // First replace {value} with the current token's value (backward compatibility)
-  result = result.replace(/{value}/g, currentTokenValue);
+  for (const tokenName of tokensInTemplate) {
+    // Get the extracted value
+    const extractedValue = allTokens.get(tokenName);
+    if (!extractedValue) {
+      // No value for this token - template cannot be resolved
+      return [];
+    }
+
+    // Find injection match paths for this token
+    let injectionMatchPaths: string[] = [];
+    for (const tokenDef of tokenDefinitions) {
+      const readPath = tokenDef.tokenReadPaths?.[tokenName];
+      if (readPath?.injectionmatchpaths) {
+        injectionMatchPaths = readPath.injectionmatchpaths;
+        break;
+      }
+    }
+
+    if (injectionMatchPaths.length === 0 || !saxContext) {
+      // No injection match paths or no context - use extracted value
+      tokenPossibilities.set(tokenName, [extractedValue]);
+    } else {
+      // Try each injection match path to get possible values
+      const possibleValues: string[] = [];
+      for (const matchPath of injectionMatchPaths) {
+        try {
+          // Extract value from this match path
+          const value = extractAttributeValueFromContext(saxContext, matchPath);
+          if (value && value.trim()) {
+            possibleValues.push(value);
+          }
+        } catch (error) {
+          // Path doesn't exist - skip
+        }
+      }
+      
+      if (possibleValues.length > 0) {
+        tokenPossibilities.set(tokenName, possibleValues);
+      } else {
+        // Fallback to extracted value
+        tokenPossibilities.set(tokenName, [extractedValue]);
+      }
+    }
+  }
+
+  // Generate all combinations
+  const results: string[] = [];
+  const tokenNames = Array.from(tokensInTemplate);
   
-  // Then replace all other token references
-  for (const [tokenName, tokenValue] of allTokens.entries()) {
-    const tokenPattern = new RegExp(`\\{${tokenName}\\}`, 'g');
-    result = result.replace(tokenPattern, tokenValue);
+  function generateCombinations(index: number, current: string) {
+    if (index === tokenNames.length) {
+      results.push(current);
+      return;
+    }
+    
+    const tokenName = tokenNames[index];
+    const possibilities = tokenPossibilities.get(tokenName) || [];
+    
+    for (const value of possibilities) {
+      const pattern = new RegExp(`\\{${tokenName}\\}`, 'g');
+      const replaced = current.replace(pattern, value);
+      generateCombinations(index + 1, replaced);
+    }
   }
   
-  debugLog(`[DEBUG] Multi-token template: "${template}" -> "${result}" (current: ${currentTokenName}=${currentTokenValue})`);
-  debugLog(`[DEBUG] All tokens used in template: ${JSON.stringify(Array.from(allTokens.entries()))}`);
-  return result;
+  // Also handle {value} for backward compatibility
+  let startTemplate = template.replace(/{value}/g, currentTokenValue);
+  generateCombinations(0, startTemplate);
+  
+  debugLog(`[DEBUG] Multi-token template generated ${results.length} possibilities from "${template}"`);
+  debugLog(`[DEBUG] Possibilities: ${JSON.stringify(results)}`);
+  return results;
 }
 
 /**
@@ -2585,16 +2711,17 @@ function applyMultiTokenTemplate(
 export function applyInjectionPathTemplate(
   xpath: string, 
   affectingTokens: Map<string, string>, 
-  tokenDefinitions: TokenNameDefinition[] = []
-): { success: boolean; result: string; applied: boolean } {
-  let modifiedXPath = xpath;
+  tokenDefinitions: TokenNameDefinition[] = [],
+  saxContext?: ParsedXmlContext
+): { success: boolean; result: string; results: string[]; applied: boolean } {
+  let modifiedXPaths: string[] = [xpath];
   let applied = false;
 
   // First, apply general token substitution for any {tokenName} placeholders in the path
   for (const [tokenName, tokenValue] of affectingTokens.entries()) {
     const tokenPattern = new RegExp(`\\{${tokenName}\\}`, 'g');
-    if (tokenPattern.test(modifiedXPath)) {
-      modifiedXPath = modifiedXPath.replace(tokenPattern, tokenValue);
+    if (tokenPattern.test(xpath)) {
+      modifiedXPaths = modifiedXPaths.map(path => path.replace(tokenPattern, tokenValue));
       applied = true;
       debugLog(`[DEBUG] Applied general token substitution: {${tokenName}} -> ${tokenValue} in path`);
     }
@@ -2666,9 +2793,18 @@ export function applyInjectionPathTemplate(
           if (shouldApplyTemplate) {
             const tokenValue = affectingTokens.get(tokenName)!;
             // Enhanced template replacement that handles multiple token substitutions
-            modifiedXPath = applyMultiTokenTemplate(readPath.injectionPathTemplate, tokenName, tokenValue, affectingTokens);
+            // Returns multiple possibilities based on injectionMatchPaths
+            modifiedXPaths = applyMultiTokenTemplate(
+              readPath.injectionPathTemplate, 
+              tokenName, 
+              tokenValue, 
+              affectingTokens,
+              tokenDefinitions,
+              saxContext
+            );
             applied = true;
-            debugLog(`[DEBUG] Applied injection path template: ${xpath} -> ${modifiedXPath} (token: ${tokenName}=${tokenValue})`);
+            debugLog(`[DEBUG] Applied injection path template: ${xpath} -> ${modifiedXPaths.length} possibilities`);
+            debugLog(`[DEBUG] Template possibilities: ${JSON.stringify(modifiedXPaths)}`);
             break;
           }
         }
@@ -2678,7 +2814,8 @@ export function applyInjectionPathTemplate(
 
   return {
     success: true,
-    result: modifiedXPath,
+    result: modifiedXPaths[0] || xpath, // Backward compatibility - return first result
+    results: modifiedXPaths,
     applied
   };
 }
