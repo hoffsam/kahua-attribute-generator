@@ -13,9 +13,9 @@
   "main": "out/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run esbuild-prod",
-    "esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node && esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser",
-    "esbuild-prod": "npm run esbuild-base -- --minify --sourcemap=inline && esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser --minify --sourcemap=inline",
-    "esbuild-watch": "npm run esbuild-base -- --sourcemap=inline --watch & esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser --sourcemap=inline --watch",
+    "esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --define:__KAHUA_DEBUG__=true && esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser",
+    "esbuild-prod": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify --sourcemap=inline --define:__KAHUA_DEBUG__=false && esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser --minify --sourcemap=inline",
+    "esbuild-watch": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap=inline --define:__KAHUA_DEBUG__=true --watch & esbuild ./src/webview/tableMain.ts --bundle --outfile=out/tableWebview.js --format=iife --platform=browser --sourcemap=inline --watch",
     "compile": "tsc -p . --noEmit",
     "watch": "tsc -watch -p . --noEmit",
     "package": "vsce package",
@@ -147,19 +147,6 @@
           "default": true,
           "description": "Show Kahua generator commands in the editor right-click context menu."
         },
-        "kahua.outputTarget": {
-          "type": "string",
-          "enum": [
-            "clipboard",
-            "newEditor"
-          ],
-          "enumDescriptions": [
-            "Copy generated XML to clipboard",
-            "Open generated XML in a new editor window"
-          ],
-          "default": "newEditor",
-          "description": "Choose where to output the generated XML."
-        },
         "kahua.suppressInvalidConditionWarnings": {
           "type": "boolean",
           "default": false,
@@ -180,6 +167,13 @@
           "type": "boolean",
           "default": true,
           "description": "Show table generation commands in the editor right-click context menu. Only applies when kahua.showInContextMenu is enabled."
+        },
+        "kahua.defaultSnippetRows": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Default number of rows created when generating a CSV snippet."
         },
         "kahua.autoDetectDocumentType": {
           "type": "boolean",
@@ -217,7 +211,7 @@
               ]
             },
             {
-              "id": "attributes",
+              "id": "baseapp",
               "name": "Base App",
               "priority": 250,
               "rules": [
@@ -324,16 +318,20 @@
               "tokenReadPaths": {
                 "appname": {
                   "type": "attribute",
-                  "path": "App/@Name",
-                  "attributeMatchOrderForInjection": [
-                    "Name",
-                    "Extends",
-                    "any"
+                  "readpaths": [
+                    "App/@Name"
+                  ],
+                  "injectionmatchpaths": [
+                    "App/@Name",
+                    "App/@Extends",
+                    "App/@*"
                   ]
                 },
                 "entity": {
                   "type": "selection",
-                  "path": "EntityDefs/EntityDef",
+                  "readpaths": [
+                    "EntityDefs/EntityDef"
+                  ],
                   "attribute": "Name",
                   "affectsInjection": true,
                   "injectionPathTemplate": "App/EntityDefs/EntityDef[@Name='{value}']/Attributes"
@@ -397,9 +395,19 @@
                       ],
                       "description": "Type of read: 'attribute' reads an XML attribute value, 'text' reads element text content, 'selection' prompts user to select from multiple options"
                     },
-                    "path": {
-                      "type": "string",
-                      "description": "XPath-like expression to locate the value. For attributes use '@AttributeName' at the end (e.g., 'App/@Name'). For selection type, path to elements to choose from"
+                    "readpaths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Paths to try when extracting the value from XML (in order). For attributes use '@AttributeName' at the end (e.g., 'App/@Name'). First successful read wins."
+                    },
+                    "injectionmatchpaths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Paths to check for matches during injection (in order). Use 'Element/@Attribute' format (e.g., 'App/@Name'). Use 'Element/@*' to match any attribute on that element. First match wins."
                     },
                     "attribute": {
                       "type": "string",
@@ -411,19 +419,12 @@
                     },
                     "injectionPathTemplate": {
                       "type": "string",
-                      "description": "Template for dynamic injection path. Use {value} as placeholder for the selected token value (e.g., 'EntityDefs/EntityDef[@Name='{value}']/Attributes')"
-                    },
-                    "attributeMatchOrderForInjection": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      },
-                      "description": "Optional list of attribute names to try (in order) when reading this value from XML. Useful when documents may use either Name or Extends; include \"any\" to fall back to the attribute specified in 'path'."
+                      "description": "Template for dynamic injection path validation. Use {value} for this token and {tokenName} for other tokens (e.g., 'Table[@EntityDefName='{appname}.{value}']')"
                     }
                   },
                   "required": [
                     "type",
-                    "path"
+                    "readpaths"
                   ]
                 }
               }
@@ -443,9 +444,10 @@
           "default": [
             {
               "id": "attributes",
-              "name": "Extension Attributes",
+              "name": "Attributes",
               "applicableDocumentTypes": [
-                "extension"
+                "extension",
+                "baseapp"
               ],
               "tokenReferences": [
                 "appname",
@@ -492,7 +494,8 @@
               "id": "lookups",
               "name": "Lookup Lists",
               "applicableDocumentTypes": [
-                "extension"
+                "extension",
+                "baseapp"
               ],
               "tokenReferences": [
                 "lookupheader",
@@ -517,7 +520,7 @@
             },
             {
               "id": "supplements",
-              "name": "Supplement Attributes",
+              "name": "Attributes",
               "applicableDocumentTypes": [
                 "supplement"
               ],
@@ -550,20 +553,6 @@
                   "VisualsPreview": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\" IsReadOnly=\"True\" />",
                   "VisualsEditView": "<{$visualtype} Name=\"{$name}\" DataTag=\"{$entity}_{$name}\" Path=\"{$name}\"{'{$type}'=='Lookup' ? ' List=\"{$entity}_{$name}LookupList\"' : ''} />",
                   "{'{$type}'=='Lookup' ? 'LookupList' : ''}": "<LookupList Name=\"{$name}\" Label=\"[{$entity}_{$name}LookupListLabel]\" Description=\"[{$entity}_{$name}LookupListDescription]\">\n   <Value />\n</LookupList>"
-                }
-              }
-            },
-            {
-              "id": "test",
-              "name": "Test Fragment",
-              "tokenReferences": [
-                "attributeheader",
-                "attributes"
-              ],
-              "fragments": {
-                "body": {
-                  "TestElement": "<TestElement Name=\"{$name}\" Type=\"{$type}\" Label=\"{$label|friendly}\" Entity=\"{$entity}\" />",
-                  "TestComment": "<!-- Test: {$name} of type {$type} for entity {$entity} -->"
                 }
               }
             }
@@ -610,50 +599,6 @@
             ]
           },
           "description": "Fragment template definitions that reference token name definitions"
-        },
-        "kahua.menuOptions": {
-          "type": "array",
-          "default": [
-            {
-              "name": "Generate Attributes",
-              "fragments": [
-                "attributes"
-              ]
-            },
-            {
-              "name": "Generate Attributes",
-              "fragments": [
-                "supplements"
-              ]
-            },
-            {
-              "name": "Generate Lookup Lists",
-              "fragments": [
-                "lookups"
-              ]
-            }
-          ],
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string",
-                "description": "Display name for the menu option"
-              },
-              "fragments": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Array of fragment definition IDs to use for this menu option"
-              }
-            },
-            "required": [
-              "name",
-              "fragments"
-            ]
-          },
-          "description": "Context menu options that combine multiple fragment definitions"
         },
         "kahua.elementDisplayAttributes": {
           "type": "object",

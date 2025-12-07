@@ -48,7 +48,7 @@ suite('Extension vs Base App Display Tests', () => {
       
       // Validate attributes fragment definition exists
       assert.ok(attributesFragment, 'Should find attributes fragment definition');
-      assert.strictEqual(attributesFragment.name, 'Extension Attributes', 'Fragment should be named Extension Attributes');
+      assert.strictEqual(attributesFragment.name, 'Attributes', 'Fragment should be named Attributes');
       
       // Validate tokenReferences include appname
       assert.ok(attributesFragment.tokenReferences.includes('appname'), 'tokenReferences should include appname');

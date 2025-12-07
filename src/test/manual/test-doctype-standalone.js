@@ -37,7 +37,7 @@ const documentTypes = [
 
 // Simple test implementation
 function testDocumentTypeDetection() {
-  const testFilePath = 'G:/OneDrive/Documents/vscode projects/xsd_analyzer_updated/example_files/example_xml/kahua_aec_rfi_extension.xml';
+  const testFilePath = 'G:/OneDrive/Documents/vscode%20projects/xsd_analyzer_updated/example_files/example_xml/kahua_aec_rfi_extension.xml';
   
   if (!fs.existsSync(testFilePath)) {
     console.log(`Test file not found: ${testFilePath}`);

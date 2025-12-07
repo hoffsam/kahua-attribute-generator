@@ -50,7 +50,7 @@ Generate XML attribute definitions for Kahua apps or supplements directly from s
 
 3. Open the Command Palette (`Ctrl+Shift+P` / `⌘⇧P`) and run **`Kahua: Generate Extension Attributes from Selection`** or **`Kahua: Generate Supplement Attributes from Selection`** depending on your context.
 
-4. The generated XML is either copied to your clipboard or opened in a new editor window (configurable via `kahua.outputTarget`).
+4. After generation, pick an output target from the quick pick (inject into the remembered source file, browse to another file, open a new editor tab, or copy to clipboard).
 
 ### Interactive Generation Commands
 
@@ -69,7 +69,6 @@ You can override the following settings in your workspace or user `settings.json
 | Setting                                  | Default                       | Description                                                                        |
 | ---------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
 | `kahua.showInContextMenu`                | `true`                        | Show Kahua generator commands in the editor right-click context menu               |
-| `kahua.outputTarget`                     | `"newEditor"`                 | Choose where to output generated XML: `"clipboard"` or `"newEditor"`               |
 | `kahua.tokenNameDefinitions`             | Array of token definitions    | Define token sets with ID, name, type, and token list                              |
 | `kahua.suppressInvalidConditionWarnings` | `false`                       | Suppress error notifications when conditional expressions reference invalid tokens |
 | `kahua.fragmentDefinitions`              | Array of fragment definitions | Define reusable fragment templates with conditional support                        |

@@ -21,13 +21,13 @@ suite('Extension Test Suite', () => {
 		
 		// Test that configuration properties exist
 		assert.ok(config.has('showInContextMenu'));
-		assert.ok(config.has('outputTarget'));
 		assert.ok(config.has('suppressInvalidConditionWarnings'));
 		assert.ok(config.has('showSnippetsInMenu'));
 		assert.ok(config.has('showTemplatesInMenu'));
+		assert.ok(config.has('defaultSnippetRows'));
+		assert.ok(config.has('defaultSnippetTableRows'));
 		assert.ok(config.has('tokenNameDefinitions'));
 		assert.ok(config.has('fragmentDefinitions'));
-		assert.ok(config.has('menuOptions'));
 	});
 
 	test('Default configuration should have expected values', () => {
@@ -35,10 +35,11 @@ suite('Extension Test Suite', () => {
 		
 		// Test default values
 		assert.strictEqual(config.get('showInContextMenu'), true);
-		assert.strictEqual(config.get('outputTarget'), 'newEditor');
 		assert.strictEqual(config.get('suppressInvalidConditionWarnings'), false);
 		assert.strictEqual(config.get('showSnippetsInMenu'), true);
 		assert.strictEqual(config.get('showTemplatesInMenu'), true);
+		assert.strictEqual(config.get('defaultSnippetRows'), 3);
+		assert.strictEqual(config.get('defaultSnippetTableRows'), 0);
 		
 		// Test that arrays have expected structure
 		const tokenDefs = config.get('tokenNameDefinitions') as any[];
@@ -49,8 +50,5 @@ suite('Extension Test Suite', () => {
 		assert.ok(Array.isArray(fragmentDefs));
 		assert.ok(fragmentDefs.length > 0);
 		
-		const menuOptions = config.get('menuOptions') as any[];
-		assert.ok(Array.isArray(menuOptions));
-		assert.ok(menuOptions.length > 0);
 	});
 });

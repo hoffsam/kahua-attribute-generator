@@ -23,11 +23,15 @@ interface ConditionalResult {
  */
 interface TokenReadPath {
   type: 'attribute' | 'text' | 'selection';
-  path: string;
-  attribute?: string;
+  readpaths?: string[];  // NEW: Paths to try when reading/extracting the value (in order)
+  injectionmatchpaths?: string[];  // NEW: Paths to check for matches during injection (in order)
+  attribute?: string;  // For selection type: which attribute to read
   affectsInjection?: boolean;
   injectionPathTemplate?: string;
-  attributeMatchOrderForInjection?: AppMatchStrategy[];
+  
+  // DEPRECATED - kept only for migration reference
+  path?: string;
+  attributeMatchOrderForInjection?: string[];
 }
 
 /**
@@ -185,12 +189,137 @@ const SNIPPET_KIND_CONTEXT_KEY = 'kahua.snippetKind';
 const HAS_SOURCE_FILE_CONTEXT_KEY = 'kahua.hasSourceFile';
 
 // Performance: Conditional debugging
-const DEBUG_MODE = process.env.NODE_ENV === 'development';
+declare const __KAHUA_DEBUG__: boolean | undefined;
+
+const DEBUG_MODE =
+  typeof __KAHUA_DEBUG__ !== 'undefined' ? __KAHUA_DEBUG__ : process.env.NODE_ENV !== 'production';
 const debugLog = DEBUG_MODE ? console.log : () => {};
 const debugWarn = DEBUG_MODE ? console.warn : () => {};
 const debugError = DEBUG_MODE ? console.error : () => {};
 function logDuration(label: string, startTime: number): void {
   debugLog(`[KAHUA] ${label} completed in ${Date.now() - startTime}ms`);
+}
+
+function getAttributeCaseInsensitive(
+  attributes: Record<string, string> | undefined,
+  attributeName: string
+): string | undefined {
+  if (!attributes) {
+    return undefined;
+  }
+
+  if (attributes[attributeName] !== undefined) {
+    return attributes[attributeName];
+  }
+
+  const matchKey = Object.keys(attributes).find(key => key.toLowerCase() === attributeName.toLowerCase());
+  return matchKey ? attributes[matchKey] : undefined;
+}
+
+function injectionPathContainsValue(path: string | undefined, value: string): boolean {
+  if (!path || !value) {
+    return false;
+  }
+  const escaped = escapeRegExp(value);
+  
+  // First check: Does value appear quoted in the path? (exact attribute value match)
+  const quotedPattern = new RegExp(`['"]${escaped}['"]`, 'i');
+  if (quotedPattern.test(path)) {
+    return true;
+  }
+  
+  // Second check: Does value appear as a complete token?
+  // Token separators: space, slash, brackets, @, =, quotes, dot
+  // NOT underscore - underscores are part of identifiers (e.g., "kahua_AEC_RFI" is one token)
+  // This ensures "RFI" matches in ".RFI" but not in "_RFI"
+  const tokenPattern = new RegExp(`(^|[\\s/\\[\\]@='".])${escaped}($|[\\s/\\[\\]@='".])`, 'i');
+  return tokenPattern.test(path);
+}
+
+function elementOrAncestorsContainValue(
+  element: SaxElement | undefined,
+  value: string,
+  attributeNames?: string[]
+): boolean {
+  let current: SaxElement | undefined = element;
+  const normalizedAttributes =
+    attributeNames && attributeNames.length > 0
+      ? attributeNames.map(name => name.toLowerCase())
+      : undefined;
+  while (current) {
+    for (const [attrName, attrValue] of Object.entries(current.attributes || {})) {
+      if (normalizedAttributes && !normalizedAttributes.includes(attrName.toLowerCase())) {
+        continue;
+      }
+      if (attrValue === value) {
+        return true;
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+interface InjectionTokenMetadata {
+  tokenName: string;
+  matchAttributes: string[];
+}
+
+function buildInjectionTokenMetadata(tokenDefinitions?: TokenNameDefinition[]): Map<string, InjectionTokenMetadata> {
+  const metadata = new Map<string, InjectionTokenMetadata>();
+  if (!tokenDefinitions) {
+    return metadata;
+  }
+
+  for (const tokenDef of tokenDefinitions) {
+    if (!tokenDef.tokenReadPaths) continue;
+    for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+      if (!readPath?.affectsInjection) {
+        continue;
+      }
+      const matchAttributes = Array.isArray(readPath.attributeMatchOrderForInjection)
+        ? readPath.attributeMatchOrderForInjection
+            .map(attribute => (typeof attribute === 'string' ? attribute.trim() : ''))
+            .filter(attribute => attribute.length > 0 && attribute.toLowerCase() !== 'any')
+        : [];
+      metadata.set(tokenName, {
+        tokenName,
+        matchAttributes
+      });
+    }
+  }
+
+  return metadata;
+}
+
+function computeTokenMatchScore(
+  target: XmlTargetSection,
+  tokenValue: string,
+  metadata?: InjectionTokenMetadata
+): number {
+  let score = 0;
+
+  if (injectionPathContainsValue(target.injectionPath, tokenValue)) {
+    score += 5;
+  }
+
+  if (target.xpathPath && injectionPathContainsValue(target.xpathPath, tokenValue)) {
+    score += 2;
+  }
+
+  if (target.context && injectionPathContainsValue(target.context, tokenValue)) {
+    score += 1;
+  }
+
+  if (metadata) {
+    if (elementOrAncestorsContainValue(target.element, tokenValue, metadata.matchAttributes)) {
+      score += metadata.matchAttributes.length > 0 ? 4 : 3;
+    }
+  } else if (elementOrAncestorsContainValue(target.element, tokenValue)) {
+    score += 2;
+  }
+
+  return score;
 }
 
 let generateStatusBarItem: vscode.StatusBarItem | undefined;
@@ -234,6 +363,7 @@ class CsvGenerationService {
     headerTokens: ParsedToken[];
     tableTokens: ParsedToken[];
     extractedTokens: Map<string, string>;
+    tokenDefinitions?: TokenNameDefinition[];
     dataRows?: any[];
     includeDefaultRow?: boolean;
     snippetMode?: boolean;
@@ -258,21 +388,27 @@ class CsvGenerationService {
     
     lines.push('// ----------------------------------------------------------------');
     
-    // Add entity context if available
-    const selectedEntity = options.extractedTokens.get('entity');
-    if (selectedEntity) {
-      lines.push(`// Entity Context: ${selectedEntity}`);
-      if (!options.snippetMode) {
-        // Template-specific entity guidance
-        lines.push('// All template rows will target this entity. Update this header if you change entities.');
-        lines.push('// Smart injection will automatically use this entity for Attributes, Labels, and DataTags.');
+    // Add context comments for tokens that affect injection
+    if (options.tokenDefinitions && options.tokenDefinitions.length > 0) {
+      for (const tokenDef of options.tokenDefinitions) {
+        if (!tokenDef.tokenReadPaths) continue;
+        
+        for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+          const typedReadPath = readPath as TokenReadPath;
+          if (typedReadPath.affectsInjection && options.extractedTokens.has(tokenName)) {
+            const tokenValue = options.extractedTokens.get(tokenName)!;
+            // Capitalize first letter for display
+            const displayName = tokenName.charAt(0).toUpperCase() + tokenName.slice(1);
+            lines.push(`// ${displayName} Context: ${tokenValue}`);
+            
+            // Add special guidance for selection-type tokens (tokens that require user selection)
+            if (!options.snippetMode && typedReadPath.type === 'selection') {
+              lines.push(`// All template rows will target this ${tokenName}. Update this header if you change ${tokenName}s.`);
+              lines.push(`// Smart injection will automatically use this ${tokenName} for path resolution.`);
+            }
+          }
+        }
       }
-    }
-    
-    // Add other context comments
-    const appname = options.extractedTokens.get('appname');
-    if (appname) {
-      lines.push(`// Appname Context: ${appname}`);
     }
     
     
@@ -294,14 +430,21 @@ class CsvGenerationService {
         return token.defaultValue ? `${nameDisplay}:${token.defaultValue}*` : nameDisplay;
       }).join(', ');
       lines.push(`// Table Columns: ${tableColumnsDisplay}`);
-      
+
       // Add default explanation if any defaults exist
       const hasDefaults = options.tableTokens.some(token => token.defaultValue);
       if (hasDefaults) {
         lines.push('// * = Default value will be applied to new rows');
       }
     }
-    
+
+    if (
+      options.headerTokens.some(token => token.required) ||
+      options.tableTokens.some(token => token.required)
+    ) {
+      lines.push('// Columns marked (Required) must be populated before generation');
+    }
+
     lines.push('// ----------------------------------------------------------------');
     if (!options.snippetMode) {
       lines.push('// Edit the template data below and use generation commands');
@@ -373,13 +516,26 @@ class CsvGenerationService {
     headerFields: Record<string, string>;
     headerTokens: ParsedToken[];
     tableRows: any[][];
+    tokenDefinitions?: TokenNameDefinition[];
   }): string {
     const lines: string[] = [];
     
-    // Add context comments
-    lines.push(`// Entity Context: ${options.headerFields.entity || ''}`);
-    lines.push('// Generated from table - entity already selected');
-    lines.push(`// Appname Context: ${options.headerFields.appname || ''}`);
+    // Add context comments for tokens that affect injection
+    if (options.tokenDefinitions && options.tokenDefinitions.length > 0) {
+      for (const tokenDef of options.tokenDefinitions) {
+        if (!tokenDef.tokenReadPaths) continue;
+        
+        for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+          const typedReadPath = readPath as TokenReadPath;
+          if (typedReadPath.affectsInjection && options.headerFields[tokenName]) {
+            const displayName = tokenName.charAt(0).toUpperCase() + tokenName.slice(1);
+            lines.push(`// ${displayName} Context: ${options.headerFields[tokenName]}`);
+          }
+        }
+      }
+      // Add note that values are from table input (not user-selectable)
+      lines.push('// Generated from table - values already provided');
+    }
     
     // Add header row (from headerFields)
     const headerRow = (options.headerTokens || []).map((token: any) => 
@@ -578,150 +734,13 @@ function getResolvedElementDisplayConfig(): ElementDisplayConfig {
   };
 }
 
-type AppMatchStrategy = 'name' | 'extends' | 'any';
-
-interface SmartInjectionResolvedConfig {
-  appMatchOrder: AppMatchStrategy[];
-}
-
-const DEFAULT_SMART_INJECTION_CONFIG: SmartInjectionResolvedConfig = {
-  appMatchOrder: ['name', 'extends', 'any']
-};
-
-let smartInjectionConfigOverride: SmartInjectionResolvedConfig | undefined;
-
-function getSmartInjectionConfig(): SmartInjectionResolvedConfig {
-  if (smartInjectionConfigOverride) {
-    return smartInjectionConfigOverride;
-  }
-
-  const config = getKahuaConfig(currentResource());
-  const tokenDefs = config.get<TokenNameDefinition[]>('tokenNameDefinitions') ?? [];
-  for (const tokenDef of tokenDefs) {
-    if (!tokenDef.tokenReadPaths) {
-      continue;
-    }
-
-    if (
-      options.headerTokens.some(token => token.required) ||
-      options.tableTokens.some(token => token.required)
-    ) {
-      lines.push('// Columns marked (Required) must be populated before generation');
-    }
-    for (const readPath of Object.values(tokenDef.tokenReadPaths)) {
-      if (!readPath) continue;
-      const order = Array.isArray(readPath.attributeMatchOrderForInjection)
-        ? readPath.attributeMatchOrderForInjection.filter(
-            (value): value is AppMatchStrategy =>
-              value === 'name' || value === 'extends' || value === 'any'
-          )
-        : [];
-      if (order.length > 0) {
-        return { appMatchOrder: order };
-      }
-    }
-  }
-
-  return DEFAULT_SMART_INJECTION_CONFIG;
-}
-
-export function __setSmartInjectionConfigOverride(config?: SmartInjectionResolvedConfig) {
-  smartInjectionConfigOverride = config;
-}
-
 export function __testSmartInjectionResolution(
   sectionName: string,
   targets: any[],
-  affectingTokens?: Map<string, string>
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
 ): XmlTargetSection | undefined {
-  return trySmartInjectionResolution(sectionName, targets as XmlTargetSection[], affectingTokens);
-}
-
-function resolveAppNameCandidates(
-  appnameToken: string | undefined,
-  targets: XmlTargetSection[],
-  smartConfig: SmartInjectionResolvedConfig
-): Array<{ value: string; strategy: AppMatchStrategy }> {
-  const candidates: Array<{ value: string; strategy: AppMatchStrategy }> = [];
-  const seen = new Set<string>();
-  const rootApp = targets
-    .map(target => findRootAppElement(target.element))
-    .find((element): element is SaxElement => !!element);
-  const rootName = rootApp?.attributes?.['Name'];
-  const rootExtends = rootApp?.attributes?.['Extends'];
-
-  const addCandidate = (value: string | undefined, strategy: AppMatchStrategy) => {
-    if (!value || !value.trim()) {
-      return;
-    }
-    const trimmed = value.trim();
-    const key = trimmed.toLowerCase();
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    candidates.push({ value: trimmed, strategy });
-  };
-
-  for (const preference of smartConfig.appMatchOrder) {
-    switch (preference) {
-      case 'name':
-        addCandidate(appnameToken, 'name');
-        addCandidate(rootName, 'name');
-        break;
-      case 'extends':
-        addCandidate(rootExtends, 'extends');
-        break;
-      case 'any':
-        addCandidate(appnameToken, 'any');
-        addCandidate(rootName, 'any');
-        addCandidate(rootExtends, 'any');
-        break;
-    }
-  }
-
-  if (candidates.length === 0) {
-    addCandidate(appnameToken ?? rootName ?? rootExtends, 'any');
-  }
-
-  return candidates;
-}
-
-function targetMatchesEntityDefName(target: XmlTargetSection, expectedEntityDefName: string): boolean {
-  if (!expectedEntityDefName || !target) {
-    return false;
-  }
-
-  const attributeMatches =
-    target.attributes?.['EntityDefName'] === expectedEntityDefName ||
-    target.element?.attributes?.['EntityDefName'] === expectedEntityDefName;
-
-  if (attributeMatches) {
-    return true;
-  }
-
-  const tableAncestor = findAncestorByTag(target.element, 'Table');
-  if (tableAncestor?.attributes?.['EntityDefName'] === expectedEntityDefName) {
-    return true;
-  }
-
-  if (target.injectionPath && target.injectionPath.includes(expectedEntityDefName)) {
-    return true;
-  }
-
-  if (target.context && target.context.includes(expectedEntityDefName)) {
-    return true;
-  }
-
-  if (target.enrichedPath && target.enrichedPath.includes(expectedEntityDefName)) {
-    return true;
-  }
-
-  if (target.xpathPath && target.xpathPath.includes(expectedEntityDefName)) {
-    return true;
-  }
-
-  return false;
+  return trySmartInjectionResolution(sectionName, targets as XmlTargetSection[], affectingTokens, tokenDefinitions);
 }
 
 function getElementDisplayName(
@@ -1177,7 +1196,7 @@ class FragmentValidationService {
     fragments: FragmentDefinition[],
     documentType: string
   ): FragmentDefinition[] {
-    console.log(`[KAHUA] enforceFragmentApplicability: documentType="${documentType}", fragments:`, fragments.map(f => ({id: f.id, name: f.name, applicableDocumentTypes: f.applicableDocumentTypes})));
+    debugLog(`[KAHUA] enforceFragmentApplicability: documentType="${documentType}", fragments:`, fragments.map(f => ({id: f.id, name: f.name, applicableDocumentTypes: f.applicableDocumentTypes})));
     
     const incompatible = fragments.filter(
       fragment => fragment.applicableDocumentTypes && !fragment.applicableDocumentTypes.includes(documentType)
@@ -1185,7 +1204,7 @@ class FragmentValidationService {
 
     if (incompatible.length > 0) {
       const names = incompatible.map(f => f.name || f.id).join(', ');
-      console.log(`[KAHUA] Incompatible fragments for documentType "${documentType}":`, incompatible);
+      debugLog(`[KAHUA] Incompatible fragments for documentType "${documentType}":`, incompatible);
       throw new Error(`Fragment(s) not available for document type "${documentType}": ${names}.`);
     }
 
@@ -1282,51 +1301,50 @@ class TokenExtractionService {
   }
 
   /**
-   * Handle entity selection with user prompt if needed
+   * Handle selection token with user prompt if needed
+   * Generic method that works for any token requiring user selection (entity, category, etc.)
    */
-  static async handleEntitySelection(
-    entityToken: ParsedToken | undefined,
+  static async handleSelectionTokenPrompt(
+    tokenName: string,
     sourceXmlDocument: vscode.TextDocument | undefined,
     tokenDefinitions: TokenNameDefinition[],
     allTokenReferences: Set<string>,
     extractedValues: Map<string, string>
   ): Promise<string | undefined> {
-    if (!entityToken || !sourceXmlDocument) {
+    if (!sourceXmlDocument) {
       return undefined;
     }
 
-    let selectedEntity: string | undefined = undefined;
-    
     const referencedTokenDefs = tokenDefinitions.filter(def =>
       allTokenReferences.has(def.id)
     );
-    const entityReadPath = referencedTokenDefs
-      .map((def: TokenNameDefinition) => def.tokenReadPaths?.[entityToken.name])
+    const selectionReadPath = referencedTokenDefs
+      .map((def: TokenNameDefinition) => def.tokenReadPaths?.[tokenName])
       .find((readPath?: TokenReadPath) => readPath && readPath.type === 'selection');
 
-    const attributeName = entityReadPath?.attribute || 'Name';
-    const configuredPath = entityReadPath?.path;
+    if (!selectionReadPath) {
+      return undefined;
+    }
+
+    const attributeName = selectionReadPath.attribute || 'Name';
+    const configuredPath = selectionReadPath.path;
     let options: Array<{ value: string; context: string }> = [];
 
     if (configuredPath) {
       options = extractSelectableValues(sourceXmlDocument, configuredPath, attributeName);
     }
 
-    if (options.length === 0) {
-      options = extractSelectableValues(sourceXmlDocument, 'EntityDefs/EntityDef', attributeName || 'Name');
-    }
-
     if (options.length > 0) {
-      const picked = await showValueSelectionPick(entityToken.name, options);
+      const picked = await showValueSelectionPick(tokenName, options);
       if (picked) {
-        extractedValues.set(entityToken.name, picked);
-        selectedEntity = picked;
+        extractedValues.set(tokenName, picked);
+        return picked;
       }
     } else {
-      debugLog('[DEBUG] No entity options available in source XML document');
+      debugLog(`[DEBUG] No options available for ${tokenName} in source XML document`);
     }
 
-    return selectedEntity;
+    return undefined;
   }
 
   /**
@@ -1335,27 +1353,26 @@ class TokenExtractionService {
   static extractTokensFromTemplateComments(document: vscode.TextDocument): Map<string, string> {
     const extractedTokens = new Map<string, string>();
     const content = document.getText();
-    console.log('[KAHUA] extractTokensFromTemplateComments: Document content:', content);
+    debugLog('[KAHUA] extractTokensFromTemplateComments: Document content:', content);
     const lines = content.split(/\r?\n/);
     
     for (const line of lines) {
       const trimmedLine = line.trim();
       
-      // Parse "// Entity Context: RFI" format
-      const entityMatch = trimmedLine.match(/^\/\/\s*Entity Context:\s*(.+)$/);
-      if (entityMatch && entityMatch[1] && entityMatch[1] !== '<Select entity>') {
-        extractedTokens.set('entity', entityMatch[1]);
-        console.log(`[KAHUA] Extracted entity from template comments: ${entityMatch[1]}`);
-        continue;
-      }
-      
-      // Parse other context comments like "// Appname Context: MyApp" 
+      // Parse context comments like "// TokenName Context: Value"
+      // This handles Entity Context, Appname Context, Baseapp Context, or any other token
       const contextMatch = trimmedLine.match(/^\/\/\s*(\w+) Context:\s*(.+)$/);
-      if (contextMatch && contextMatch[1] && contextMatch[2] && contextMatch[2] !== '<Select entity>') {
+      if (contextMatch && contextMatch[1] && contextMatch[2]) {
         const tokenName = contextMatch[1].toLowerCase();
         const tokenValue = contextMatch[2];
+        
+        // Skip placeholder values
+        if (tokenValue.startsWith('<Select ')) {
+          continue;
+        }
+        
         extractedTokens.set(tokenName, tokenValue);
-        console.log(`[KAHUA] Extracted ${tokenName} from template comments: ${tokenValue}`);
+        debugLog(`[KAHUA] Extracted ${tokenName} from template comments: ${tokenValue}`);
         continue;
       }
       
@@ -1383,7 +1400,7 @@ class TokenExtractionService {
       }
     }
     
-    console.log('[KAHUA] Template tokens extracted:', extractedTokens);
+    debugLog('[KAHUA] Template tokens extracted:', extractedTokens);
     return extractedTokens;
   }
 
@@ -1410,7 +1427,7 @@ class TokenExtractionService {
         const readPath = tokenDef.tokenReadPaths[tokenName];
         if (readPath?.affectsInjection) {
           mergedTokens.set(tokenName, tokenValue);
-          console.log(`[KAHUA] Template comment overrides XML for injection token: ${tokenName}=${tokenValue}`);
+          debugLog(`[KAHUA] Template comment overrides XML for injection token: ${tokenName}=${tokenValue}`);
         }
       }
     }
@@ -1726,7 +1743,7 @@ async function getXmlDocumentForContext(document: vscode.TextDocument): Promise<
   try {
     return await vscode.workspace.openTextDocument(sourceUri);
   } catch (error) {
-    console.error('[KAHUA] Failed to open source XML document for context:', error);
+    debugError('[KAHUA] Failed to open source XML document for context:', error);
     return undefined;
   }
 }
@@ -1967,10 +1984,6 @@ function storeInjectionTokensForDocument(
     }
   }
 
-  if (!affectingTokens.has('entity') && extractedTokens.has('entity')) {
-    affectingTokens.set('entity', extractedTokens.get('entity')!);
-  }
-
   if (affectingTokens.size > 0) {
     injectionAffectingTokens.set(documentUri.toString(), affectingTokens);
   }
@@ -2013,7 +2026,7 @@ function inferSourceXmlUriFromDocument(document: vscode.TextDocument): vscode.Ur
       try {
         return vscode.Uri.parse(rawUri);
       } catch (error) {
-        console.warn('[KAHUA] Failed to parse Source XML URI metadata:', error);
+        debugWarn('[KAHUA] Failed to parse Source XML URI metadata:', error);
       }
     } else if (lower.startsWith(SOURCE_XML_COMMENT_PREFIX.toLowerCase())) {
       const rawPath = text.substring(SOURCE_XML_COMMENT_PREFIX.length).trim();
@@ -2203,7 +2216,7 @@ async function insertXmlIntoFile(
   }
 
   debugLog(`[KAHUA] insertXmlIntoFile: starting section mapping (strategy=${strategy ?? 'prompt'})`);
-  console.log('[DEBUG] Generated XML content being parsed:', content);
+  debugLog('[DEBUG] Generated XML content being parsed:', content);
   const generatedSections = parseGeneratedXmlSections(content);
   debugLog(`[KAHUA] insertXmlIntoFile: parsed ${generatedSections.length} generated sections`);
   const parseStart = Date.now();
@@ -2222,10 +2235,10 @@ async function insertXmlIntoFile(
     return true;
   });
 
-  console.log('[DEBUG] Generated sections:', generatedSections.map(s => s.name));
-  console.log('[DEBUG] Target sections:', targetSections.map(s => s.tagName));
+  debugLog('[DEBUG] Generated sections:', generatedSections.map(s => s.name));
+  debugLog('[DEBUG] Target sections:', targetSections.map(s => s.tagName));
   const matches = matchSectionsToTargets(generatedSections, targetSections);
-  console.log('[DEBUG] Section matches:', Array.from(matches.entries()).map(([name, targets]) => ({name, targets: targets.map(t => t.tagName)})));
+  debugLog('[DEBUG] Section matches:', Array.from(matches.entries()).map(([name, targets]) => ({name, targets: targets.map(t => t.tagName)})));
 
   // For sections with multiple targets, prompt user to select which to use
   const selectedTargets = new Map<string, XmlTargetSection[]>();
@@ -2237,7 +2250,7 @@ async function insertXmlIntoFile(
       selectedTargets.set(sectionName, targetMatches);
     } else {
       // Multiple matches - try smart resolution first, then ask user to select
-      const selected = await selectTargetsFromMultiple(sectionName, targetMatches, affectingTokens);
+      const selected = await selectTargetsFromMultiple(sectionName, targetMatches, affectingTokens, tokenDefinitions);
       if (selected) {
         selectedTargets.set(sectionName, selected);
       } else {
@@ -2597,65 +2610,57 @@ export function applyInjectionPathTemplate(
           const templateBasePath = readPath.injectionPathTemplate.split('[')[0];
 
           // Check if the original xpath matches the path structure that this template is meant for
-          // Parse both paths to compare their structural elements, not just string matching
+          // Parse both paths to compare their structural elements
           const xpathParts = xpath.split('/').filter(p => p);
           const templateParts = templateBasePath.split('/').filter(p => p);
           
-          // Check if this template should apply to this xpath by comparing path structure
+          // Generic path matching: check if template base path is structurally compatible with xpath
+          // Remove attribute filters for structural comparison
+          const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, '').replace(/^\/+/, '');
+          const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, '').replace(/^\/+/, '');
+          
+          // Check if the template should apply to this xpath
+          // The template applies if:
+          // 1. For absolute paths (starting with 'App/'), check if one structure starts with the other
+          //    This handles cases where the xpath is more specific than the template or vice versa
+          // 2. For relative paths or mixed cases, check if one structure contains the other
+          //    This ensures structural compatibility
           let shouldApplyTemplate = false;
           
-          // For EntityDef-based templates, check if we're actually targeting EntityDef elements
-          if (templateBasePath.includes('EntityDef')) {
-            // Only apply if the xpath has EntityDef as a path element (not just in attribute filters)
-            shouldApplyTemplate = xpathParts.some(part => {
-              // Check if this part is "EntityDef" or "EntityDef[...]" but not "@EntityDefName"
-              return part === 'EntityDef' || (part.startsWith('EntityDef[') && !part.includes('@EntityDefName'));
-            });
-            
-            // For absolute paths, also ensure the path structures match
-            if (shouldApplyTemplate && templateBasePath.startsWith('App/') && xpath.startsWith('App/')) {
-              // Both are absolute paths - check structural compatibility more strictly
-              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
-              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
-              
-              // Check if xpath structure matches template structure (allowing for the target to be more specific)
-              shouldApplyTemplate = xpathStructure.startsWith(templateStructure) || templateStructure.startsWith(xpathStructure);
-            }
-          } else if (templateBasePath.includes('DataStore/Tables/Table')) {
-            // For DataStore Table templates, check if we're targeting DataStore Table elements
-            shouldApplyTemplate = xpathParts.includes('DataStore') && 
-                                  xpathParts.includes('Tables') && 
-                                  xpathParts.includes('Table');
-            
-            // For DataStore paths, also check structural compatibility
-            if (shouldApplyTemplate) {
-              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
-              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
-              
-              // Check if xpath structure is compatible with template (xpath should be more specific than template)
-              // e.g., "App/DataStore/Tables/Table/Columns" should match template "DataStore/Tables/Table"
-              shouldApplyTemplate = xpathStructure.includes(templateStructure) || 
-                                    templateStructure.includes(xpathStructure);
-            }
-          } else if (templateBasePath.includes('HubDef')) {
-            // For HubDef-based templates, check if we're actually targeting HubDef elements
-            shouldApplyTemplate = xpathParts.some(part => {
-              // Check if this part is "HubDef" or "HubDef[...]"
-              return part === 'HubDef' || part.startsWith('HubDef[');
-            });
-            
-            // For HubDef paths, also check structural compatibility
-            if (shouldApplyTemplate && templateBasePath.startsWith('App/') && xpath.startsWith('/App/')) {
-              // Both are absolute paths - check structural compatibility
-              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
-              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
-              
-              // Check if xpath structure matches template structure (allowing for the target to be more specific)
-              shouldApplyTemplate = xpathStructure.includes(templateStructure) || templateStructure.includes(xpathStructure);
-            }
+          if (templateStructure.startsWith('App/') && xpathStructure.startsWith('App/')) {
+            // Both are absolute paths - use strict prefix matching
+            shouldApplyTemplate = 
+              xpathStructure.startsWith(templateStructure) || 
+              templateStructure.startsWith(xpathStructure);
           } else {
-            // For other templates, check exact path match
-            shouldApplyTemplate = xpath === templateBasePath;
+            // For relative or mixed paths - check if structures overlap
+            // Split into parts and check if one contains all parts of the other in order
+            const templateSegments = templateStructure.split('/').filter(s => s);
+            const xpathSegments = xpathStructure.split('/').filter(s => s);
+            
+            // Check if all template segments appear in xpath in the same order
+            let lastFoundIndex = -1;
+            const templateInXpath = templateSegments.every(segment => {
+              const foundIndex = xpathSegments.indexOf(segment, lastFoundIndex + 1);
+              if (foundIndex > lastFoundIndex) {
+                lastFoundIndex = foundIndex;
+                return true;
+              }
+              return false;
+            });
+            
+            // Check if all xpath segments appear in template in the same order
+            lastFoundIndex = -1;
+            const xpathInTemplate = xpathSegments.every(segment => {
+              const foundIndex = templateSegments.indexOf(segment, lastFoundIndex + 1);
+              if (foundIndex > lastFoundIndex) {
+                lastFoundIndex = foundIndex;
+                return true;
+              }
+              return false;
+            });
+            
+            shouldApplyTemplate = templateInXpath || xpathInTemplate;
           }
           
           if (shouldApplyTemplate) {
@@ -3151,8 +3156,8 @@ class XmlParsingService {
   });
 
   const xmlText = cleanXmlContent.replace(/xmlns="[^"]*"/g, '');
-  console.log('[DEBUG] XML content being parsed (first 500 chars):', xmlText.substring(0, 500));
-  console.log('[DEBUG] XML content lines 10-20:', xmlText.split('\n').slice(9, 20));
+  debugLog('[DEBUG] XML content being parsed (first 500 chars):', xmlText.substring(0, 500));
+  debugLog('[DEBUG] XML content lines 10-20:', xmlText.split('\n').slice(9, 20));
   parser.write(xmlText).close();
 
   if (DEBUG_MODE && rootElement) {
@@ -3705,27 +3710,39 @@ function extractTextContent(
 
 /**
  * Determines the appropriate display label for a fragment based on document type.
- * Shows "Extension" vs "Base App" based on whether the App element has an Extends attribute.
+ * Uses document type detection rather than hardcoded pattern matching.
  */
 function getFragmentDisplayLabel(fragmentName: string, document: vscode.TextDocument | null): string {
   if (!document) {
     return fragmentName;
   }
   
-  if (fragmentName.toLowerCase().includes('app') || fragmentName.toLowerCase().includes('base')) {
-    try {
-      const extendsValue = extractAttributeValue(document, 'App/@Extends');
-      if (extendsValue && extendsValue.trim() !== '') {
-        return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Extension');
-      } else {
-        return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Base App');
-      }
-    } catch (error) {
-      // If we can't determine, return original name
+  // Use the proper document type detection instead of hardcoded pattern matching
+  try {
+    const documentType = detectDocumentTypeId(document);
+    
+    // If the fragment name doesn't suggest it's related to app/extension distinction,
+    // just return the original name
+    // Only apply special labeling if fragment name explicitly mentions 'app' or 'base'
+    const lowerName = fragmentName.toLowerCase();
+    const isAppRelated = lowerName.includes('app') || lowerName.includes('base');
+    
+    if (!isAppRelated) {
       return fragmentName;
     }
+    
+    // Apply contextual display name based on document type
+    if (documentType === 'kahua-extension') {
+      return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Extension');
+    } else if (documentType === 'kahua-base') {
+      return fragmentName.replace(/\b(app|base\s*app)\b/gi, 'Base App');
+    }
+    
+    return fragmentName;
+  } catch (error) {
+    // If we can't determine, return original name
+    return fragmentName;
   }
-  return fragmentName;
 }
 
 /**
@@ -3819,11 +3836,9 @@ async function readTokenValuesFromXml(
 
     switch (readPath.type) {
       case 'attribute':
-        const attributePaths = getAttributeCandidatePaths(
-          readPath.path,
-          readPath.attributeMatchOrderForInjection
-        );
-        for (const candidatePath of attributePaths) {
+        // Use new format: readpaths array
+        const pathsToTry = readPath.readpaths || [];
+        for (const candidatePath of pathsToTry) {
           value = extractAttributeValue(document, candidatePath, xmlContext);
           if (value && value.trim()) {
             break;
@@ -3832,7 +3847,11 @@ async function readTokenValuesFromXml(
         break;
 
       case 'text':
-        value = extractTextContent(document, readPath.path, xmlContext);
+        // Use first readpath for text extraction
+        const textPath = readPath.readpaths?.[0];
+        if (textPath) {
+          value = extractTextContent(document, textPath, xmlContext);
+        }
         break;
 
       case 'selection':
@@ -3841,8 +3860,15 @@ async function readTokenValuesFromXml(
           continue;
         }
 
-        debugLog(`[DEBUG] Extracting values for ${tokenName} from path: ${readPath.path}, attribute: ${readPath.attribute}`);
-        const options = extractSelectableValues(document, readPath.path, readPath.attribute, xmlContext);
+        // Use first readpath for selection
+        const selectionPath = readPath.readpaths?.[0];
+        if (!selectionPath) {
+          debugLog(`[DEBUG] Skipping ${tokenName}: no readpaths configured`);
+          continue;
+        }
+
+        debugLog(`[DEBUG] Extracting values for ${tokenName} from path: ${selectionPath}, attribute: ${readPath.attribute}`);
+        const options = extractSelectableValues(document, selectionPath, readPath.attribute, xmlContext);
         debugLog(`[DEBUG] Found ${options.length} options:`, options);
         value = await showValueSelectionPick(tokenName, options);
         debugLog(`[DEBUG] User selected: ${value}`);
@@ -3864,7 +3890,8 @@ function buildGenerationReport(
   results: InjectionResult[],
   targetFileName: string,
   generationDetails?: string,
-  skippedRows?: string[]
+  skippedRows?: string[],
+  generatedXml?: string
 ): string {
   const injected = results.filter(r => r.status === 'injected');
   const skipped = results.filter(r => r.status === 'skipped');
@@ -3925,10 +3952,17 @@ function buildGenerationReport(
   if (generationDetails) {
     report += `Generation Details:\n`;
     report += `${'-'.repeat(70)}\n`;
-    console.log('[DEBUG] generateInjectionReport: generationDetails length:', generationDetails.length);
-    console.log('[DEBUG] generateInjectionReport: generationDetails preview (first 1000 chars):', generationDetails.substring(0, 1000));
-    console.log('[DEBUG] generateInjectionReport: Contains unreplaced tokens?', generationDetails.includes('{$'));
+    debugLog('[DEBUG] generateInjectionReport: generationDetails length:', generationDetails.length);
+    debugLog('[DEBUG] generateInjectionReport: generationDetails preview (first 1000 chars):', generationDetails.substring(0, 1000));
+    debugLog('[DEBUG] generateInjectionReport: Contains unreplaced tokens?', generationDetails.includes('{$'));
     report += generationDetails;
+    report += `\n\n`;
+  }
+
+  if (generatedXml) {
+    report += `Generated Fragments:\n`;
+    report += `${'-'.repeat(70)}\n`;
+    report += generatedXml;
     report += `\n\n`;
   }
 
@@ -3945,14 +3979,15 @@ async function openGenerationReport(
   results: InjectionResult[],
   targetFileUri?: vscode.Uri,
   generationDetails?: string,
-  skippedRows?: string[]
+  skippedRows?: string[],
+  generatedXml?: string
 ): Promise<void> {
   if (results.length === 0 && generationDetails == undefined && (!skippedRows || skippedRows.length === 0)) {
     return;
   }
 
   const targetFileName = targetFileUri ? getWorkspaceRelativePath(targetFileUri) : '(Not Applicable)';
-  const reportText = buildGenerationReport(results, targetFileName, generationDetails, skippedRows);
+  const reportText = buildGenerationReport(results, targetFileName, generationDetails, skippedRows, generatedXml);
 
   const reportDocument = await vscode.workspace.openTextDocument({
     content: reportText,
@@ -3966,151 +4001,331 @@ async function openGenerationReport(
 }
 
 /**
- * Attempts to automatically resolve the correct injection target using token information
- * @param sectionName The section being injected (e.g., "columns")
- * @param targets Available injection targets
- * @param affectingTokens Token values that affect injection (e.g., appname, entity)
- * @returns The automatically resolved target, or undefined if can't auto-resolve
+ * Check if a target exactly matches a specific token using configuration-based fallbacks
  */
-function trySmartInjectionResolution(
-  sectionName: string,
-  targets: XmlTargetSection[],
-  affectingTokens?: Map<string, string>
-): XmlTargetSection | undefined {
-  if (!affectingTokens || affectingTokens.size === 0) {
-    return undefined;
+function tokenMatchesTarget(
+  target: XmlTargetSection,
+  tokenName: string,
+  tokenValue: string,
+  tokenDefinitions?: TokenNameDefinition[],
+  allTokens?: Map<string, string>
+): boolean {
+  if (!tokenValue) {
+    return false;
   }
 
-  const appname = affectingTokens.get('appname');
-  const entity = affectingTokens.get('entity');
-  const smartConfig = getSmartInjectionConfig();
-  const matchBuckets: Record<AppMatchStrategy, XmlTargetSection[]> = {
-    name: [],
-    extends: [],
-    any: []
-  };
-  const normalizedSection = sectionName.toLowerCase();
-  const looksLikeColumnsSection =
-    normalizedSection.includes('column') ||
-    targets.some(target => {
-      const xmlNode = target.xmlNodeName?.toLowerCase() || '';
-      const injectionPath = target.injectionPath?.toLowerCase() || '';
-      const xpathPath = target.xpathPath?.toLowerCase() || '';
-      return (
-        xmlNode === 'columns' ||
-        injectionPath.includes('/columns') ||
-        xpathPath.includes('/columns')
-      );
-    });
+  // Get the token's configuration
+  let injectionMatchPaths: string[] = [];
+  let injectionPathTemplate: string | undefined;
+  
+  if (tokenDefinitions) {
+    for (const tokenDef of tokenDefinitions) {
+      if (tokenDef.tokenReadPaths?.[tokenName]) {
+        const readPath = tokenDef.tokenReadPaths[tokenName];
+        
+        // Use new format: injectionmatchpaths
+        if (readPath.injectionmatchpaths && readPath.injectionmatchpaths.length > 0) {
+          injectionMatchPaths = readPath.injectionmatchpaths;
+        }
+        
+        injectionPathTemplate = readPath.injectionPathTemplate;
+        break;
+      }
+    }
+  }
 
-  debugLog(`[DEBUG] Smart injection resolution: section=${sectionName}, appname=${appname}, entity=${entity}, targets=${targets.length}`);
-  console.log(`[KAHUA] Smart injection: section="${sectionName}", appname="${appname}", entity="${entity}", ${targets.length} targets`);
-
-  // For DataStore/Table injection (like columns), look for Table with matching EntityDefName
-  if (looksLikeColumnsSection) {
-    if (entity) {
-      const appCandidates = resolveAppNameCandidates(appname, targets, smartConfig);
-      for (const candidate of appCandidates) {
-        const expectedEntityDefName = `${candidate.value}.${entity}`;
-        debugLog(
-          `[DEBUG] Looking for Table with EntityDefName="${expectedEntityDefName}" using ${candidate.strategy} candidate`
-        );
-
-        for (const target of targets) {
-          if (targetMatchesEntityDefName(target, expectedEntityDefName)) {
-            debugLog(
-              `[DEBUG] Found matching Table target (${candidate.strategy}): ${
-                target.injectionPath || target.context || target.enrichedPath
-              }`
-            );
-            return target;
+  // If this token has an injection path template, validate it matches
+  if (injectionPathTemplate && allTokens) {
+    debugLog(`[DEBUG] Token ${tokenName}: Validating injection path template: ${injectionPathTemplate}`);
+    
+    // Extract all token placeholders from the template
+    const placeholders = [...injectionPathTemplate.matchAll(/\{([^}]+)\}/g)].map(m => m[1]);
+    
+    // For each placeholder that's not 'value', we need to try all its injection match paths
+    // and find a combination that makes the template match the target
+    
+    // Build a map of placeholder → possible values
+    const possibleValues = new Map<string, string[]>();
+    
+    for (const placeholder of placeholders) {
+      if (placeholder === 'value') {
+        possibleValues.set('value', [tokenValue]);
+        continue;
+      }
+      
+      // This is another token - get its injection match paths
+      const otherTokenValue = allTokens.get(placeholder);
+      if (!otherTokenValue) {
+        debugLog(`[DEBUG] Token ${tokenName}: Template references token '${placeholder}' which is not available`);
+        // Template can't be validated - fall through to regular matching
+        break;
+      }
+      
+      // Get the injection match paths for this token
+      let otherTokenPaths: string[] = [];
+      if (tokenDefinitions) {
+        for (const tokenDef of tokenDefinitions) {
+          if (tokenDef.tokenReadPaths?.[placeholder]) {
+            const readPath = tokenDef.tokenReadPaths[placeholder];
+            if (readPath.injectionmatchpaths && readPath.injectionmatchpaths.length > 0) {
+              otherTokenPaths = readPath.injectionmatchpaths;
+            }
+            break;
           }
         }
       }
       
-      debugLog(
-        `[DEBUG] No Table found for entity "${entity}" using candidates: ${appCandidates
-          .map(candidate => `${candidate.strategy}:${candidate.value}`)
-          .join(', ')}`
-      );
-
-      if (smartConfig.appMatchOrder.includes('any') && targets.length === 1) {
-        debugLog('[DEBUG] Falling back to single-target "any" selection for DataStore columns');
-        return targets[0];
-      }
-    }
-  }
-  
-  // For EntityDef-based injection (like attributes into App structure)
-  if (sectionName.toLowerCase().includes('attribute') && entity) {
-    for (const target of targets) {
-      if (!target.injectionPath || !target.injectionPath.includes('EntityDef')) {
-        continue;
-      }
-
-      const pathHasEntityName =
-        target.injectionPath.includes(`@Name="${entity}"`) ||
-        target.injectionPath.includes(`@Name='${entity}'`) ||
-        target.injectionPath.includes(`Name="${entity}"`);
-
-      const attributeMatches = target.attributes && target.attributes['Name'] === entity;
-      if (!pathHasEntityName && !attributeMatches) {
-        continue;
-      }
-
-      let bucket: AppMatchStrategy | 'skip' = 'any';
-      const rootApp = findRootAppElement(target.element);
-
-      if (appname && rootApp) {
-        const rootName = rootApp.attributes?.['Name'];
-        const rootExtends = rootApp.attributes?.['Extends'];
-
-        if (rootName === appname) {
-          bucket = 'name';
-        } else if (rootExtends === appname) {
-          bucket = 'extends';
-        } else {
-          bucket = 'skip';
+      // For each injection match path, extract the target's attribute value
+      // and use it to build the template pattern
+      const values: string[] = [];
+      for (const matchPath of otherTokenPaths) {
+        if (matchPath.endsWith('/@*')) {
+          // Wildcard - check if ANY attribute on the element equals the token value
+          const elementPath = matchPath.substring(0, matchPath.length - 3);
+          const element = findAncestorByTag(target.element, elementPath);
+          if (element && element.attributes) {
+            for (const [attrName, attrValue] of Object.entries(element.attributes)) {
+              if (attrValue) {
+                values.push(attrValue);
+              }
+            }
+          }
+          continue;
         }
-      } else if (!appname) {
-        bucket = 'any';
+        
+        const pathMatch = matchPath.match(/^(.+)\/@(\w+)$/);
+        if (!pathMatch) continue;
+        
+        const elementPath = pathMatch[1];
+        const attributeName = pathMatch[2];
+        
+        const element = findAncestorByTag(target.element, elementPath);
+        if (element && element.attributes) {
+          const matchingKey = Object.keys(element.attributes).find(
+            k => k.toLowerCase() === attributeName.toLowerCase()
+          );
+          const attrValue = matchingKey ? element.attributes[matchingKey] : undefined;
+          if (attrValue) {
+            values.push(attrValue);
+          }
+        }
       }
-
-      if (bucket === 'skip') {
-        debugLog(
-          `[DEBUG] Skipping EntityDef target because App root doesn't match (${rootApp?.attributes?.['Name']}/${rootApp?.attributes?.['Extends']} vs ${appname})`
-        );
-        continue;
+      
+      if (values.length === 0) {
+        debugLog(`[DEBUG] Token ${tokenName}: No values found for placeholder '${placeholder}'`);
+        // Template can't be validated - fall through to regular matching
+        break;
       }
-
-      matchBuckets[bucket].push(target);
+      
+      possibleValues.set(placeholder, values);
     }
-
-    for (const preference of smartConfig.appMatchOrder) {
-      if (matchBuckets[preference].length > 0) {
-        debugLog(`[DEBUG] Selected EntityDef target via preference "${preference}"`);
-        return matchBuckets[preference][0];
+    
+    // Only attempt template matching if we got values for all placeholders
+    if (possibleValues.size === placeholders.length) {
+      // Now try all combinations to see if any match the target
+      const tryResolve = (placeholderIndex: number, currentResolved: string): boolean => {
+        if (placeholderIndex >= placeholders.length) {
+          // All placeholders resolved - check if it matches
+          debugLog(`[DEBUG] Token ${tokenName}: Trying resolved template: ${currentResolved}`);
+          debugLog(`[DEBUG] Token ${tokenName}: Target injection path: ${target.injectionPath}`);
+          
+          const templateMatch = currentResolved.match(/@\w+=['"']([^'"']+)['"']/);
+          const targetMatch = target.injectionPath?.match(/@\w+=['"']([^'"']+)['"']/);
+          
+          debugLog(`[DEBUG] Token ${tokenName}: Template extracted: ${templateMatch?.[1]}, Target extracted: ${targetMatch?.[1]}`);
+          
+          if (templateMatch && targetMatch) {
+            const expectedValue = templateMatch[1];
+            const actualValue = targetMatch[1];
+            
+            if (expectedValue === actualValue) {
+              debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via injection path template`);
+              return true;
+            }
+          }
+          return false;
+        }
+        
+        const placeholder = placeholders[placeholderIndex];
+        const values = possibleValues.get(placeholder) || [];
+        
+        for (const value of values) {
+          const resolved = currentResolved.replace(`{${placeholder}}`, value);
+          if (tryResolve(placeholderIndex + 1, resolved)) {
+            return true;
+          }
+        }
+        
+        return false;
+      };
+      
+      if (tryResolve(0, injectionPathTemplate)) {
+        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} MATCHED via template!`);
+        return true;
+      } else {
+        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} template did not match - trying fallback matching`);
+        // Fall through to regular injection match path logic below
       }
-    }
-
-    if (matchBuckets.any.length > 0 && !smartConfig.appMatchOrder.includes('any')) {
-      debugLog('[DEBUG] EntityDef matches available but filtered out by configuration');
+    } else {
+      debugLog(`[DEBUG] Token ${tokenName}: Template validation skipped - not all placeholders resolved`);
+      // Fall through to regular injection match path logic below
     }
   }
-  
-  // Could add more smart resolution rules here for other patterns
-  // e.g., WorkflowDef matching, specific DataSource patterns, etc.
-  
-  debugLog(`[DEBUG] No smart resolution found for section "${sectionName}"`);
-  return undefined;
+
+  // Try each injection match path in order (stop at first match)
+  for (const matchPath of injectionMatchPaths) {
+    // Check for wildcard: "App/@*" means match ANY attribute on App
+    if (matchPath.endsWith('/@*')) {
+      const elementPath = matchPath.substring(0, matchPath.length - 3);  // Remove "/@*"
+      const element = findAncestorByTag(target.element, elementPath);
+      if (element && element.attributes) {
+        // Check if ANY attribute equals the token value
+        for (const [attrName, attrValue] of Object.entries(element.attributes)) {
+          if (attrValue === tokenValue) {
+            debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath} (${attrName})`);
+            return true;
+          }
+        }
+      }
+      continue;
+    }
+    
+    // Parse the path to extract element and attribute
+    // Format: "App/@Name" or "App/@Extends"
+    const pathMatch = matchPath.match(/^(.+)\/@(\w+)$/);
+    if (!pathMatch) {
+      debugLog(`[DEBUG] Invalid match path format: ${matchPath}`);
+      continue;
+    }
+    
+    const elementPath = pathMatch[1];  // e.g., "App"
+    const attributeName = pathMatch[2];  // e.g., "Name" or "Extends"
+    
+    // Find the element (App ancestor in most cases)
+    const element = findAncestorByTag(target.element, elementPath);
+    if (element && element.attributes) {
+      // Case-insensitive attribute lookup
+      const matchingKey = Object.keys(element.attributes).find(
+        k => k.toLowerCase() === attributeName.toLowerCase()
+      );
+      const attrValue = matchingKey ? element.attributes[matchingKey] : undefined;
+      
+      if (attrValue === tokenValue) {
+        debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched via ${matchPath}`);
+        return true;
+      }
+    }
+  }
+
+  // Also check if value appears as complete token in injection path
+  // This is important for tokens like 'entity' that may not have injectionMatchPaths
+  if (injectionMatchPaths.length === 0 && injectionPathContainsValue(target.injectionPath, tokenValue)) {
+    debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in injection path`);
+    return true;
+  }
+
+  // Check xpath path and context as well (fallback)
+  if (injectionMatchPaths.length === 0) {
+    if (target.xpathPath && injectionPathContainsValue(target.xpathPath, tokenValue)) {
+      debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in xpath path`);
+      return true;
+    }
+
+    if (target.context && injectionPathContainsValue(target.context, tokenValue)) {
+      debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} matched in context`);
+      return true;
+    }
+  }
+
+  debugLog(`[DEBUG] Token ${tokenName}=${tokenValue} did NOT match target`);
+  return false;
 }
 
-function findRootAppElement(element?: SaxElement): SaxElement | undefined {
-  let current = element;
-  while (current && current.parent) {
-    current = current.parent;
+/**
+ * Check if a target exactly matches ALL tokens
+ */
+function targetExactlyMatchesAllTokens(
+  target: XmlTargetSection,
+  tokens: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
+): boolean {
+  // Every token must match
+  for (const [tokenName, tokenValue] of tokens.entries()) {
+    if (!tokenMatchesTarget(target, tokenName, tokenValue, tokenDefinitions, tokens)) {
+      return false; // Any token fails → target doesn't match
+    }
   }
-  return current && current.tagName === 'App' ? current : undefined;
+  return true; // All tokens matched
+}
+
+/**
+ * Attempts to automatically resolve the correct injection target using exact matching.
+ * Only auto-injects when exactly ONE target matches ALL tokens exactly.
+ */
+function trySmartInjectionResolution(
+  sectionName: string,
+  targets: XmlTargetSection[],
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
+): XmlTargetSection | undefined {
+  if (!affectingTokens || affectingTokens.size === 0 || targets.length === 0) {
+    return undefined;
+  }
+
+  const candidateTokens = Array.from(affectingTokens.entries())
+    .map(([tokenName, rawValue]) => ({
+      tokenName,
+      value: (rawValue ?? '').trim()
+    }))
+    .filter(entry => entry.value.length > 0);
+
+  if (candidateTokens.length === 0) {
+    return undefined;
+  }
+
+  debugLog(
+    `[DEBUG] Smart injection resolution: section=${sectionName}, tokens=${candidateTokens
+      .map(entry => entry.tokenName + '=' + entry.value)
+      .join(', ')}, targets=${targets.length}`
+  );
+
+  // Find targets that exactly match ALL tokens
+  const exactMatches: XmlTargetSection[] = [];
+  
+  for (const target of targets) {
+    const tokensMap = new Map(candidateTokens.map(t => [t.tokenName, t.value]));
+    
+    if (targetExactlyMatchesAllTokens(target, tokensMap, tokenDefinitions)) {
+      exactMatches.push(target);
+      debugLog(
+        `[DEBUG] Target ${target.context || target.injectionPath} EXACTLY matches all tokens`
+      );
+    } else {
+      debugLog(
+        `[DEBUG] Target ${target.context || target.injectionPath} does NOT match all tokens`
+      );
+    }
+  }
+
+  // Only auto-inject if exactly ONE target matches all tokens exactly
+  if (exactMatches.length === 1) {
+    debugLog(
+      `[DEBUG] Smart injection selected ${
+        exactMatches[0].context || exactMatches[0].injectionPath || exactMatches[0].tagName
+      } for section "${sectionName}" (exact match)`
+    );
+    return exactMatches[0];
+  }
+
+  if (exactMatches.length > 1) {
+    debugLog(
+      `[DEBUG] Multiple targets (${exactMatches.length}) exactly match all tokens for section "${sectionName}" - falling back to manual selection`
+    );
+  } else {
+    debugLog(`[DEBUG] No targets exactly match all tokens for section "${sectionName}"`);
+  }
+
+  return undefined;
 }
 
 function findAncestorByTag(element: SaxElement | undefined, tagName: string): SaxElement | undefined {
@@ -4135,10 +4350,11 @@ type TargetSelectionItem = vscode.QuickPickItem & {
 };
 
 async function selectTargetsFromMultiple(
-    sectionName: string,                                                                                                                                                                                                                                                                                                                                                                                 
-    targets: XmlTargetSection[],                                                                                                                                                                                                                                                                                                                                                                         
-    affectingTokens?: Map<string, string>                                                                                                                                                                                                                                                                                                                                                                
-  ): Promise<XmlTargetSection[] | undefined> {
+  sectionName: string,
+  targets: XmlTargetSection[],
+  affectingTokens?: Map<string, string>,
+  tokenDefinitions?: TokenNameDefinition[]
+): Promise<XmlTargetSection[] | undefined> {
     if (targets.length === 0) {                                                                                                                                                                                                                                                                                                                                                                          
       return undefined;                                                                                                                                                                                                                                                                                                                                                                                  
     }
@@ -4147,10 +4363,10 @@ async function selectTargetsFromMultiple(
       return targets;                                                                                                                                                                                                                                                                                                                                                                                    
     }                                                                                                                                                                                                                                                                                                                                                                                                    
                                                                                                                                                                                                                                                                                                                                                                                                          
-    const smartSelected = trySmartInjectionResolution(sectionName, targets, affectingTokens);                                                                                                                                                                                                                                                                                                            
+    const smartSelected = trySmartInjectionResolution(sectionName, targets, affectingTokens, tokenDefinitions);                                                                                                                                                                                                                                                                                                           
     if (smartSelected) {                                                                                                                                                                                                                                                                                                                                                                                 
       debugLog(`[DEBUG] Smart injection auto-resolved to: ${smartSelected.context} (${smartSelected.injectionPath})`);                                                                                                                                                                                                                                                                                   
-      console.log(`[KAHUA] Smart injection: Auto-selected injection target for "${sectionName}" based on template tokens`);                                                                                                                                                                                                                                                                              
+      debugLog(`[KAHUA] Smart injection: Auto-selected injection target for "${sectionName}" based on template tokens`);                                                                                                                                                                                                                                                                              
       return [smartSelected];                                                                                                                                                                                                                                                                                                                                                                            
     }                                                                                                                                                                                                                                                                                                                                                                                                    
                                                                                                                                                                                                                                                                                                                                                                                                          
@@ -4293,26 +4509,30 @@ function matchSectionsToTargets(
   for (const genSection of generatedSections) {
     const allMatches: XmlTargetSection[] = [];
     const normalizedName = genSection.name.toLowerCase();
-    console.log(`[DEBUG] Matching generated section "${genSection.name}" (normalized: "${normalizedName}")`);
+    debugLog(`[DEBUG] Matching generated section "${genSection.name}" (normalized: "${normalizedName}")`);
     const originalName = genSection.name.trim();
     const normalizedOriginal = originalName.toLowerCase();
 
     for (const targetSection of targetSections) {
       const targetName = targetSection.tagName.toLowerCase();
-      console.log(`[DEBUG] Checking target "${targetSection.tagName}" (normalized: "${targetName}") against "${normalizedName}"`);
+      debugLog(`[DEBUG] Checking target "${targetSection.tagName}" (normalized: "${targetName}") against "${normalizedName}"`);
       // Exact match first
       if (normalizedOriginal === targetName) {
-        console.log(`[DEBUG] Exact match found: "${originalName}" === "${targetSection.tagName}"`);
+        debugLog(`[DEBUG] Exact match found: "${originalName}" === "${targetSection.tagName}"`);
         allMatches.push(targetSection);
         continue;
       }
     }
 
     if (allMatches.length === 0) {
-      console.warn(`[KAHUA] No exact target match found for section "${genSection.name}". Available targets: ${targetSections.map(s => s.tagName).join(', ')}`);
+      debugWarn(
+        `[KAHUA] No exact target match found for section "${genSection.name}". Available targets: ${targetSections
+          .map(s => s.tagName)
+          .join(', ')}`
+      );
     }
 
-    console.log(`[DEBUG] Final matches for "${genSection.name}": ${allMatches.length} targets`);
+    debugLog(`[DEBUG] Final matches for "${genSection.name}": ${allMatches.length} targets`);
     matches.set(genSection.name, allMatches);
   }
 
@@ -4853,6 +5073,7 @@ export interface GenerationRequest {
   tokenDefinitions: TokenNameDefinition[];
   sourceUri?: string; // Source XML file URI for injection
   skippedRows?: string[];
+  fromWebviewTable?: boolean; // Indicates this came from the table webview UI
 }
 
 /**
@@ -5004,6 +5225,7 @@ async function showTemplateUI(context: GenerationContext, data: GenerationData):
     headerTokens,
     tableTokens,
     extractedTokens,
+    tokenDefinitions: context.tokenDefinitions,
     includeDefaultRow: true,
     snippetMode: false
   });
@@ -5066,6 +5288,7 @@ async function showSnippetUI(context: GenerationContext, data: GenerationData): 
     headerTokens,
     tableTokens,
     extractedTokens,
+    tokenDefinitions: context.tokenDefinitions,
     dataRows: dataRows,
     includeDefaultRow: false, // We handle multiple rows via dataRows
     snippetMode: true,
@@ -5161,9 +5384,9 @@ async function handleTableGeneration(data: {
   sourceUri?: string;
 }): Promise<void> {
   try {
-    console.log('handleTableGeneration command received with data:', data);
-    console.log('handleTableGeneration started with type:', data.type);
-    console.log('handleTableGeneration sourceUri received:', data.sourceUri);
+    debugLog('handleTableGeneration command received with data:', data);
+    debugLog('handleTableGeneration started with type:', data.type);
+    debugLog('handleTableGeneration sourceUri received:', data.sourceUri);
 
     const fragmentDefs = (data.selectedFragmentDefs || []) as FragmentDefinition[];
     const headerTokens = data.headerTokens || [];
@@ -5305,13 +5528,14 @@ async function handleTableGeneration(data: {
       selectedFragmentDefs: fragmentDefs,
       tokenDefinitions,
       skippedRows: skippedRowMessages,
-      sourceUri: (sourceFileUri ?? resolveSourceUri())?.toString()
+      sourceUri: (sourceFileUri ?? resolveSourceUri())?.toString(),
+      fromWebviewTable: true // Mark this as coming from webview table input
     };
 
     await executeGeneration(generationRequest);
-    console.log('handleTableGeneration completed successfully');
+    debugLog('handleTableGeneration completed successfully');
   } catch (error: unknown) {
-    console.error('handleTableGeneration error:', error);
+    debugError('handleTableGeneration error:', error);
     vscode.window.showErrorMessage(`Table generation failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -5336,7 +5560,7 @@ async function handleGenerationCommand(generationType: 'template' | 'snippet' | 
  * Unified generation pipeline - processes GenerationRequest and produces XML
  */
 async function executeGeneration(request: GenerationRequest): Promise<void> {
-  console.log('[KAHUA] executeGeneration called with request:', {
+  debugLog('[KAHUA] executeGeneration called with request:', {
     fragmentIds: request.fragmentIds,
     documentType: request.documentType,
     targetType: request.outputTarget.type,
@@ -5366,7 +5590,7 @@ async function generateXmlFromRequest(
   request: GenerationRequest, 
   progress: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<GenerationResult | undefined> {
-  console.log('generateXmlFromRequest: Processing structured data directly');
+  debugLog('generateXmlFromRequest: Processing structured data directly');
   
   progress.report({ message: 'Generating XML from structured data...' });
   
@@ -5413,17 +5637,31 @@ async function generateXmlFromRequest(
         }
       }
 
-      generationDetails = CsvGenerationService.generateCsv({
-        fragmentIds: request.fragmentIds,
-        sourceFile: sourceFileDisplay,
-        sourceUri: request.sourceUri,
-        headerTokens: request.tokenData.headerTokens,
-        tableTokens: request.tokenData.tableTokens,
-        extractedTokens: request.tokenData.extractedTokens,
-        dataRows: request.dataRows,
-        includeDefaultRow: false,
-        snippetMode: false
-      });
+      // For webview table input, generate a table report; for template/snippet, generate CSV template
+      if (request.fromWebviewTable) {
+        generationDetails = generateTableReport({
+          fragmentIds: request.fragmentIds,
+          sourceFile: sourceFileDisplay,
+          sourceUri: request.sourceUri,
+          headerTokens: request.tokenData.headerTokens,
+          tableTokens: request.tokenData.tableTokens,
+          extractedTokens: request.tokenData.extractedTokens,
+          dataRows: request.dataRows
+        });
+      } else {
+        generationDetails = CsvGenerationService.generateCsv({
+          fragmentIds: request.fragmentIds,
+          sourceFile: sourceFileDisplay,
+          sourceUri: request.sourceUri,
+          headerTokens: request.tokenData.headerTokens,
+          tableTokens: request.tokenData.tableTokens,
+          extractedTokens: request.tokenData.extractedTokens,
+          tokenDefinitions: request.tokenDefinitions,
+          dataRows: request.dataRows,
+          includeDefaultRow: false,
+          snippetMode: false
+        });
+      }
     }
   } catch (detailsError) {
     debugLog('[DEBUG] Unable to build generation details for table injection:', detailsError);
@@ -5441,22 +5679,102 @@ async function generateXmlFromRequest(
 }
 
 /**
+ * Generate a table report for webview table input
+ */
+function generateTableReport(options: {
+  fragmentIds: string[];
+  sourceFile?: string;
+  sourceUri?: string;
+  headerTokens: ParsedToken[];
+  tableTokens: ParsedToken[];
+  extractedTokens: Map<string, string>;
+  dataRows: Array<Record<string, string>>;
+}): string {
+  const lines: string[] = [];
+  
+  lines.push('// Kahua Table Generation Report');
+  lines.push(`// Fragment: ${options.fragmentIds.join(', ')}`);
+  if (options.sourceFile) {
+    lines.push(`// Source XML: ${options.sourceFile}`);
+  }
+  if (options.sourceUri) {
+    lines.push(`// Source XML URI: ${options.sourceUri}`);
+  }
+  lines.push('// ----------------------------------------------------------------');
+  
+  // Add header fields
+  if (options.headerTokens.length > 0) {
+    lines.push('// Header Values:');
+    for (const token of options.headerTokens) {
+      const value = options.extractedTokens.get(token.name) || '';
+      lines.push(`//   ${token.name}: ${value}`);
+    }
+  }
+  
+  lines.push('// ----------------------------------------------------------------');
+  lines.push('// Table Data:');
+  lines.push('//');
+  
+  // Create table header
+  const columnNames = options.tableTokens.map(t => t.name);
+  const columnWidths = columnNames.map((name, idx) => {
+    const maxDataWidth = Math.max(
+      ...options.dataRows.map(row => (row[name] || '').length)
+    );
+    return Math.max(name.length, maxDataWidth, 8);
+  });
+  
+  // Header row
+  const headerRow = columnNames.map((name, idx) => 
+    name.padEnd(columnWidths[idx])
+  ).join(' | ');
+  lines.push(`// ${headerRow}`);
+  
+  // Separator
+  const separator = columnWidths.map(w => '-'.repeat(w)).join('-+-');
+  lines.push(`// ${separator}`);
+  
+  // Data rows
+  for (const row of options.dataRows) {
+    const dataRow = columnNames.map((name, idx) => 
+      (row[name] || '').padEnd(columnWidths[idx])
+    ).join(' | ');
+    lines.push(`// ${dataRow}`);
+  }
+  
+  lines.push('// ----------------------------------------------------------------');
+  lines.push(`// Total Rows: ${options.dataRows.length}`);
+  lines.push('');
+  
+  return lines.join('\n');
+}
+
+/**
  * Convert structured data back to CSV format for generation pipeline
  */
 function convertStructuredDataToCsv(
   headerFields: Record<string, string>,
   dataRows: Record<string, string>[],
-  fragmentDef: any
+  fragmentDef: any,
+  tokenDefinitions?: TokenNameDefinition[]
 ): string {
   const lines: string[] = [];
   
-  // Add header comments
-  if (headerFields.entity) {
-    lines.push(`// Entity Context: ${headerFields.entity}`);
-    lines.push('// Generated from table - entity already selected');
-  }
-  if (headerFields.appname) {
-    lines.push(`// Appname Context: ${headerFields.appname}`);
+  // Add context comments for tokens that affect injection
+  if (tokenDefinitions && tokenDefinitions.length > 0) {
+    for (const tokenDef of tokenDefinitions) {
+      if (!tokenDef.tokenReadPaths) continue;
+      
+      for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+        const typedReadPath = readPath as TokenReadPath;
+        if (typedReadPath.affectsInjection && headerFields[tokenName]) {
+          const displayName = tokenName.charAt(0).toUpperCase() + tokenName.slice(1);
+          lines.push(`// ${displayName} Context: ${headerFields[tokenName]}`);
+        }
+      }
+    }
+    // Add note that values are from table input (not user-selectable)
+    lines.push('// Generated from table - values already provided');
   }
   
   // Add CSV header row (only table columns, not header fields)
@@ -5484,23 +5802,21 @@ async function finalizeGeneratedFragments(
   const derivedSourceUri = result.sourceUri ? vscode.Uri.parse(result.sourceUri) : undefined;
   
   // DEBUG: Log what XML we're receiving
-  console.log('[DEBUG] finalizeGeneratedFragments: XML length:', result.generatedXml.length);
-  console.log('[DEBUG] finalizeGeneratedFragments: XML preview (first 500 chars):', result.generatedXml.substring(0, 500));
-  console.log('[DEBUG] finalizeGeneratedFragments: Contains tokens?', result.generatedXml.includes('{$'));
-  console.log('[DEBUG] finalizeGeneratedFragments: affectingTokens:', Array.from(affectingTokens.entries()));
+  debugLog('[DEBUG] finalizeGeneratedFragments: XML length:', result.generatedXml.length);
+  debugLog('[DEBUG] finalizeGeneratedFragments: XML preview (first 500 chars):', result.generatedXml.substring(0, 500));
+  debugLog('[DEBUG] finalizeGeneratedFragments: Contains tokens?', result.generatedXml.includes('{$'));
+  debugLog('[DEBUG] finalizeGeneratedFragments: affectingTokens:', Array.from(affectingTokens.entries()));
 
   switch (outputTarget.type) {
     case 'newEditor': {
-      const report = buildGenerationReport(
-        [],
-        derivedSourceUri ? getWorkspaceRelativePath(derivedSourceUri) : '(Not Applicable)',
-        result.generationDetails,
-        result.skippedRows
-      );
-      const combinedContent = `${report}\n\nGenerated Fragments:\n${'-'.repeat(70)}\n\n${result.generatedXml}`;
+      // For table webview input, show XML directly without report wrapper
+      const content = result.generationDetails 
+        ? `${result.generationDetails}\n\nGenerated Fragments:\n${'-'.repeat(70)}\n\n${result.generatedXml}`
+        : result.generatedXml;
+      
       const newDocument = await vscode.workspace.openTextDocument({
-        content: combinedContent,
-        language: 'plaintext'
+        content: content,
+        language: 'xml'
       });
       await vscode.window.showTextDocument(newDocument, {
         viewColumn: vscode.ViewColumn.Beside,
@@ -5528,8 +5844,9 @@ async function finalizeGeneratedFragments(
       await openGenerationReport(
         sourceFileResults,
         outputTarget.uri,
-        result.generationDetails ?? result.generatedXml,
-        result.skippedRows
+        result.generationDetails,
+        result.skippedRows,
+        result.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${sourceFileName}`
@@ -5553,8 +5870,9 @@ async function finalizeGeneratedFragments(
       await openGenerationReport(
         selectFileResults,
         outputTarget.uri,
-        result.generationDetails ?? result.generatedXml,
-        result.skippedRows
+        result.generationDetails,
+        result.skippedRows,
+        result.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
@@ -5577,8 +5895,9 @@ async function finalizeGeneratedFragments(
       await openGenerationReport(
         currentFileResults,
         outputTarget.uri,
-        result.generationDetails ?? result.generatedXml,
-        result.skippedRows
+        result.generationDetails,
+        result.skippedRows,
+        result.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
@@ -5592,7 +5911,7 @@ async function finalizeGeneratedFragments(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} copied to clipboard`
       );
       if (result.generationDetails) {
-        await openGenerationReport([], derivedSourceUri, result.generationDetails, result.skippedRows);
+        await openGenerationReport([], derivedSourceUri, result.generationDetails, result.skippedRows, result.generatedXml);
       }
       break;
     }
@@ -5642,14 +5961,25 @@ export class KahuaContextManager {
 
   hasKahuaContext(document: vscode.TextDocument): boolean {
     if (!document || document.languageId !== 'xml') {
-      debugLog(`[KAHUA] hasKahuaContext: false - document=${!!document}, languageId=${document?.languageId}`);
+      debugLog(
+        `[KAHUA] hasKahuaContext: false - document=${!!document}, languageId=${document?.languageId}`
+      );
       return false;
     }
-    
-    const typeId = detectDocumentTypeId(document);
-    const result = Boolean(typeId);
-    debugLog(`[KAHUA] hasKahuaContext: ${result} - typeId=${typeId}, file=${document.uri.fsPath}`);
-    return result;
+
+    // Use cached detection to avoid reparsing large Kahua files twice.
+    const typeId = getOrDetectDocumentType(document);
+    if (typeId) {
+      debugLog(`[KAHUA] hasKahuaContext: true - typeId=${typeId}, file=${document.uri.fsPath}`);
+      return true;
+    }
+
+    // As a fallback, treat any <App> XML as applicable so the menu appears quickly.
+    const fallback = isBasicKahuaFile(document);
+    debugLog(
+      `[KAHUA] hasKahuaContext: fallback=${fallback} - no detected type for ${document.uri.fsPath}`
+    );
+    return fallback;
   }
 
   async updateContextForDocument(document?: vscode.TextDocument): Promise<void> {
@@ -6901,8 +7231,8 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     const documentType = requireDocumentType(currentEditor.document);
     
     const currentRes = currentResource();
-    console.log(`[KAHUA] Current resource path: ${currentRes?.fsPath || 'undefined'}`);
-    console.log(`[KAHUA] Current document path: ${currentEditor.document.uri.fsPath}`);
+    debugLog(`[KAHUA] Current resource path: ${currentRes?.fsPath || 'undefined'}`);
+    debugLog(`[KAHUA] Current document path: ${currentEditor.document.uri.fsPath}`);
     
     // Try to get configuration from current resource first, then fall back to extension workspace
     let config = getKahuaConfig(currentRes || undefined);
@@ -6911,7 +7241,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     
     // If no configuration found in document's workspace, try extension's workspace
     if (tokenDefinitions.length === 0 && fragmentDefinitions.length === 0) {
-      console.log(`[KAHUA] No config in document workspace, trying extension workspace...`);
+      debugLog(`[KAHUA] No config in document workspace, trying extension workspace...`);
       
       // Get extension workspace - try first workspace folder that contains this extension
       const workspaceFolders = vscode.workspace.workspaceFolders || [];
@@ -6926,19 +7256,19 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
       }
       
       if (extensionWorkspace) {
-        console.log(`[KAHUA] Trying extension workspace: ${extensionWorkspace.uri.fsPath}`);
+        debugLog(`[KAHUA] Trying extension workspace: ${extensionWorkspace.uri.fsPath}`);
         config = getKahuaConfig(extensionWorkspace.uri);
         tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
         fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
       } else {
         // Last resort - try global configuration
-        console.log(`[KAHUA] No workspace found, trying global configuration...`);
+        debugLog(`[KAHUA] No workspace found, trying global configuration...`);
         config = getKahuaConfig(undefined);
         tokenDefinitions = config.get<TokenNameDefinition[]>('tokenNameDefinitions') || [];
         fragmentDefinitions = config.get<FragmentDefinition[]>('fragmentDefinitions') || [];
       }
     }
-    console.log(`[KAHUA] Final config: Found ${tokenDefinitions.length} token definitions, ${fragmentDefinitions.length} fragment definitions`);
+    debugLog(`[KAHUA] Final config: Found ${tokenDefinitions.length} token definitions, ${fragmentDefinitions.length} fragment definitions`);
 
     if (tokenDefinitions.length === 0) {
       throw new Error('No token name definitions found. Please configure kahua.tokenNameDefinitions in your settings.');
@@ -7002,44 +7332,42 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
 
     debugLog(`[DEBUG] Total extracted values: ${extractedValues.size}`);
 
-    // Identify entity token if present (header or table token)
-    const entityToken = [...headerTokens, ...tableTokens].find(
-      token => token.name.toLowerCase() === 'entity'
-    );
-    debugLog(`[DEBUG] Found entityToken:`, entityToken?.name);
-    let selectedEntity: string | undefined = undefined;
-    // Always prompt for entity selection when generating new templates - don't use extracted values
-    debugLog(`[DEBUG] selectedEntity: undefined (always prompt for new generation)`);
+    // Identify selection tokens (tokens that require user selection from XML)
+    // These are typically used for entity selection, but could be any selectable element
+    const selectionTokens = tokenDefinitions
+      .filter(def => allTokenReferences.has(def.id))
+      .flatMap(def => {
+        if (!def.tokenReadPaths) return [];
+        return Object.entries(def.tokenReadPaths)
+          .filter(([, readPath]) => readPath.type === 'selection')
+          .map(([tokenName, readPath]) => ({
+            name: tokenName,
+            readPath: readPath as TokenReadPath,
+            tokenDef: def
+          }));
+      });
 
-    debugLog(`[DEBUG] Entity selection conditions: entityToken=${!!entityToken}, selectedEntity=${selectedEntity}, hasXmlContext=${hasXmlContext}`);
-    if (entityToken && sourceXmlDocument) {
-      const referencedTokenDefs = tokenDefinitions.filter(def =>
-        allTokenReferences.has(def.id)
-      );
-      const entityReadPath = referencedTokenDefs
-        .map((def: TokenNameDefinition) => def.tokenReadPaths?.[entityToken.name])
-        .find((readPath?: TokenReadPath) => readPath && readPath.type === 'selection');
+    debugLog(`[DEBUG] Found ${selectionTokens.length} selection token(s):`, selectionTokens.map(t => t.name));
 
-      const attributeName = entityReadPath?.attribute || 'Name';
-      const configuredPath = entityReadPath?.path;
-      let options: Array<{ value: string; context: string }> = [];
+    // Prompt for selection tokens if source XML is available
+    if (sourceXmlDocument && selectionTokens.length > 0) {
+      for (const selectionToken of selectionTokens) {
+        const attributeName = selectionToken.readPath.attribute || 'Name';
+        const configuredPath = selectionToken.readPath.path;
+        let options: Array<{ value: string; context: string }> = [];
 
-      if (configuredPath) {
-        options = extractSelectableValues(sourceXmlDocument, configuredPath, attributeName);
-      }
-
-      if (options.length === 0) {
-        options = extractSelectableValues(sourceXmlDocument, 'EntityDefs/EntityDef', attributeName || 'Name');
-      }
-
-      if (options.length > 0) {
-        const picked = await showValueSelectionPick(entityToken.name, options);
-        if (picked) {
-          extractedValues.set(entityToken.name, picked);
-          selectedEntity = picked;
+        if (configuredPath) {
+          options = extractSelectableValues(sourceXmlDocument, configuredPath, attributeName);
         }
-      } else {
-        debugLog('[DEBUG] No entity options available in source XML document');
+
+        if (options.length > 0) {
+          const picked = await showValueSelectionPick(selectionToken.name, options);
+          if (picked) {
+            extractedValues.set(selectionToken.name, picked);
+          }
+        } else {
+          debugLog(`[DEBUG] No options available for ${selectionToken.name} in source XML document`);
+        }
       }
     }
 
@@ -7058,12 +7386,33 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     }
     templateLines.push(`// Token Template for ${fragmentLabel}:`);
 
-    if (entityToken) {
-      const entityDisplay = selectedEntity || '<Select entity>';
+    // Add context comments for tokens that affect injection
+    const hasAffectingTokens = tokenDefinitions.some(tokenDef => 
+      tokenDef.tokenReadPaths && Object.values(tokenDef.tokenReadPaths).some(rp => rp.affectsInjection)
+    );
+    
+    if (hasAffectingTokens) {
       templateLines.push('// ----------------------------------------------------------------');
-      templateLines.push(`// Entity Context: ${entityDisplay}`);
-      templateLines.push('// All template rows will target this entity. Update this header if you change entities.');
-      templateLines.push('// Smart injection will automatically use this entity for Attributes, Labels, and DataTags.');
+      
+      for (const tokenDef of tokenDefinitions) {
+        if (!tokenDef.tokenReadPaths) continue;
+        
+        for (const [tokenName, readPath] of Object.entries(tokenDef.tokenReadPaths)) {
+          if (readPath.affectsInjection) {
+            const tokenValue = extractedValues.get(tokenName);
+            const displayValue = tokenValue || `<Select ${tokenName}>`;
+            const displayName = tokenName.charAt(0).toUpperCase() + tokenName.slice(1);
+            templateLines.push(`// ${displayName} Context: ${displayValue}`);
+            
+            // Add special guidance for selection-type tokens
+            if (readPath.type === 'selection') {
+              templateLines.push(`// All template rows will target this ${tokenName}. Update this header if you change ${tokenName}s.`);
+              templateLines.push(`// Smart injection will automatically use this ${tokenName} for path resolution.`);
+            }
+          }
+        }
+      }
+      
       templateLines.push('// ----------------------------------------------------------------');
     }
 
@@ -7078,9 +7427,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
 
     if (tableTokens.length > 0) {
       const tableTokenDisplays = tableTokens.map(token => {
-        const extractedValue = token.name === entityToken?.name
-          ? (selectedEntity || extractedValues.get(token.name))
-          : extractedValues.get(token.name);
+        const extractedValue = extractedValues.get(token.name);
         const displayValue = extractedValue || token.defaultValue;
         return displayValue ? `${token.name}:${displayValue}` : token.name;
       });
@@ -7104,17 +7451,9 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
 
     // Add pre-filled data line for table tokens if any were extracted
     if (tableTokens.length > 0) {
-      const hasExtractedTableValues = tableTokens.some(token => {
-        if (entityToken && token.name === entityToken.name) {
-          return Boolean(selectedEntity);
-        }
-        return extractedValues.has(token.name);
-      });
+      const hasExtractedTableValues = tableTokens.some(token => extractedValues.has(token.name));
       if (hasExtractedTableValues) {
         const tableValues = tableTokens.map(token => {
-          if (entityToken && token.name === entityToken.name) {
-            return selectedEntity || '';
-          }
           return extractedValues.has(token.name) ? extractedValues.get(token.name) : '';
         });
         templateLines.push(tableValues.join(','));
@@ -7138,7 +7477,7 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
     if (xmlContextUri && sourceXmlDocument) {
       rememberSourceXmlMapping(newDocument.uri, xmlContextUri);
 
-      // Also store token values that affect injection
+      // Store token values that affect injection (already collected in extractedValues)
       const affectingTokens = new Map<string, string>();
       for (const tokenDef of tokenDefinitions) {
         if (tokenDef.tokenReadPaths) {
@@ -7148,9 +7487,6 @@ async function generateTemplateForFragments(fragmentIds: string[]): Promise<void
             }
           }
         }
-      }
-      if (entityToken && selectedEntity) {
-        affectingTokens.set(entityToken.name, selectedEntity);
       }
       if (affectingTokens.size > 0) {
         injectionAffectingTokens.set(newDocument.uri.toString(), affectingTokens);
@@ -7239,28 +7575,9 @@ function inferFragmentIdsFromDocument(document: vscode.TextDocument): string[] {
     }
   }
 
-  debugLog('[DEBUG] No fragment patterns found, checking for fallback indicators');
-  
-  // Enhanced fallback - look for other indicators
-  for (let i = 0; i < Math.min(10, document.lineCount); i++) {
-    const text = document.lineAt(i).text.trim();
-    
-    // Look for CSV headers that might indicate fragment types
-    if (text.includes('name,type') && text.includes(',')) {
-      debugLog('[DEBUG] Found CSV header suggesting attributes fragment');
-      return ['attributes'];
-    }
-    
-    // Look for other comment patterns that might help
-    if (text.match(/\/\/.*(?:attribute|lookup|tag)/i)) {
-      debugLog(`[DEBUG] Found hint in comment: "${text}"`);
-      if (text.match(/attribute/i)) return ['attributes'];
-      if (text.match(/lookup/i)) return ['lookups'];
-      if (text.match(/tag/i)) return ['datatags'];
-    }
-  }
-
-  debugLog('[DEBUG] No fragment IDs could be inferred');
+  // No fragment pattern found - cannot reliably infer fragment type
+  // Better to return empty and let user specify than to guess incorrectly
+  debugLog('[DEBUG] No fragment IDs could be inferred from document headers');
   return [];
 }
 
@@ -7292,8 +7609,9 @@ async function finalizeGeneratedFragmentsWithTarget(
       await openGenerationReport(
         currentFileResults,
         target.uri,
-        generation.generationDetails ?? generation.generatedXml,
-        generation.skippedRows
+        generation.generationDetails,
+        generation.skippedRows,
+        generation.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into current file`
@@ -7315,8 +7633,9 @@ async function finalizeGeneratedFragmentsWithTarget(
       await openGenerationReport(
         sourceFileResults,
         target.uri,
-        generation.generationDetails ?? generation.generatedXml,
-        generation.skippedRows
+        generation.generationDetails,
+        generation.skippedRows,
+        generation.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into source file ${sourceFileName}`
@@ -7338,8 +7657,9 @@ async function finalizeGeneratedFragmentsWithTarget(
       await openGenerationReport(
         selectFileResults,
         target.uri,
-        generation.generationDetails ?? generation.generatedXml,
-        generation.skippedRows
+        generation.generationDetails,
+        generation.skippedRows,
+        generation.generatedXml
       );
       vscode.window.showInformationMessage(
         `Kahua: Generated fragments for ${fragmentIds.join(', ')} inserted into ${fileName}`
@@ -7352,12 +7672,12 @@ async function finalizeGeneratedFragmentsWithTarget(
       const report = buildGenerationReport(
         [],
         derivedSourceUri ? getWorkspaceRelativePath(derivedSourceUri) : '(Not Applicable)',
-        generation.generationDetails ?? generation.generatedXml,
-        generation.skippedRows
+        generation.generationDetails,
+        generation.skippedRows,
+        generation.generatedXml
       );
-      const combinedContent = `${report}\n\nGenerated Fragments:\n${'-'.repeat(70)}\n\n${generation.generatedXml}`;
       const newDocument = await vscode.workspace.openTextDocument({
-        content: combinedContent,
+        content: report,
         language: 'plaintext'
       });
       await vscode.window.showTextDocument(newDocument, {
@@ -7378,7 +7698,7 @@ async function finalizeGeneratedFragmentsWithTarget(
       );
       setGenerationStatus('Fragments copied to clipboard', true);
       if (generation.generationDetails) {
-        await openGenerationReport([], derivedSourceUri, generation.generationDetails, generation.skippedRows);
+        await openGenerationReport([], derivedSourceUri, generation.generationDetails, generation.skippedRows, generation.generatedXml);
       }
       break;
     }
@@ -7591,7 +7911,6 @@ async function handleSelectionInternal(
         const outputSections: string[] = [];
         const reportSections: string[] = [];
         const skippedRowMessages: string[] = [];
-        const reportSections: string[] = [];
 
         for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
             const group = groups[groupIndex];
@@ -7697,16 +8016,16 @@ async function handleSelectionInternal(
         
         // Extract tokens from template comments (e.g., "// Entity Context: RFI")
         const templateTokens = extractTokensFromTemplateComments(editor.document);
-        console.log('[KAHUA] Template tokens extracted:', templateTokens);
+        debugLog('[KAHUA] Template tokens extracted:', templateTokens);
         for (const [tokenName, tokenValue] of templateTokens) {
-            // Template values override XML values for injection-affecting tokens
+            // Only cache tokens that affect injection
             const affectsInjection = tokenDefinitions.some(tokenDef => 
                 tokenDef.tokenReadPaths?.[tokenName]?.affectsInjection
             );
-            console.log(`[KAHUA] Token ${tokenName}=${tokenValue}, affectsInjection: ${affectsInjection}`);
-            if (affectsInjection || tokenName === 'entity') {
+            debugLog(`[KAHUA] Token ${tokenName}=${tokenValue}, affectsInjection: ${affectsInjection}`);
+            if (affectsInjection) {
                 extractedTokens.set(tokenName, tokenValue);
-                console.log(`[KAHUA] Extracted injection token from template comments: ${tokenName}=${tokenValue}`);
+                debugLog(`[KAHUA] Extracted injection token from template comments: ${tokenName}=${tokenValue}`);
             }
         }
         

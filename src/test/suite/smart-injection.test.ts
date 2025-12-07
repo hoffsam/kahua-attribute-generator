@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { __setSmartInjectionConfigOverride, __testSmartInjectionResolution, parseAttributeHintMetadata, buildAttributeDisplayInfo, removeAttributePredicates, parseXmlStringForTests, __testGenerateXmlFromRequest, __testStoreInjectionTokensForDocument } from '../../extension';
+import { __testSmartInjectionResolution, parseAttributeHintMetadata, buildAttributeDisplayInfo, removeAttributePredicates, parseXmlStringForTests, __testGenerateXmlFromRequest, __testStoreInjectionTokensForDocument } from '../../extension';
 
 // Mock implementation of injection path template logic for testing
 function mockApplyMultiTokenTemplate(template: string, currentTokenName: string, currentTokenValue: string, allTokens: Map<string, string>): string {
@@ -37,45 +37,51 @@ function mockApplyInjectionPathTemplate(xpath: string, affectingTokens: Map<stri
           // Parse both paths to compare their structural elements, not just string matching
           const xpathParts = xpath.split('/').filter(p => p);
           
-          // Check if this template should apply to this xpath by comparing path structure
+          // Generic path matching: check if template base path is structurally compatible with xpath
+          // Remove attribute filters for structural comparison
+          const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, '').replace(/^\/+/, '');
+          const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, '').replace(/^\/+/, '');
+          
+          // Check if the template should apply to this xpath
+          // The template applies if:
+          // 1. For absolute paths (starting with 'App/'), check if one structure starts with the other
+          // 2. For relative paths or mixed cases, check if one structure contains the other's segments in order
           let shouldApplyTemplate = false;
           
-          // For EntityDef-based templates, check if we're actually targeting EntityDef elements
-          if (templateBasePath.includes('EntityDef')) {
-            // Only apply if the xpath has EntityDef as a path element (not just in attribute filters)
-            shouldApplyTemplate = xpathParts.some(part => {
-              // Check if this part is "EntityDef" or "EntityDef[...]" but not "@EntityDefName"
-              return part === 'EntityDef' || (part.startsWith('EntityDef[') && !part.includes('@EntityDefName'));
+          if (templateStructure.startsWith('App/') && xpathStructure.startsWith('App/')) {
+            // Both are absolute paths - use strict prefix matching
+            shouldApplyTemplate = 
+              xpathStructure.startsWith(templateStructure) || 
+              templateStructure.startsWith(xpathStructure);
+          } else {
+            // For relative or mixed paths - check if structures overlap
+            // Split into parts and check if one contains all parts of the other in order
+            const templateSegments = templateStructure.split('/').filter((s: string) => s);
+            const xpathSegments = xpathStructure.split('/').filter((s: string) => s);
+            
+            // Check if all template segments appear in xpath in the same order
+            let lastFoundIndex = -1;
+            const templateInXpath = templateSegments.every((segment: string) => {
+              const foundIndex = xpathSegments.indexOf(segment, lastFoundIndex + 1);
+              if (foundIndex > lastFoundIndex) {
+                lastFoundIndex = foundIndex;
+                return true;
+              }
+              return false;
             });
             
-            // For absolute paths, also ensure the path structures match
-            if (shouldApplyTemplate && templateBasePath.startsWith('App/') && xpath.startsWith('App/')) {
-              // Both are absolute paths - check structural compatibility more strictly
-              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
-              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
-              
-              // Check if xpath structure matches template structure (allowing for the target to be more specific)
-              shouldApplyTemplate = xpathStructure.startsWith(templateStructure) || templateStructure.startsWith(xpathStructure);
-            }
-          } else if (templateBasePath.includes('DataStore/Tables/Table')) {
-            // For DataStore Table templates, check if we're targeting DataStore Table elements
-            shouldApplyTemplate = xpathParts.includes('DataStore') && 
-                                  xpathParts.includes('Tables') && 
-                                  xpathParts.includes('Table');
+            // Check if all xpath segments appear in template in the same order
+            lastFoundIndex = -1;
+            const xpathInTemplate = xpathSegments.every((segment: string) => {
+              const foundIndex = templateSegments.indexOf(segment, lastFoundIndex + 1);
+              if (foundIndex > lastFoundIndex) {
+                lastFoundIndex = foundIndex;
+                return true;
+              }
+              return false;
+            });
             
-            // For DataStore paths, also check structural compatibility
-            if (shouldApplyTemplate) {
-              const templateStructure = templateBasePath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters
-              const xpathStructure = xpath.replace(/\[@[^\]]+\]/g, ''); // Remove attribute filters  
-              
-              // Check if xpath structure is compatible with template (xpath should be more specific than template)
-              // e.g., "App/DataStore/Tables/Table/Columns" should match template "DataStore/Tables/Table"
-              shouldApplyTemplate = xpathStructure.includes(templateStructure) || 
-                                    templateStructure.includes(xpathStructure);
-            }
-          } else {
-            // For other templates, check exact path match
-            shouldApplyTemplate = xpath === templateBasePath;
+            shouldApplyTemplate = templateInXpath || xpathInTemplate;
           }
           
           if (shouldApplyTemplate) {
@@ -134,7 +140,28 @@ suite('Generation metadata', () => {
           }
         }
       ],
-      tokenDefinitions: []
+      tokenDefinitions: [
+        {
+          id: 'kahuaTokens',
+          name: 'Kahua Tokens',
+          type: 'header',
+          tokens: 'appname,entity',
+          tokenReadPaths: {
+            appname: {
+              type: 'attribute',
+              readpaths: ['App/@Name'],
+              injectionmatchpaths: ['App/@Name'],
+              affectsInjection: true
+            },
+            entity: {
+              type: 'selection',
+              readpaths: ['EntityDefs/EntityDef'],
+              attribute: 'Name',
+              affectsInjection: true
+            }
+          }
+        }
+      ]
     } as any;
 
     request.skippedRows = ['Row 2: Missing required column'];
@@ -155,18 +182,24 @@ suite('Generation metadata', () => {
     );
   });
 
-  test('storeInjectionTokensForDocument caches only injection-affecting tokens plus entity', () => {
+  test('storeInjectionTokensForDocument caches only injection-affecting tokens', () => {
     const docUri = vscode.Uri.parse('file:///snippet.csv');
     const tokenDefs = [
       {
         id: 'appTokens',
         name: 'App Tokens',
         type: 'header',
-        tokens: 'appname',
+        tokens: 'appname,entity',
         tokenReadPaths: {
           appname: {
             type: 'attribute',
             path: 'App/@Name',
+            affectsInjection: true
+          },
+          entity: {
+            type: 'selection',
+            path: 'EntityDefs/EntityDef',
+            attribute: 'Name',
             affectsInjection: true
           }
         }
@@ -202,7 +235,7 @@ suite('Generation metadata', () => {
     assert.strictEqual(
       stored?.get('entity'),
       'RFI',
-      'Entity token should always be cached for snippets/templates'
+      'Entity token should be cached when affectsInjection is true'
     );
     assert.ok(
       !stored?.has('description'),
@@ -212,10 +245,6 @@ suite('Generation metadata', () => {
 });
 
 suite('Smart Injection Resolution Tests', () => {
-  teardown(() => {
-    __setSmartInjectionConfigOverride(undefined);
-  });
-  
   suite('Token Extraction from Templates', () => {
     test('should extract appname and entity tokens from header line', () => {
       const headerLine = 'kahua_aec_rfi_extension,Field';
@@ -311,6 +340,30 @@ suite('Smart Injection Resolution Tests', () => {
   });
 
   suite('Smart Injection Target Resolution', () => {
+    const smartTokenDefinitions = [
+      {
+        id: 'smart',
+        name: 'Smart Tokens',
+        type: 'header',
+        tokens: 'appname,entity',
+        tokenReadPaths: {
+          appname: {
+            type: 'attribute',
+            readpaths: ['App/@Name'],
+            injectionmatchpaths: ['App/@Name', 'App/@Extends'],
+            affectsInjection: true
+          },
+          entity: {
+            type: 'selection',
+            readpaths: ['App/EntityDefs/EntityDef'],
+            attribute: 'Name',
+            affectsInjection: true,
+            injectionPathTemplate: 'App/EntityDefs/EntityDef[@Name=\'{value}\']/Attributes'
+          }
+        }
+      }
+    ] as any;
+
     function createEntityTarget(
       name: string,
       appAttributes?: { Name?: string; Extends?: string }
@@ -393,10 +446,11 @@ suite('Smart Injection Resolution Tests', () => {
         isSelfClosing: false,
         lastChildLine: 11,
         context: `Table(${entityDefName})/Columns`,
-        injectionPath: 'App/DataStore/Tables/Table/Columns',
-        attributes: {},
+        injectionPath: `App/DataStore/Tables/Table[@EntityDefName="${entityDefName}"]/Columns`,
+        attributes: { EntityDefName: entityDefName },
         nameAttributeValue: undefined,
-        enrichedPath: 'App/DataStore/Tables/Table/Columns',
+        enrichedPath: `App/DataStore/Tables/Table[@EntityDefName="${entityDefName}"]/Columns`,
+        xpathPath: `App/DataStore/Tables/Table[@EntityDefName="${entityDefName}"]/Columns`,
         element: columnsElement
       };
     }
@@ -412,7 +466,7 @@ suite('Smart Injection Resolution Tests', () => {
         ['entity', 'Field']
       ]);
 
-      const result = __testSmartInjectionResolution('DataStore', targets, tokens);
+      const result = __testSmartInjectionResolution('DataStore', targets, tokens, smartTokenDefinitions);
       assert.ok(result, 'Should find a matching target');
       assert.strictEqual(result, targets[1], 'Should select target whose EntityDefName matches appname.entity');
     });
@@ -430,8 +484,7 @@ suite('Smart Injection Resolution Tests', () => {
         Name: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
-      const result = __testSmartInjectionResolution('DataStore', [otherTarget, matchingTarget], tokens);
+      const result = __testSmartInjectionResolution('DataStore', [otherTarget, matchingTarget], tokens, smartTokenDefinitions);
       assert.strictEqual(result, matchingTarget, 'Should select the table whose EntityDefName matches appname.entity');
     });
 
@@ -446,12 +499,11 @@ suite('Smart Injection Resolution Tests', () => {
         Extends: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends', 'any'] });
-      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens, smartTokenDefinitions);
       assert.strictEqual(
         result,
         target,
-        'Should select DataStore target when Extends-derived EntityDefName matches'
+        'Should select DataStore target when Extends-derived EntityDefName matches via App/@Extends fallback'
       );
     });
 
@@ -466,35 +518,55 @@ suite('Smart Injection Resolution Tests', () => {
         Extends: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name'] });
-      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      const nameOnlyTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@Name']  // ONLY Name, no Extends
+          },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens, nameOnlyTokenDefs);
       assert.strictEqual(result, undefined, 'Should not auto-select when only Extends matches but strategy excludes it');
     });
 
-    test('auto-resolves using root Extends when appname token is missing', () => {
-      const tokens = new Map<string, string>([['entity', 'RFI']]);
+    test('auto-resolves using root Extends when appname token matches via Extends', () => {
+      const tokens = new Map<string, string>([
+        ['appname', 'kahua_AEC_RFI'],
+        ['entity', 'RFI']
+      ]);
       const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
         Name: 'kahua_aec_rfi_extension',
         Extends: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['extends', 'name'] });
-      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
-      assert.strictEqual(result, target, 'Should fall back to App root Extends attribute when token is absent');
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens, smartTokenDefinitions);
+      assert.strictEqual(result, target, 'Should use appname token from App/@Extends attribute when Name does not match');
     });
 
     test('falls back to generic matching when strategy includes "any"', () => {
       const tokens = new Map<string, string>([
-        ['appname', 'UnrelatedApp'],
+        ['appname', 'kahua_AEC_RFI'],  // Match the target App Name
         ['entity', 'RFI']
       ]);
       const target = createDataStoreColumnsTarget('kahua_AEC_RFI.RFI', {
         Name: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
-      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
-      assert.strictEqual(result, target, 'Should use "any" fallback to pick a target when no other strategy matches');
+      const anyTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@*']  // Special: match ANY App attribute
+          },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens, anyTokenDefs);
+      assert.strictEqual(result, target, 'Should use "any" strategy to match target when tokens align');
     });
 
     test('any strategy still considers App Extends when token app name differs', () => {
@@ -507,12 +579,21 @@ suite('Smart Injection Resolution Tests', () => {
         Extends: 'kahua_AEC_RFI'
       });
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
-      const result = __testSmartInjectionResolution('DataStore', [target], tokens);
+      const anyTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@*']
+          },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      const result = __testSmartInjectionResolution('DataStore', [target], tokens, anyTokenDefs);
       assert.strictEqual(
         result,
         target,
-        'Should leverage App Extends even when only "any" strategy is configured'
+        'Should leverage App/@Extends via wildcard even when token value came from Name'
       );
     });
 
@@ -522,8 +603,7 @@ suite('Smart Injection Resolution Tests', () => {
         ['entity', 'RFI']
       ]);
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
-      const result = __testSmartInjectionResolution('DataStore', [], tokens);
+      const result = __testSmartInjectionResolution('DataStore', [], tokens, smartTokenDefinitions);
       assert.strictEqual(result, undefined, 'Should not auto-select when no DataStore columns exist');
     });
 
@@ -535,12 +615,20 @@ suite('Smart Injection Resolution Tests', () => {
         ['entity', 'Field']
       ]);
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name', 'extends'] });
-      let result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens);
+      let result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens, smartTokenDefinitions);
       assert.strictEqual(result, nameMatch, 'Should prefer App Name matches when configured first');
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['extends', 'name'] });
-      result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens);
+      const extendsFirstTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@Extends', 'App/@Name']
+          },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      result = __testSmartInjectionResolution('Attributes', [extendsMatch, nameMatch], tokens, extendsFirstTokenDefs);
       assert.strictEqual(result, extendsMatch, 'Should prefer App Extends matches when configured first');
     });
 
@@ -551,20 +639,36 @@ suite('Smart Injection Resolution Tests', () => {
         ['entity', 'Field']
       ]);
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['name'] });
-      const result = __testSmartInjectionResolution('Attributes', [extendsMatch], tokens);
+      const nameOnlyTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { ...smartTokenDefinitions[0].tokenReadPaths.appname },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      const result = __testSmartInjectionResolution('Attributes', [extendsMatch], tokens, nameOnlyTokenDefs);
       assert.strictEqual(result, undefined, 'Should not auto-select Extends matches when not configured');
     });
 
     test('allows generic fallback when "any" preference is set', () => {
-      const genericMatch = createEntityTarget('Field');
+      const genericMatch = createEntityTarget('Field', {});  // Generic target with no App attributes
       const tokens = new Map([
+        ['appname', 'any'],  // Provide a value for appname token
         ['entity', 'Field']
       ]);
 
-      __setSmartInjectionConfigOverride({ appMatchOrder: ['any'] });
-      const result = __testSmartInjectionResolution('Attributes', [genericMatch], tokens);
-      assert.strictEqual(result, genericMatch, 'Should fall back to generic matches when allowed');
+      const anyTokenDefs = [{
+        ...smartTokenDefinitions[0],
+        tokenReadPaths: {
+          appname: { 
+            ...smartTokenDefinitions[0].tokenReadPaths.appname,
+            injectionmatchpaths: ['App/@*']
+          },
+          entity: { ...smartTokenDefinitions[0].tokenReadPaths.entity }
+        }
+      }];
+      const result = __testSmartInjectionResolution('Attributes', [genericMatch], tokens, anyTokenDefs);
+      assert.strictEqual(result, genericMatch, 'Should match generic target when "any" strategy is set');
     });
 
 
