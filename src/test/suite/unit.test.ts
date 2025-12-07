@@ -122,7 +122,7 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				);
 			});
 
-			test('throws when a row omits a required table token', () => {
+			test('skips rows when required table token is missing', () => {
 				const request: any = {
 					tokenData: {
 						headerTokens: parseTokenDefinition('appname'),
@@ -135,10 +135,11 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 					selectedFragmentDefs: []
 				};
 
-				assert.throws(
-					() => buildRowTokenDataFromRequest(request),
-					/Row 1: Missing required tokens/
-				);
+				const result = buildRowTokenDataFromRequest(request);
+				assert.strictEqual(result.rows.length, 0, 'Should have no processed rows');
+				assert.strictEqual(result.skippedRows.length, 1, 'Should have 1 skipped row');
+				assert.strictEqual(result.skippedRows[0].rowNumber, 1);
+				assert.deepStrictEqual(result.skippedRows[0].missingTokens, ['name']);
 			});
 
 			test('returns row data when all required tokens are present', () => {
@@ -155,9 +156,10 @@ suite('Kahua Attribute Generator Unit Tests', () => {
 				};
 
 				const result = buildRowTokenDataFromRequest(request);
-				assert.strictEqual(result.length, 1);
-				assert.strictEqual(result[0].raw.appname, 'TestApp');
-				assert.strictEqual(result[0].raw.name, 'Field1');
+				assert.strictEqual(result.rows.length, 1);
+				assert.strictEqual(result.skippedRows.length, 0);
+				assert.strictEqual(result.rows[0].raw.appname, 'TestApp');
+				assert.strictEqual(result.rows[0].raw.name, 'Field1');
 			});
 		});
 

@@ -378,7 +378,7 @@
               },
               "tokens": {
                 "type": "string",
-                "description": "Comma-separated list of token names. Format: 'name,type' or 'name:DefaultValue,type:DefaultValue'"
+                "description": "Comma-separated list of token names. Format: 'name,type' or 'name:DefaultValue,type:DefaultValue'. Add '!' suffix to mark as required (e.g., 'name!,type'). Rows with missing required tokens will be skipped during generation and reported."
               },
               "tokenReadPaths": {
                 "type": "object",

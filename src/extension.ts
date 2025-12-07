@@ -368,6 +368,7 @@ class CsvGenerationService {
     includeDefaultRow?: boolean;
     snippetMode?: boolean;
     tabStopStartIndex?: number;
+    skippedRows?: SkippedRowInfo[];
   }): string {
     const lines: string[] = [];
     
@@ -503,6 +504,16 @@ class CsvGenerationService {
         // Regular template with defaults
         const defaultValues = options.tableTokens.map(token => token.defaultValue || '');
         lines.push(defaultValues.join(','));
+      }
+    }
+    
+    // Report skipped rows if any
+    if (options.skippedRows && options.skippedRows.length > 0) {
+      lines.push('');
+      lines.push(`// SKIPPED ROWS: ${options.skippedRows.length}`);
+      lines.push('// The following rows were skipped due to missing required tokens:');
+      for (const skipped of options.skippedRows) {
+        lines.push(`//   Row ${skipped.rowNumber}: Missing ${skipped.missingTokens.join(', ')}`);
       }
     }
     
@@ -676,6 +687,12 @@ export interface GeneratedFragmentResult {
 interface RowTokenData {
   clean: Record<string, string>;
   raw: Record<string, string>;
+}
+
+interface SkippedRowInfo {
+  rowNumber: number;
+  missingTokens: string[];
+  rowData: Record<string, string>;
 }
 
 interface AttributeDisplayHint {
@@ -5688,7 +5705,7 @@ async function generateXmlFromRequest(
   const applyFormatting = config.get<boolean>('formatXmlOutput') === true;
   const suppressWarnings = config.get<boolean>('suppressInvalidConditionWarnings') || false;
 
-  const rowTokenData = buildRowTokenDataFromRequest(request);
+  const { rows: rowTokenData, skippedRows } = buildRowTokenDataFromRequest(request);
 
   const renderResult = renderFragmentSectionsFromRows(
     request.selectedFragmentDefs,
@@ -5730,7 +5747,8 @@ async function generateXmlFromRequest(
           headerTokens: request.tokenData.headerTokens,
           tableTokens: request.tokenData.tableTokens,
           extractedTokens: request.tokenData.extractedTokens,
-          dataRows: request.dataRows
+          dataRows: request.dataRows,
+          skippedRows
         });
       } else {
         generationDetails = CsvGenerationService.generateCsv({
@@ -5743,7 +5761,8 @@ async function generateXmlFromRequest(
           tokenDefinitions: request.tokenDefinitions,
           dataRows: request.dataRows,
           includeDefaultRow: false,
-          snippetMode: false
+          snippetMode: false,
+          skippedRows
         });
       }
     }
@@ -5773,6 +5792,7 @@ function generateTableReport(options: {
   tableTokens: ParsedToken[];
   extractedTokens: Map<string, string>;
   dataRows: Array<Record<string, string>>;
+  skippedRows?: SkippedRowInfo[];
 }): string {
   const lines: string[] = [];
   
@@ -5828,6 +5848,17 @@ function generateTableReport(options: {
   
   lines.push('// ----------------------------------------------------------------');
   lines.push(`// Total Rows: ${options.dataRows.length}`);
+  
+  // Report skipped rows if any
+  if (options.skippedRows && options.skippedRows.length > 0) {
+    lines.push('//');
+    lines.push(`// SKIPPED ROWS: ${options.skippedRows.length}`);
+    lines.push('// The following rows were skipped due to missing required tokens:');
+    for (const skipped of options.skippedRows) {
+      lines.push(`//   Row ${skipped.rowNumber}: Missing ${skipped.missingTokens.join(', ')}`);
+    }
+  }
+  
   lines.push('');
   
   return lines.join('\n');
@@ -6943,8 +6974,9 @@ function renderFragmentSectionsFromRows(
   return { sections, warnings };
 }
 
-export function buildRowTokenDataFromRequest(request: GenerationRequest): RowTokenData[] {
+export function buildRowTokenDataFromRequest(request: GenerationRequest): { rows: RowTokenData[], skippedRows: SkippedRowInfo[] } {
   const rows: RowTokenData[] = [];
+  const skippedRows: SkippedRowInfo[] = [];
   const headerTokenValues = new Map<string, string>();
 
   for (const headerToken of request.tokenData.headerTokens) {
@@ -6957,7 +6989,8 @@ export function buildRowTokenDataFromRequest(request: GenerationRequest): RowTok
     throw new Error(`Missing required header tokens: ${headerMissing.join(', ')}`);
   }
 
-  for (const dataRow of request.dataRows) {
+  for (let i = 0; i < request.dataRows.length; i++) {
+    const dataRow = request.dataRows[i];
     const clean: Record<string, string> = {};
     const raw: Record<string, string> = {};
 
@@ -6985,13 +7018,18 @@ export function buildRowTokenDataFromRequest(request: GenerationRequest): RowTok
       ...collectMissingRequiredTokens(request.tokenData.tableTokens, tokenName => raw[tokenName])
     ];
     if (missingTokens.length > 0) {
-      throw new Error(`Row ${rows.length + 1}: Missing required tokens (${missingTokens.join(', ')})`);
+      skippedRows.push({
+        rowNumber: i + 1,
+        missingTokens,
+        rowData: raw
+      });
+      continue; // Skip this row instead of throwing
     }
 
     rows.push({ clean, raw });
   }
 
-  return rows;
+  return { rows, skippedRows };
 }
 
 /**
