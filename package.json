@@ -314,7 +314,7 @@
               "id": "appname",
               "name": "App Name Header",
               "type": "header",
-              "tokens": "appname,entity:Field",
+              "tokens": "appname!,entity!:Field",
               "tokenReadPaths": {
                 "appname": {
                   "type": "attribute",
@@ -342,19 +342,19 @@
               "id": "attributes",
               "name": "Attribute Tokens",
               "type": "table",
-              "tokens": "name,type:Text,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
+              "tokens": "name!,type:Text,visualtype:TextBox,label,descriptionlabel,linkedEntityDef"
             },
             {
               "id": "lookupheader",
               "name": "Lookup Header Tokens",
               "type": "header",
-              "tokens": "entity,listname"
+              "tokens": "entity!,listname!"
             },
             {
               "id": "lookups",
               "name": "Lookup Tokens",
               "type": "table",
-              "tokens": "value,label"
+              "tokens": "value!,label"
             }
           ],
           "items": {
